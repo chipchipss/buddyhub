@@ -273,10 +273,11 @@ func TestRunCheckinDoesNotTriggerTravel(t *testing.T) {
 // TestNextWakeTravelIndependent 旅行有独立时点，与签到互不影响。
 func TestNextWakeTravelIndependent(t *testing.T) {
 	s := New(Config{
-		CheckinHours:   []int{21},
-		TravelHours:    []int{9},
-		ActivityHours:  []int{10},
-		KeepaliveHours: []int{22},
+		CheckinHours:       []int{21},
+		TravelHours:        []int{9},
+		ActivityHours:      []int{10},
+		KeepaliveHours:     []int{22},
+		ExtCheckinDisabled: true, // ext 槽位与本测试无关，显式隔离
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, time.Local); !at.Equal(want) {
@@ -290,10 +291,11 @@ func TestNextWakeTravelIndependent(t *testing.T) {
 // TestNextWakeActivityIndependent 活跃上报有独立时点。
 func TestNextWakeActivityIndependent(t *testing.T) {
 	s := New(Config{
-		CheckinHours:   []int{21},
-		TravelHours:    []int{9},
-		ActivityHours:  []int{10},
-		KeepaliveHours: []int{22},
+		CheckinHours:       []int{21},
+		TravelHours:        []int{9},
+		ActivityHours:      []int{10},
+		KeepaliveHours:     []int{22},
+		ExtCheckinDisabled: true, // ext 槽位与本测试无关，显式隔离
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 9, 30, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 10, 0, 0, 0, time.Local); !at.Equal(want) {
@@ -328,10 +330,11 @@ func TestNextWakeTravelDisabled(t *testing.T) {
 // TestNextWakeActivityDisabled 活跃上报禁用后排程里不再有活跃时点。
 func TestNextWakeActivityDisabled(t *testing.T) {
 	s := New(Config{
-		CheckinHours:     []int{9, 21},
-		ActivityHours:    []int{10},
-		ActivityDisabled: true,
-		KeepaliveHours:   []int{22},
+		CheckinHours:       []int{9, 21},
+		ActivityHours:      []int{10},
+		ActivityDisabled:   true,
+		KeepaliveHours:     []int{22},
+		ExtCheckinDisabled: true, // ext 槽位与本测试无关，显式隔离
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 9, 30, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 11, 21, 0, 0, 0, time.Local); !at.Equal(want) {
@@ -366,15 +369,16 @@ func TestCheckinDisabledTravelStillRuns(t *testing.T) {
 // TestAllFourDisabledNoSpin 四类任务全禁用：Run 不空转。
 func TestAllFourDisabledNoSpin(t *testing.T) {
 	s := New(Config{
-		CheckinDisabled:   true,
-		TravelDisabled:    true,
-		ActivityDisabled:  true,
-		KeepaliveDisabled: true,
-		BlackcatDisabled:  true,
-		CheckinHours:      []int{9, 21},
-		TravelHours:       []int{9},
-		ActivityHours:     []int{10},
-		KeepaliveHours:    []int{22},
+		CheckinDisabled:    true,
+		TravelDisabled:     true,
+		ActivityDisabled:   true,
+		KeepaliveDisabled:  true,
+		BlackcatDisabled:   true,
+		ExtCheckinDisabled: true,
+		CheckinHours:       []int{9, 21},
+		TravelHours:        []int{9},
+		ActivityHours:      []int{10},
+		KeepaliveHours:     []int{22},
 	})
 	at, kinds := s.nextWake(time.Now())
 	if !at.IsZero() || len(kinds) != 0 {

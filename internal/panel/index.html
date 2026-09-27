@@ -521,7 +521,64 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </div>
         <div id="qcList"></div>
       </div>
-    </section>
+      <div class="box" id="loomyBox">
+        <header>
+          <h3>Loomy 新手之旅（讯飞） <span class="hint">8 项任务纯 API 直调点亮 · 总计 +10000 积分</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="loomySummary"></span>
+          <button class="xs" id="btnLoomyCheckin" title="触发每日赠送额度（幂等，重复点击无副作用）">每日签到</button>
+          <button class="xs" id="btnLoomyCredits" title="查询永久积分与每日赠送池余额">余额</button>
+          <button class="xs" id="btnLoomyRefresh">刷新</button>
+          <button class="xs primary" id="btnLoomyRunAll">一键自动完成</button>
+        </header>
+        <div class="state" id="loomyState"><span class="dots">加载中</span></div>
+        <div id="loomyContent" hidden style="padding: 14px 16px;">
+          <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap;">
+            <div style="flex: 1; min-width: 200px;">
+              <div style="font-weight: 600; font-size: 13.5px;" id="loomyAcctTitle">Loomy 客户端</div>
+              <div style="font-size: 11.5px; color: var(--ink-3); font-family: var(--mono);" id="loomyAcctSub">—</div>
+            </div>
+            <span class="tag ok" id="loomyPointsBadge">0 / 10000 积分</span>
+            <div class="bar" style="width: 120px;"><i id="loomyBarFill" style="width: 0%;"></i></div>
+          </div>
+          <div id="loomyCreditBox" hidden style="background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: 12.5px; color: var(--ink-2);"></div>
+          <div id="loomyGrid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px;"></div>
+        </div>
+      </div>
+      <div class="box" id="extBox">
+        <header>
+          <h3>外部积分账号 <span class="hint">LobsterAI · 小浣熊 · Qoder · 华为云 —— 每日积分自动领取</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="extSummary"></span>
+          <button class="xs" id="btnExtRefresh">刷新</button>
+          <button class="xs primary" id="btnExtCheckinAll">一键签到全部</button>
+        </header>
+        <div class="state" id="extState"><span class="dots">加载中</span></div>
+        <div id="extContent" hidden style="padding: 14px 16px;">
+          <div id="extGrid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px;"></div>
+          <details style="margin-top: 12px; border-top: 1px solid var(--line-soft); padding-top: 10px;">
+            <summary style="cursor: pointer; font-size: 12.5px; color: var(--ink-3);">手工添加账号（粘贴凭据 JSON）</summary>
+            <div style="display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center;">
+              <select id="extProvider" style="padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line-soft); background: var(--surface-2); color: var(--ink-1);">
+                <option value="lobsterai">LobsterAI（有道）</option>
+                <option value="raccoon">小浣熊（商汤）</option>
+                <option value="qoder">Qoder（阿里）</option>
+                <option value="codearts">CodeArts（华为云）</option>
+              </select>
+              <input type="text" id="extIdInput" placeholder="账号 ID（uid/手机号尾号/昵称）" style="flex: 1; min-width: 160px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line-soft); background: var(--surface-2); color: var(--ink-1);">
+              <input type="text" id="extCredInput" placeholder='凭据 JSON，如 {"access_token":"..."}' style="flex: 2; min-width: 240px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line-soft); background: var(--surface-2); color: var(--ink-1); font-family: var(--mono); font-size: 11.5px;">
+              <button class="xs primary" id="btnExtAdd">添加</button>
+            </div>
+            <div style="font-size: 11.5px; color: var(--ink-3); margin-top: 6px;" id="extAddHint">
+              LobsterAI: {"access_token":"…","refresh_token":"…","uuid":"…","first_key_from":"…"} ·
+              小浣熊: {"access_token":"…","refresh_token":"…"} ·
+              Qoder: {"access_token":"…","machine_id":"…"} ·
+              CodeArts: {"access_key_id":"…","secret_access_key":"…","security_token":"…"}
+            </div>
+          </details>
+        </div>
+      </div>
+     </section>
 
     <!-- 模型与档位 -->
     <section class="view" id="view-models" hidden>
@@ -872,6 +929,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div class="tabs" id="addTabs">
         <button class="tab on" data-tab="login">浏览器登录</button>
         <button class="tab" data-tab="import">导入 JSON</button>
+        <button class="tab" data-tab="loomy">Loomy</button>
       </div>
     </header>
     <div class="body">
@@ -900,6 +958,33 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <input type="file" id="importFile" accept=".json" style="margin-bottom:8px">
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
+      </div>
+      <!-- Loomy -->
+      <div id="addTabLoomy" class="tab-panel" hidden>
+        <div class="hint" style="margin-bottom:12px">支持一键读取本机已登录的 Loomy 客户端，或手动填入 Session Token。</div>
+        <div style="display:flex; gap:8px; margin-bottom:12px">
+          <button type="button" class="xs primary" id="btnDetectLoomy">自动检测本机客户端</button>
+          <button type="button" class="xs" id="btnToggleManualLoomy">手动输入 Token</button>
+        </div>
+        <div id="loomyDetectBox" style="background:var(--surface-2); border:1px solid var(--line-soft); border-radius:8px; padding:12px; margin-bottom:10px" hidden>
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px">
+            <span style="font-weight:600; font-size:13px" id="loomyDetectName">Loomy 客户端</span>
+            <span class="tag ok" id="loomyDetectScore">0 / 10000 积分</span>
+          </div>
+          <div style="font-size:12px; color:var(--ink-3); margin-bottom:10px" id="loomyDetectDesc">—</div>
+          <div style="display:flex; gap:8px">
+            <button type="button" class="xs primary" id="btnLoomyModalAutoAll">一键自动完成所有任务</button>
+          </div>
+        </div>
+        <div id="loomyManualBox" hidden style="display:flex; flex-direction:column; gap:10px; margin-bottom:10px">
+          <label class="fld"><span class="lb">Loomy Session Token</span>
+            <input type="text" id="loomyTokenInput" placeholder="从 userData/auth-session.json 复制 session 字段">
+          </label>
+          <div style="display:flex; gap:8px">
+            <button type="button" class="xs primary" id="btnSubmitLoomyToken">验证并保存</button>
+          </div>
+        </div>
+        <div id="loomyModalState" class="state" hidden></div>
       </div>
     </div>
     <footer>

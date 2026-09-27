@@ -137,7 +137,7 @@ function go(v) {
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
-  if (v === 'taskscenter') reattachQueueView();
+  if (v === 'taskscenter') { reattachQueueView(); if (typeof loadLoomyStatus === 'function') loadLoomyStatus(true); }
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
 go((location.hash || '#accounts').slice(1) in TITLES ? (location.hash || '#accounts').slice(1) : 'accounts');
@@ -549,6 +549,8 @@ function switchAddTab(tab) {
   document.querySelectorAll('#addTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   $('addTabLogin').hidden = tab !== 'login';
   $('addTabImport').hidden = tab !== 'import';
+  $('addTabLoomy').hidden = tab !== 'loomy';
+  if (tab === 'loomy') detectLoomyClient();
 }
 document.querySelectorAll('#addTabs .tab').forEach(b => {
   b.onclick = () => switchAddTab(b.dataset.tab);
@@ -1586,3 +1588,243 @@ async function loadPackages() {
 }
 
 if ($('btnPk')) $('btnPk').onclick = loadPackages;
+
+/* ── Loomy 新手之旅任务（讯飞） ─────────────────────────────────────── */
+async function loadLoomyStatus(quiet) {
+  const st = $('loomyState'), content = $('loomyContent');
+  if (!st || !content) return;
+  if (!quiet) { st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">查询中</span>'; content.hidden = true; }
+  try {
+    const d = await api('loomy/status');
+    const s = d.status || {};
+    if (!d.has_account) {
+      st.hidden = false; st.className = 'state';
+      st.textContent = d.message || '未检测到本地 Loomy 客户端登录态';
+      content.hidden = true;
+      $('loomySummary').textContent = '未检测到客户端';
+      return;
+    }
+    st.hidden = true; content.hidden = false;
+    $('loomyAcctTitle').textContent = s.userid ? 'Loomy · ' + s.userid : 'Loomy 客户端';
+    $('loomyAcctSub').textContent = '手机: ' + (s.phone_masked || '已登录') + ' · 缓存: ' + (s.user_data_dir || '本地');
+    $('loomyPointsBadge').textContent = s.earned + ' / ' + s.total + ' 积分';
+    $('loomyBarFill').style.width = Math.min(100, Math.round((s.earned / (s.total || 10000)) * 100)) + '%';
+    $('loomySummary').textContent = s.earned >= s.total ? '新手任务全部完成 🎉' : '已达成 ' + s.earned + ' / ' + s.total + ' 分';
+    const items = s.items || [];
+    $('loomyGrid').innerHTML = items.map(it => {
+      const ok = it.completed;
+      const tagCls = ok ? 'tag ok' : 'tag mute';
+      const icon = ok ? '✓ 已完成' : '○ 待完成';
+      return '<div style="background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">' +
+        '<div>' +
+          '<div style="font-size: 11px; color: var(--ink-3); margin-bottom: 2px;">' + esc(it.category) + '</div>' +
+          '<div style="font-size: 13px; font-weight: 550;">' + esc(it.title) + '</div>' +
+        '</div>' +
+        '<div style="display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: none;">' +
+          '<span class="' + tagCls + '" style="font-size: 11px;">' + icon + '</span>' +
+          '<span style="font-family: var(--mono); font-size: 11px; color: var(--accent);">+' + it.points + '</span>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  } catch (e) {
+    st.hidden = false; st.className = 'state err'; st.textContent = e.message;
+    content.hidden = true;
+  }
+}
+if ($('btnLoomyRefresh')) $('btnLoomyRefresh').onclick = () => loadLoomyStatus(false);
+if ($('btnLoomyRunAll')) $('btnLoomyRunAll').onclick = async () => {
+  const b = $('btnLoomyRunAll');
+  b.disabled = true; b.textContent = '执行中…';
+  try {
+    const r = await api('loomy/complete_all', { method: 'POST' });
+    const cnt = (r.completed || []).length;
+    toast(cnt > 0 ? 'Loomy 任务自动完成：新点亮 ' + cnt + ' 项，积分已达 ' + (r.status && r.status.earned ? r.status.earned : 10000) : '所有 Loomy 任务已是完成态', 'ok');
+    loadLoomyStatus(true);
+  } catch (e) { toast(e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = '一键自动完成'; }
+};
+if ($('btnLoomyCheckin')) $('btnLoomyCheckin').onclick = async () => {
+  const b = $('btnLoomyCheckin');
+  b.disabled = true; b.textContent = '签到中…';
+  try {
+    const r = await api('loomy/checkin', { method: 'POST' });
+    const c = r.checkin || {};
+    toast(c.message || (c.already_processed ? '今日额度已初始化' : '每日额度已激活'), c.already_processed ? 'ok' : 'ok');
+    loadLoomyStatus(true);
+    loadLoomyCredits(true);
+  } catch (e) { toast(e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = '每日签到'; }
+};
+async function loadLoomyCredits(quiet) {
+  const box = $('loomyCreditBox');
+  if (!box) return;
+  if (!quiet) box.hidden = false;
+  try {
+    const d = await api('loomy/credits');
+    if (!d.has_account) { box.hidden = true; return; }
+    if (d.error) { box.hidden = false; box.textContent = '积分查询失败: ' + d.error; return; }
+    const c = d.credits || {};
+    box.hidden = false;
+    box.innerHTML = '<b>永久积分</b> ' + (c.permanent ?? 0) + ' · <b>每日赠送</b> ' + (c.daily ?? 0) +
+      (c.has_quota ? '（今日额度 ' + (c.daily_quota ?? 0) + '，已用 ' + (c.daily_consumed ?? 0) + '）' : '（未签到，点「每日签到」激活）') +
+      ' · 合计 <b>' + (c.total ?? 0) + '</b>';
+  } catch (e) { box.hidden = false; box.textContent = '积分查询失败: ' + e.message; }
+}
+if ($('btnLoomyCredits')) $('btnLoomyCredits').onclick = () => loadLoomyCredits(false);
+
+/* ── 添加账号弹窗里的 Loomy Tab ─────────────────────────────────────── */
+async function detectLoomyClient() {
+  const st = $('loomyModalState'), box = $('loomyDetectBox');
+  if (!st || !box) return;
+  st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">检测中</span>';
+  box.hidden = true;
+  try {
+    const d = await api('loomy/status');
+    const s = d.status || {};
+    if (!d.has_account) {
+      st.textContent = d.message || '未检测到本机 Loomy 客户端，可手动输入 Token';
+      $('loomyManualBox').hidden = false;
+      return;
+    }
+    st.hidden = true;
+    box.hidden = false;
+    $('loomyDetectName').textContent = s.userid ? 'Loomy · ' + s.userid : 'Loomy 客户端';
+    $('loomyDetectScore').textContent = s.earned + ' / ' + s.total + ' 积分';
+    $('loomyDetectDesc').textContent = '手机: ' + (s.phone_masked || '已登录') + ' · 本地缓存已就绪';
+  } catch (e) {
+    st.className = 'state err'; st.textContent = e.message;
+  }
+}
+if ($('btnDetectLoomy')) $('btnDetectLoomy').onclick = detectLoomyClient;
+if ($('btnToggleManualLoomy')) $('btnToggleManualLoomy').onclick = () => {
+  const b = $('loomyManualBox');
+  b.hidden = !b.hidden;
+};
+if ($('btnSubmitLoomyToken')) $('btnSubmitLoomyToken').onclick = async () => {
+  const tok = $('loomyTokenInput').value.trim();
+  if (!tok) { toast('请输入 Session Token', 'err'); return; }
+  const st = $('loomyModalState');
+  st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">验证中</span>';
+  try {
+    await api('loomy/save', { method: 'POST', body: JSON.stringify({ session: tok }) });
+    st.className = 'state ok'; st.textContent = '保存成功';
+    detectLoomyClient();
+  } catch (e) {
+    st.className = 'state err'; st.textContent = e.message;
+  }
+};
+if ($('btnLoomyModalAutoAll')) $('btnLoomyModalAutoAll').onclick = async () => {
+  const b = $('btnLoomyModalAutoAll');
+  b.disabled = true; b.textContent = '执行中…';
+  try {
+    const r = await api('loomy/complete_all', { method: 'POST' });
+    const cnt = (r.completed || []).length;
+    toast(cnt > 0 ? '新点亮 ' + cnt + ' 项任务' : '所有任务已是完成态', 'ok');
+    detectLoomyClient();
+  } catch (e) { toast(e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = '一键自动完成所有任务'; }
+};
+
+/* ── 外部积分账号（LobsterAI / 小浣熊 / Qoder / 华为云） ─────────────── */
+const EXT_PROVIDER_NAMES = { lobsterai: 'LobsterAI', raccoon: '小浣熊', qoder: 'Qoder', codearts: '华为云' };
+
+async function loadExtAccounts(quiet) {
+  const st = $('extState'), content = $('extContent');
+  if (!st || !content) return;
+  if (!quiet) { st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">查询中</span>'; content.hidden = true; }
+  try {
+    const d = await api('ext/accounts');
+    const list = d.accounts || [];
+    st.hidden = true; content.hidden = false;
+    const okCount = list.filter(a => a.balance_ok).length;
+    $('extSummary').textContent = list.length === 0 ? '暂无账号' : (list.length + ' 个账号 · ' + okCount + ' 个余额正常');
+    if (list.length === 0) {
+      $('extGrid').innerHTML = '<div class="empty" style="grid-column: 1/-1; padding: 18px; text-align: center; color: var(--ink-3); font-size: 12.5px;">还没有外部账号 —— 展开下方「手工添加账号」粘贴凭据，或等待登录流程集成</div>';
+      return;
+    }
+    $('extGrid').innerHTML = list.map(a => {
+      const name = EXT_PROVIDER_NAMES[a.provider] || a.provider;
+      const bal = a.balance_ok ? '<span style="font-family: var(--mono); font-size: 12px; color: var(--accent);">' + (a.balance ?? 0) + ' 分</span>'
+        : '<span style="font-size: 11.5px; color: var(--ink-3);">' + esc(a.note || '—') + '</span>';
+      const disabled = a.disabled;
+      return '<div style="background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px 12px;' + (disabled ? ' opacity: .5;' : '') + '">' +
+        '<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px;">' +
+          '<div style="font-size: 12.5px; font-weight: 550;">' + esc(name) + ' · ' + esc(a.label || a.id) + '</div>' +
+          '<div style="display: flex; gap: 4px;">' +
+            '<button class="xs" data-ext-checkin="' + esc(a.provider) + '|' + esc(a.id) + '"' + (disabled ? ' disabled' : '') + '>签到</button>' +
+            '<button class="xs" data-ext-toggle="' + esc(a.provider) + '|' + esc(a.id) + '" data-ext-disabled="' + (disabled ? '0' : '1') + '">' + (disabled ? '启用' : '停用') + '</button>' +
+            '<button class="xs" data-ext-remove="' + esc(a.provider) + '|' + esc(a.id) + '">删除</button>' +
+          '</div>' +
+        '</div>' +
+        '<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">' +
+          '<span style="font-size: 11px; color: var(--ink-3); font-family: var(--mono);">' + esc(a.id) + '</span>' + bal +
+        '</div>' +
+      '</div>';
+    }).join('');
+    document.querySelectorAll('[data-ext-checkin]').forEach(b => b.onclick = () => extCheckinOne(b));
+    document.querySelectorAll('[data-ext-toggle]').forEach(b => b.onclick = () => extToggleOne(b));
+    document.querySelectorAll('[data-ext-remove]').forEach(b => b.onclick = () => extRemoveOne(b));
+  } catch (e) {
+    st.hidden = false; st.className = 'state err'; st.textContent = e.message;
+    content.hidden = true;
+  }
+}
+
+async function extCheckinOne(b) {
+  const [provider, id] = b.dataset.extCheckin.split('|');
+  b.disabled = true; b.textContent = '…';
+  try {
+    const r = await api('ext/accounts/' + encodeURIComponent(provider) + '/' + encodeURIComponent(id) + '/checkin', { method: 'POST' });
+    const res = r.result || {};
+    toast('[' + (EXT_PROVIDER_NAMES[provider] || provider) + '] ' + (res.message || res.kind || '完成'), res.kind === 'claimed' ? 'ok' : (res.kind === 'failed' ? 'err' : 'ok'));
+    loadExtAccounts(true);
+  } catch (e) { toast(e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = '签到'; }
+}
+
+async function extToggleOne(b) {
+  const [provider, id] = b.dataset.extToggle.split('|');
+  const disabled = b.dataset.extDisabled === '1';
+  try {
+    await api('ext/accounts/' + encodeURIComponent(provider) + '/' + encodeURIComponent(id) + '/toggle', { method: 'POST', body: JSON.stringify({ disabled }) });
+    loadExtAccounts(true);
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+async function extRemoveOne(b) {
+  const [provider, id] = b.dataset.extRemove.split('|');
+  if (!confirm('确定删除 ' + (EXT_PROVIDER_NAMES[provider] || provider) + ' 账号 ' + id + '？')) return;
+  try {
+    await api('ext/accounts/' + encodeURIComponent(provider) + '/' + encodeURIComponent(id) + '/remove', { method: 'POST' });
+    toast('已删除', 'ok');
+    loadExtAccounts(true);
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+if ($('btnExtRefresh')) $('btnExtRefresh').onclick = () => loadExtAccounts(false);
+if ($('btnExtCheckinAll')) $('btnExtCheckinAll').onclick = async () => {
+  const b = $('btnExtCheckinAll');
+  b.disabled = true; b.textContent = '签到中…';
+  try {
+    const r = await api('ext/checkin_all', { method: 'POST' });
+    const results = r.results || [];
+    const ok = results.filter(x => x.kind === 'claimed').length;
+    const already = results.filter(x => x.kind === 'already-claimed').length;
+    const failed = results.filter(x => x.kind === 'failed').length;
+    toast('签到完成：成功 ' + ok + ' · 已领过 ' + already + ' · 失败 ' + failed, failed === 0 ? 'ok' : 'err');
+    loadExtAccounts(true);
+  } catch (e) { toast(e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = '一键签到全部'; }
+};
+if ($('btnExtAdd')) $('btnExtAdd').onclick = async () => {
+  const provider = $('extProvider').value, id = $('extIdInput').value.trim(), raw = $('extCredInput').value.trim();
+  if (!id) { toast('请填写账号 ID', 'err'); return; }
+  let cred;
+  try { cred = JSON.parse(raw); } catch (e) { toast('凭据不是合法 JSON', 'err'); return; }
+  try {
+    await api('ext/accounts', { method: 'POST', body: JSON.stringify({ provider, id, cred }) });
+    toast('账号已添加', 'ok');
+    $('extIdInput').value = ''; $('extCredInput').value = '';
+    loadExtAccounts(true);
+  } catch (e) { toast(e.message, 'err'); }
+};

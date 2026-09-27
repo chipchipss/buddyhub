@@ -48,12 +48,14 @@ type Config struct {
 		//   - 开关与取值解耦：禁用时仍保留用户显式配的小时，重新启用无需补配。
 		//   - 无需猜测哨兵（[-1] 之类），非法小时一律报错并提示改用本开关。
 		// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
-		CheckinEnabled   bool `json:"checkin_enabled"`   // 缺省 true；false = 关签到
-		TravelEnabled    bool `json:"travel_enabled"`    // 缺省 true；false = 完全停猫猫旅行
-		ActivityEnabled  bool `json:"activity_enabled"`  // 缺省 true；false = 停活跃上报
-		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
-		BlackcatEnabled  bool `json:"blackcat_enabled"`  // 缺省 true；false = 关夜猫子
-		GrowthEnabled    bool `json:"growth_enabled"`    // 缺省 true；false = 关成长任务自动排程
+		CheckinEnabled    bool  `json:"checkin_enabled"`     // 缺省 true；false = 关签到
+		TravelEnabled     bool  `json:"travel_enabled"`      // 缺省 true；false = 完全停猫猫旅行
+		ActivityEnabled   bool  `json:"activity_enabled"`    // 缺省 true；false = 停活跃上报
+		KeepaliveEnabled  bool  `json:"keepalive_enabled"`   // 缺省 true；false = 关 token 保活
+		BlackcatEnabled   bool  `json:"blackcat_enabled"`    // 缺省 true；false = 关夜猫子
+		GrowthEnabled     bool  `json:"growth_enabled"`      // 缺省 true；false = 关成长任务自动排程
+		ExtCheckinHours   []int `json:"ext_checkin_hours"`   // [10] 外部积分账号签到时点
+		ExtCheckinEnabled bool  `json:"ext_checkin_enabled"` // 缺省 true；false = 关外部签到排程
 
 		// 余额后台周期刷新：两次签到时点之间 credits 也能保持新鲜（面板/状态观测用）。
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。
@@ -186,6 +188,7 @@ func Default() *Config {
 	c.Schedule.KeepaliveHours = []int{22}
 	c.Schedule.BlackcatHours = []int{23}
 	c.Schedule.GrowthHours = []int{1}
+	c.Schedule.ExtCheckinHours = []int{10}
 	// 开关「缺省 true」靠这几行实现：Load 先取 Default() 再 json.Unmarshal 覆盖，
 	// 键缺席（或为 null）时字段原样保留 true，只有显式 false 才关。
 	c.Schedule.CheckinEnabled = true
@@ -193,6 +196,7 @@ func Default() *Config {
 	c.Schedule.TravelEnabled = true
 	c.Schedule.ActivityEnabled = true
 	c.Schedule.KeepaliveEnabled = true
+	c.Schedule.ExtCheckinEnabled = true
 	c.Schedule.BlackcatEnabled = true
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5

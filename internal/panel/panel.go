@@ -61,6 +61,9 @@ type Config struct {
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
+
+	// StateFile 状态文件路径（外部积分账号 ext-accounts.json 与其同目录持久化）。
+	StateFile string
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -178,6 +181,17 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
+	p.mux.HandleFunc("GET /panel/api/loomy/status", p.withAuth(p.loomyStatus))
+	p.mux.HandleFunc("POST /panel/api/loomy/complete_all", p.withAuth(p.loomyCompleteAll))
+	p.mux.HandleFunc("POST /panel/api/loomy/save", p.withAuth(p.loomySave))
+	p.mux.HandleFunc("POST /panel/api/loomy/checkin", p.withAuth(p.loomyCheckin))
+	p.mux.HandleFunc("GET /panel/api/loomy/credits", p.withAuth(p.loomyCredits))
+	p.mux.HandleFunc("GET /panel/api/ext/accounts", p.withAuth(p.extAccounts))
+	p.mux.HandleFunc("POST /panel/api/ext/accounts", p.withAuth(p.extAccountAdd))
+	p.mux.HandleFunc("POST /panel/api/ext/accounts/{provider}/{id}/remove", p.withAuth(p.extAccountRemove))
+	p.mux.HandleFunc("POST /panel/api/ext/accounts/{provider}/{id}/toggle", p.withAuth(p.extAccountToggle))
+	p.mux.HandleFunc("POST /panel/api/ext/accounts/{provider}/{id}/checkin", p.withAuth(p.extCheckinOne))
+	p.mux.HandleFunc("POST /panel/api/ext/checkin_all", p.withAuth(p.extCheckinAll))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

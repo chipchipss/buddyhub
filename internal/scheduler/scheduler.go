@@ -51,11 +51,19 @@ type Config struct {
 	BlackcatDisabled bool
 	// GrowthDisabled 显式关闭成长任务自动排程（schedule.growth_enabled=false）。
 	GrowthDisabled bool
+	// ExtCheckinDisabled 显式关闭外部积分账号签到排程（schedule.ext_checkin_enabled=false）。
+	ExtCheckinDisabled bool
+	// ExtCheckinHours 外部签到时点（默认 [10]：各家积分多为每日一次，10 点整领）。
+	ExtCheckinHours []int
 
 	// GrowthHook 成长任务队列执行回调（panel.RunGrowthQueueOnce：扫描全部账号
 	// 待办并执行，与面板「执行全部待办」按钮同管线）。调度器只管时点不管实现——
 	// panel 在 scheduler 之后构造，用 SetGrowthHook 事后挂载；nil 时到点跳过。
 	GrowthHook func()
+
+	// ExtHook 外部积分账号签到回调（panel.extCheckinAll 同管线：遍历
+	// lobsterai/raccoon/qoder/codearts 全部账号执行各自签到/领取）。nil 时到点跳过。
+	ExtHook func()
 }
 
 // Scheduler 调度器。
@@ -96,6 +104,9 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.BlackcatHours) == 0 {
 		cfg.BlackcatHours = []int{23}
 	}
+	if len(cfg.ExtCheckinHours) == 0 {
+		cfg.ExtCheckinHours = []int{10}
+	}
 	return &Scheduler{
 		cfg:           cfg,
 		adoptTried:    make(map[string]string),
@@ -110,6 +121,13 @@ func New(cfg Config) *Scheduler {
 func (s *Scheduler) SetGrowthHook(fn func()) {
 	s.schedMu.Lock()
 	s.cfg.GrowthHook = fn
+	s.schedMu.Unlock()
+}
+
+// SetExtHook 挂载/替换外部积分签到回调（panel 构造晚于 scheduler，事后接线）。
+func (s *Scheduler) SetExtHook(fn func()) {
+	s.schedMu.Lock()
+	s.cfg.ExtHook = fn
 	s.schedMu.Unlock()
 }
 
@@ -178,6 +196,7 @@ const (
 	taskKeepalive
 	taskBlackcat
 	taskGrowth
+	taskExtCheckin // 外部积分账号签到（lobsterai/raccoon/qoder/codearts），extHook 回调
 )
 
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
@@ -190,6 +209,7 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	travelHours, activityHours := s.cfg.TravelHours, s.cfg.ActivityHours
 	checkinOff, keepaliveOff, blackcatOff := s.cfg.CheckinDisabled, s.cfg.KeepaliveDisabled, s.cfg.BlackcatDisabled
 	growthHours, growthOff := s.cfg.GrowthHours, s.cfg.GrowthDisabled
+	extHours, extOff := s.cfg.ExtCheckinHours, s.cfg.ExtCheckinDisabled
 	travelOff, activityOff := s.cfg.TravelDisabled, s.cfg.ActivityDisabled
 	s.schedMu.Unlock()
 
@@ -215,6 +235,9 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	}
 	if !growthOff {
 		slots = append(slots, slot{nextFire(now, growthHours), taskGrowth})
+	}
+	if !extOff {
+		slots = append(slots, slot{nextFire(now, extHours), taskExtCheckin})
 	}
 	var earliest time.Time
 	for _, sl := range slots {
@@ -324,6 +347,14 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 				s.schedMu.Unlock()
 				if hook != nil {
 					hook()
+				}
+			case taskExtCheckin:
+				// 外部积分签到：回调在 panel 侧（extstore.CheckinAll），nil 未挂载则跳过。
+				s.schedMu.Lock()
+				extHook := s.cfg.ExtHook
+				s.schedMu.Unlock()
+				if extHook != nil {
+					extHook()
 				}
 			}
 		}(k)

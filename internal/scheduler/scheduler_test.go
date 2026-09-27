@@ -123,13 +123,14 @@ func TestNextWakeKeepaliveDisabled(t *testing.T) {
 // TestNextWakeBothDisabledNothingScheduled 五类任务都显式禁用 → 无可唤醒时点。
 func TestNextWakeBothDisabledNothingScheduled(t *testing.T) {
 	s := New(Config{
-		CheckinDisabled:   true,
-		TravelDisabled:    true,
-		ActivityDisabled:  true,
-		KeepaliveDisabled: true,
-		BlackcatDisabled:  true,
-		CheckinHours:      []int{9, 21},
-		KeepaliveHours:    []int{22},
+		CheckinDisabled:    true,
+		TravelDisabled:     true,
+		ActivityDisabled:   true,
+		KeepaliveDisabled:  true,
+		BlackcatDisabled:   true,
+		ExtCheckinDisabled: true,
+		CheckinHours:       []int{9, 21},
+		KeepaliveHours:     []int{22},
 	})
 	at, kinds := s.nextWake(time.Now())
 	if !at.IsZero() || len(kinds) != 0 {
@@ -428,6 +429,29 @@ func TestNextWakeGrowthSlot(t *testing.T) {
 	for _, k := range kinds2 {
 		if k == taskGrowth {
 			t.Fatal("禁用后 growth 仍在候选")
+		}
+	}
+}
+
+// TestNextWakeExtCheckinSlot 外部积分签到进候选 + 禁用退场（每日 10 点自动领取）。
+func TestNextWakeExtCheckinSlot(t *testing.T) {
+	s := New(Config{ExtCheckinHours: []int{10}, CheckinHours: []int{9, 21}})
+	at, kinds := s.nextWake(time.Date(2026, 9, 27, 9, 30, 0, 0, time.Local))
+	hasExt := false
+	for _, k := range kinds {
+		if k == taskExtCheckin {
+			hasExt = true
+		}
+	}
+	if !hasExt || at.Hour() != 10 || at.Day() != 27 {
+		t.Fatalf("ext 槽位: at=%v kinds=%v（期望 09-27 10:00 含 taskExtCheckin）", at, kinds)
+	}
+	// 禁用后退场
+	s2 := New(Config{ExtCheckinHours: []int{10}, ExtCheckinDisabled: true, CheckinHours: []int{9, 21}})
+	_, kinds2 := s2.nextWake(time.Date(2026, 9, 27, 9, 30, 0, 0, time.Local))
+	for _, k := range kinds2 {
+		if k == taskExtCheckin {
+			t.Fatal("禁用后 ext 仍在候选")
 		}
 	}
 }

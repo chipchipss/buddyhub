@@ -177,6 +177,8 @@ func main() {
 		KeepaliveDisabled:  !cfg.Schedule.KeepaliveEnabled,
 		BlackcatDisabled:   !cfg.Schedule.BlackcatEnabled,
 		GrowthDisabled:     !cfg.Schedule.GrowthEnabled,
+		ExtCheckinDisabled: !cfg.Schedule.ExtCheckinEnabled,
+		ExtCheckinHours:    cfg.Schedule.ExtCheckinHours,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -244,6 +246,7 @@ func main() {
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
+		StateFile:  cfg.StateFile,
 		ConfigPath: *cfgPath,
 		LoadConfig: func() (any, error) {
 			return Load(*cfgPath)
@@ -253,8 +256,12 @@ func main() {
 		},
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
-	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
+	// 外部积分账号每日自动签到（lobsterai/raccoon/qoder/codearts 全遍历，
+	// 与「一键签到全部」同管线；hook 返回即执行，串行遍历有界耗时）。
+	sch.SetExtHook(func() {
+		go pn.RunExtCheckinAll()
+	})
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
