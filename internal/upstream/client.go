@@ -779,6 +779,18 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 		efforts, defs = globalEffortMap(efforts, defs)
 	}
 	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints, efforts, defs)
+	// 工具调用序列自愈 + DeepSeek 多轮思维链历史修复（移植自 workbuddy-gateway）：
+	// 出站前修复并行 tool_call 拆散/孤儿/重复结构，避免国际站 11148；
+	// deepseek 模型补齐 reasoning_content/reasoning 字段对齐，避免多轮上下文断裂。
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err == nil && obj != nil {
+		model, _ := obj["model"].(string)
+		LogToolSequenceRepair(model, RepairToolMessageSequence(obj))
+		RepairReasoningHistory(obj)
+		if fixed, merr := json.Marshal(obj); merr == nil {
+			body = fixed
+		}
+	}
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
 	body = InjectPromptCacheKey(body, uid, conversationID)
