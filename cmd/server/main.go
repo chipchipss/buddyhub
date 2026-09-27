@@ -17,16 +17,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
+	"github.com/chipchipss/buddyhub/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/livecfg"
+	"github.com/chipchipss/buddyhub/internal/panel"
+	"github.com/chipchipss/buddyhub/internal/pool"
+	"github.com/chipchipss/buddyhub/internal/redisstore"
+	"github.com/chipchipss/buddyhub/internal/scheduler"
+	"github.com/chipchipss/buddyhub/internal/server"
+	"github.com/chipchipss/buddyhub/internal/session"
+	"github.com/chipchipss/buddyhub/internal/upstream"
+	"github.com/chipchipss/buddyhub/internal/usage"
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。

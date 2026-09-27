@@ -21,12 +21,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
+	"github.com/chipchipss/buddyhub/internal/httpauth"
+	"github.com/chipchipss/buddyhub/internal/livecfg"
+	"github.com/chipchipss/buddyhub/internal/pool"
+	"github.com/chipchipss/buddyhub/internal/scheduler"
+	"github.com/chipchipss/buddyhub/internal/upstream"
+	"github.com/chipchipss/buddyhub/internal/usage"
 )
 
 // Config 面板依赖（main 装配注入）。

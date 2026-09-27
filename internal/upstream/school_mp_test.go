@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/auth"
 )
 
 func TestMPEventBase(t *testing.T) {

@@ -16,10 +16,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/extprovider/codearts"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/extprovider/lobsterai"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/extprovider/qoder"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/extprovider/raccoon"
+	"github.com/chipchipss/buddyhub/internal/extprovider/codearts"
+	"github.com/chipchipss/buddyhub/internal/extprovider/lobsterai"
+	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
+	"github.com/chipchipss/buddyhub/internal/extprovider/raccoon"
 )
 
 // Provider 平台标识。

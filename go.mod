@@ -1,4 +1,4 @@
-module github.com/linguo2625469/workbuddy2api-panel
+module github.com/chipchipss/buddyhub
 
 go 1.22.5
 

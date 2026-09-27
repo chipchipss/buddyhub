@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/extstore"
+	"github.com/chipchipss/buddyhub/internal/extstore"
 )
 
 // extPath 外部账号持久化文件路径（state 文件同目录）。

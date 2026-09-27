@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/chipchipss/buddyhub/internal/upstream"
 )
 
 var (

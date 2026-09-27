@@ -6,8 +6,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/chipchipss/buddyhub/internal/logfmt"
+	"github.com/chipchipss/buddyhub/internal/upstream"
 )
 
 // RunBlackcatNow 对所有可用账号执行夜猫子对话补足（窗口外跳过）。

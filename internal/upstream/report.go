@@ -15,7 +15,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/auth"
 )
 
 // reportPath 活跃上报通道（实测）。
