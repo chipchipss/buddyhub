@@ -1764,9 +1764,12 @@ async function loomyLogin(endpoint, payload, okMsg) {
   st.textContent = '登录中…';
   try {
     const r = await api('ext/loomy/' + endpoint, { method: 'POST', body: JSON.stringify(payload) });
-    st.textContent = okMsg + '（账号已入池）';
-    toast(okMsg, 'ok');
+    st.textContent = okMsg + '（账号已入池 → 外部平台页 / Loomy 任务页）';
+    toast(okMsg + '，账号见「外部平台」页', 'ok');
     detectLoomyClient();
+    if (typeof loadExtAccounts === 'function') loadExtAccounts(true);
+    if (typeof loadLoomyStatus === 'function') loadLoomyStatus(true);
+    setTimeout(() => { go('ext'); }, 1600);
   } catch (e) { st.textContent = '失败: ' + e.message; toast(e.message, 'err'); }
 }
 if ($('btnLoomyLoginPwd')) $('btnLoomyLoginPwd').onclick = () => {
