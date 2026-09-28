@@ -360,3 +360,12 @@ func (m *Manager) StatusAll(ctx context.Context) []*ExtAccountView {
 	}
 	return out
 }
+
+// ExtList 导出 List（server 包 Qoder 桥接读取账号）。
+func (m *Manager) ExtList() []*ExtAccount { return m.List() }
+
+// ReplaceCred 导出 replaceCred（server 包 Qoder 桥接刷新后回写凭据）。
+func (m *Manager) ReplaceCred(provider, id string, cred json.RawMessage) {
+	m.replaceCred(provider, id, cred)
+}
+

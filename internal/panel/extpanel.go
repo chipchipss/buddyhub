@@ -156,3 +156,11 @@ func ensureExtStoreDir(stateFile string) {
 		_ = os.MkdirAll(dir, 0o755)
 	}
 }
+
+// ExtList server 包读取外部账号的导出面（Qoder 桥接用）。
+func (p *Panel) ExtList() []*extstore.ExtAccount { return p.extManager().ExtList() }
+
+// ExtManagerReplaceCred 暴露凭据回写（server 桥接经 main 闭包调用）。
+func (p *Panel) ExtManagerReplaceCred(provider, id string, cred json.RawMessage) {
+	p.extManager().ReplaceCred(provider, id, cred)
+}

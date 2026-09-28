@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/httpauth"
 	"github.com/chipchipss/buddyhub/internal/livecfg"
 	"github.com/chipchipss/buddyhub/internal/logfmt"
@@ -38,6 +39,10 @@ type Config struct {
 	RedisMode    string
 	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
+
+	// ExtAccounts 返回外部积分账号快照（Qoder 桥接用）；nil = Qoder 通道禁用。
+	// 由 main 注入闭包（panel.ExtList），避免 server -> panel 的包依赖。
+	ExtAccounts func() []*extstore.ExtAccount
 
 	// Panel 管理面板 handler（可选；nil = 不挂载）。挂载在 /panel/ 前缀下，
 	// 面板自带 Bearer 鉴权（同一 api_key）与内嵌静态资源，主路由只做转发。
@@ -105,6 +110,11 @@ type Handler struct {
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
+	// extManager 外部账号管理器（main 注入；Qoder 桥接刷新回写用）。nil = 桥接禁用。
+	extManager ExtManager
+	// lastQoderErr 最近一次 Qoder 桥接全账号失败的原因（观测用，非并发安全——
+	// 仅同账号串行失败时被写入，读取方在返回错误前立即读，竞态无害）。
+	lastQoderErr string
 }
 
 // NewHandler 构建 handler。
@@ -390,7 +400,58 @@ func (h *Handler) modelList() []map[string]any {
 			out = append(out, entry)
 		}
 	}
+	// Qoder 模型名单（qoder: 前缀）：extstore 有启用的 qoder 账号时列出。
+	// 名单 = Jet-Hub 逆向的官方模型目录（ lite/ultimate/qfmodel 等，静态表）。
+	qoderAvail := false
+	if h.cfg.ExtAccounts != nil {
+		for _, a := range h.cfg.ExtAccounts() {
+			if a.Provider == extstore.PQoder && !a.Disabled {
+				qoderAvail = true
+				break
+			}
+		}
+	}
+	if qoderAvail {
+		for _, m := range qoderCatalog() {
+			out = append(out, map[string]any{
+				"id":             qoderModelPrefix + m.id,
+				"object":         "model",
+				"created":        1753600000,
+				"owned_by":       "qoder",
+				"context_length": m.contextWindow,
+			})
+		}
+	}
 	return out
+}
+
+// qoderModel Qoder 官方目录条目（id + 上下文窗口；来源 Jet-Hub qoder-product.ts 逆向）。
+type qoderModel struct {
+	id            string
+	contextWindow int64
+}
+
+// qoderCatalog Qoder 模型静态目录（有账号就展示；实际可用性由上游裁定）。
+func qoderCatalog() []qoderModel {
+	return []qoderModel{
+		{"lite", 200000},
+		{"ultimate", 1000000},
+		{"performance", 1000000},
+		{"efficient", 200000},
+		{"qfmodel", 180000},
+		{"qmodel", 1000000},
+		{"qmodel_latest", 1000000},
+		{"qmodel_38max", 180000},
+		{"kmodel", 200000},
+		{"kmodel_latest", 180000},
+		{"gmodel", 180000},
+		{"gfmodel", 1000000},
+		{"dmodel", 1000000},
+		{"dfmodel", 1000000},
+		{"mmodel", 180000},
+		{"smodel", 180000},
+		{"cmodel", 180000},
+	}
 }
 
 // fetchGlobalModels 返回 global 模型名单（纯动态探测结果）及被探测账号。
@@ -491,6 +552,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel := resolveModel(peek.Model)
+
+	// Qoder 直连通道（qoder: 前缀模型）：独立于腾讯池，走 extstore 里的
+	// Qoder 账号（api2-v2 新版协议纯 Bearer）。找不到可用账号时回 404 提示，
+	// 不静默回落腾讯池——模型名就是路由协议，回落会把语义搞乱。
+	if isQoderModel(bareModel) {
+		qm := strings.TrimPrefix(bareModel, qoderModelPrefix)
+		bodyQM := body
+		if qm != bareModel {
+			bodyQM = rewriteModel(body, qm)
+		}
+		if h.qoderChatStream(w, r, bodyQM, qm) {
+			return
+		}
+		detail := "没有可用的 Qoder 账号（面板-外部积分账号中添加 qoder 凭据后重试）"
+		if h.lastQoderErr != "" {
+			detail += "；最近失败原因: " + h.lastQoderErr
+		}
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_qoder_account", detail)
+		return
+	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)

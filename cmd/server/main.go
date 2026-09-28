@@ -38,6 +38,15 @@ func usagePathFor(stateFile string) string { return stateSibling(stateFile, "usa
 
 // stateSibling 返回与 state 文件同目录的指定文件名路径（相对路径场景回落当前目录）。
 // usage.json（用量记录）与 output_probes.json（模型上限探测）共用本规则。
+// bridgeManager server.ExtManager 的最小适配器（回写 Qoder 刷新后的凭据）。
+type bridgeManager struct {
+	repl func(provider, id string, cred json.RawMessage)
+}
+
+func (b bridgeManager) ReplaceCred(provider, id string, cred json.RawMessage) {
+	b.repl(provider, id, cred)
+}
+
 func stateSibling(stateFile, name string) string {
 	dir := filepath.Dir(stateFile)
 	if dir == "" || dir == "." {
@@ -274,13 +283,19 @@ func main() {
 		RedisMode:    redisMode,
 		SoftCooldown: cfg.SoftRateDur,
 		Panel:        pn,
-		Live:         live,
-		Usage:        rec,
-		PromptMode:   cfg.Prompt.Mode,
-		PromptText:   cfg.PromptText,
+		ExtAccounts:  pn.ExtList,
+		// ExtManager 最小接口：Qoder 桥接刷新凭据后回写（panel.extManager 实现）。
+		// 由 panel 暴露 SetExtManager 注入；见下方 pn.SetExtManager 行。
+		Live:       live,
+		Usage:      rec,
+		PromptMode: cfg.Prompt.Mode,
+		PromptText: cfg.PromptText,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
 	})
+
+	// Qoder 桥接的凭据回写通道：server 包经闭包调 panel 的 extManager。
+	h.ExtSetManager(bridgeManager{repl: pn.ExtManagerReplaceCred})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
