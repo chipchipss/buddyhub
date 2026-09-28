@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/chipchipss/buddyhub/internal/extprovider/loomy"
 	"github.com/chipchipss/buddyhub/internal/extstore"
@@ -200,7 +201,7 @@ func (p *Panel) extLoginLoomyPassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, err.Error())
 		return
 	}
-	p.saveLoomyLogin(w, r, res, cli)
+	p.saveLoomyLoginWithPassword(w, r, res, cli, body.Password)
 }
 
 // extLoginLoomySendSMS POST /panel/api/ext/loomy/send_sms
@@ -261,17 +262,31 @@ func (p *Panel) extLoginLoomySMS(w http.ResponseWriter, r *http.Request) {
 // 每日签到、双积分池查询走 upstream.FindLoomySession()，其第 0 优先级来源是
 // data/loomy-session.json（本机无桌面客户端时唯一的凭据来源）。缺任一份，对应页面即"什么都没有"。
 func (p *Panel) saveLoomyLogin(w http.ResponseWriter, r *http.Request, res *loomy.LoginResult, cli *loomy.Client) {
+	p.saveLoomyLoginWithPassword(w, r, res, cli, "")
+}
+
+// saveLoomyLoginWithPassword 同 saveLoomyLogin，另把密码加密落盘（无人值守续期用）。
+// plainPassword 为空 = 不存密（短信登录/仅 session 导入），该账号过期需手动重登。
+func (p *Panel) saveLoomyLoginWithPassword(w http.ResponseWriter, r *http.Request, res *loomy.LoginResult, cli *loomy.Client, plainPassword string) {
 	cred := map[string]any{
-		"session": res.Session,
-		"userid":  res.UserID,
-		"phone":   res.Phone,
+		"session":  res.Session,
+		"userid":   res.UserID,
+		"phone":    res.Phone,
+		"login_at": time.Now().Unix(),
+	}
+	if plainPassword != "" {
+		if stored, err := upstream.ProtectPassword(plainPassword); err == nil && stored != "" {
+			cred["password"] = stored
+		} else {
+			log.Printf("panel: Loomy 密码存盘失败（该账号将无法自动续期）: %v", err)
+		}
 	}
 	raw, _ := json.Marshal(cred)
 	id := res.UserID
 	if id == "" {
 		id = "phone-" + res.Phone
 	}
-	if err := p.extManager().Add("loomy-cli", id, res.Phone, raw); err != nil {
+	if err := p.extManager().Add(extstore.PLoomyCLI, id, res.Phone, raw); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}

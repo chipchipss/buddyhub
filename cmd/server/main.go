@@ -272,6 +272,9 @@ func main() {
 	sch.SetExtHook(func() {
 		go pn.RunExtCheckinAll()
 	})
+	// Loomy 无人值守续期（每 6h；剩余 <3 天且有存密密码时静默重登并双写
+	// 外部池 + loomy-session.json；无密码账号跳过等手动重登）。
+	panel.StartLoomyRenewLoop(pn)
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 

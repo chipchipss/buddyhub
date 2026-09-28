@@ -15,7 +15,10 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/chipchipss/buddyhub/internal/extprovider/loomy"
+	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/upstream"
 )
 
@@ -27,15 +30,21 @@ func isLoomyModel(bare string) bool { return strings.HasPrefix(bare, loomyModelP
 
 // loomyCred 外部池 loomy-cli 凭据形状（saveLoomyLogin 落库结构）。
 type loomyCred struct {
-	Session string `json:"session"`
-	UserID  string `json:"userid"`
-	Phone   string `json:"phone"`
+	Session  string `json:"session"`
+	UserID   string `json:"userid"`
+	Phone    string `json:"phone"`
+	Password string `json:"password,omitempty"`
+	LoginAt  int64  `json:"login_at,omitempty"`
 }
 
-// loomyAccount 一个可用凭据（session + 展示标识）。
+// loomyAccount 一个可用凭据（session + 展示标识 + 可选存密密码供 401 即时重登）。
 type loomyAccount struct {
 	Session string
 	Label   string
+	// 以下仅外部池账号有值（session-file 兜底账号为空——无法回写，重登无意义）：
+	ExtID    string // 外部池账号 ID（ReplaceCred 回写用）
+	Phone    string
+	PwStored string // 加密密码；空 = 无密码（过期只能手动重登）
 }
 
 // loomyAccounts 收集全部可用 Loomy 凭据：外部池优先，session 文件兜底去重。
@@ -53,7 +62,13 @@ func loomyAccounts(h *Handler) []loomyAccount {
 			}
 			if !seen[c.Session] {
 				seen[c.Session] = true
-				out = append(out, loomyAccount{Session: c.Session, Label: a.ID})
+				out = append(out, loomyAccount{
+					Session:  c.Session,
+					Label:    a.ID,
+					ExtID:    a.ID,
+					Phone:    c.Phone,
+					PwStored: c.Password,
+				})
 			}
 		}
 	}
@@ -77,21 +92,33 @@ func (h *Handler) LoomyChatStream(w http.ResponseWriter, r *http.Request, body [
 	for _, acc := range accounts {
 		rc, status, ctype, err := upstream.LoomyChatStream(acc.Session, string(outBody))
 		if err != nil {
-			// 401/403 = session 失效。密码不落盘（loomy-cli 凭据只存 session），
-			// 无法静默重登——明确提示用户重新登录，换下一个账号继续试。
+			// 401/403 = session 失效。有存密密码 → 即时重登换新 session 重试一次
+			//（无人值守核心路径）；无密码 → 提示手动重登，换下一个账号。
 			if status == http.StatusUnauthorized || status == http.StatusForbidden {
-				lastErr = "session 失效，请在面板重新登录该 Loomy 账号"
-				log.Printf("loomy-bridge: %s session 失效 (HTTP %d)", acc.Label, status)
+				if acc.ExtID != "" && acc.PwStored != "" {
+					if fresh := loomyRelogin(h, acc); fresh != "" {
+						log.Printf("loomy-bridge: %s session 失效，已自动重登重试", acc.Label)
+						rc2, st2, ct2, err2 := upstream.LoomyChatStream(fresh, string(outBody))
+						if err2 == nil {
+							rc, status, ctype, err = rc2, st2, ct2, err2
+						}
+					}
+				}
+				if err != nil {
+					lastErr = "session 失效，请在面板重新登录该 Loomy 账号"
+					log.Printf("loomy-bridge: %s session 失效 (HTTP %d)", acc.Label, status)
+					continue
+				}
+			} else {
+				lastErr = err.Error()
+				log.Printf("loomy-bridge: %s chat 失败 (HTTP %d): %v", acc.Label, status, err)
+				if status == http.StatusBadRequest || status == http.StatusNotFound || status == http.StatusUnprocessableEntity {
+					// 请求本身的问题，换号无意义
+					writeOpenAIError(w, status, "upstream_error", lastErr)
+					return true
+				}
 				continue
 			}
-			lastErr = err.Error()
-			log.Printf("loomy-bridge: %s chat 失败 (HTTP %d): %v", acc.Label, status, err)
-			if status == http.StatusBadRequest || status == http.StatusNotFound || status == http.StatusUnprocessableEntity {
-				// 请求本身的问题，换号无意义
-				writeOpenAIError(w, status, "upstream_error", lastErr)
-				return true
-			}
-			continue
 		}
 		log.Printf("loomy-bridge: acct=%s model=%s 建流成功 ctype=%s", acc.Label, m, ctype)
 		isSSE := strings.Contains(ctype, "text/event-stream")
@@ -199,4 +226,38 @@ func (h *Handler) loomyCatalog() []map[string]any {
 		return nil
 	}
 	return mods
+}
+
+// loomyRelogin 401 触发的即时重登：解密存量密码 → LoginByPassword →
+// 新凭据（含 login_at，保留密文密码）回写外部池 + 双写 loomy-session.json。
+// 失败返回空串（调用方继续换号/报错）。
+func loomyRelogin(h *Handler, acc loomyAccount) string {
+	plain, err := upstream.UnprotectPassword(acc.PwStored)
+	if err != nil || plain == "" {
+		log.Printf("loomy-bridge: %s 密码解密失败，无法自动重登: %v", acc.Label, err)
+		return ""
+	}
+	cli := loomy.NewClient()
+	res, err := cli.LoginByPassword(acc.Phone, plain, nil)
+	if err != nil {
+		log.Printf("loomy-bridge: %s 自动重登失败: %v", acc.Label, err)
+		return ""
+	}
+	fresh := upstream.LoomyCred{
+		Session:  res.Session,
+		UserID:   res.UserID,
+		Phone:    res.Phone,
+		Password: acc.PwStored,
+		LoginAt:  time.Now().Unix(),
+	}
+	raw, _ := json.Marshal(fresh)
+	if m := h.extManager; m != nil {
+		m.ReplaceCred(extstore.PLoomyCLI, acc.ExtID, raw)
+	}
+	_ = upstream.SaveLoomySession(&upstream.LoomySession{
+		Session: res.Session,
+		UserID:  res.UserID,
+		Phone:   res.Phone,
+	})
+	return res.Session
 }

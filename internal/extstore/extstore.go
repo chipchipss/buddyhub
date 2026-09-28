@@ -28,6 +28,9 @@ const (
 	PRaccoon   = "raccoon"
 	PQoder     = "qoder"
 	PCodeArts  = "codearts"
+	// PLoomyCLI 密码/短信登录落库的 Loomy 账号（区别于本机客户端检测的
+	// "loomy" session 来源；凭据含可选加密密码，支持无人值守续期）。
+	PLoomyCLI = "loomy-cli"
 )
 
 // ExtAccount 一个外部平台账号。
