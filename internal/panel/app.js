@@ -132,6 +132,8 @@ function go(v) {
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v];
+  // 自动化二级目录:进入子页自动展开,离开不强制收起(用户手动控制)
+  if (['taskscenter', 'loomy', 'ext'].includes(v)) setAutoGroup(true);
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
@@ -142,6 +144,16 @@ function go(v) {
   if (v === 'ext') { if (typeof loadExtAccounts === 'function') loadExtAccounts(true); }
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
+
+/* 自动化分组折叠 */
+function setAutoGroup(open) {
+  const t = $('autoGroupToggle');
+  if (!t) return;
+  t.classList.toggle('open', open);
+  t.setAttribute('aria-expanded', open ? 'true' : 'false');
+  document.querySelectorAll('.nav li.sub').forEach(li => li.classList.toggle('show', open));
+}
+if ($('autoGroupToggle')) $('autoGroupToggle').onclick = () => setAutoGroup(!$('autoGroupToggle').classList.contains('open'));
 go((location.hash || '#accounts').slice(1) in TITLES ? (location.hash || '#accounts').slice(1) : 'accounts');
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
@@ -1715,10 +1727,16 @@ async function detectLoomyClient() {
   }
 }
 if ($('btnDetectLoomy')) $('btnDetectLoomy').onclick = detectLoomyClient;
-if ($('btnToggleManualLoomy')) $('btnToggleManualLoomy').onclick = () => {
-  const b = $('loomyManualBox');
-  b.hidden = !b.hidden;
-};
+// Loomy 添加方式分段切换：detect / pwd / token 一次只显示一种
+function switchLoomyMethod(m) {
+  document.querySelectorAll('#loomyMethodSeg .seg-btn').forEach(b => b.classList.toggle('on', b.dataset.lm === m));
+  $('loomyMethodDetect').hidden = m !== 'detect';
+  $('loomyMethodPwd').hidden = m !== 'pwd';
+  $('loomyMethodToken').hidden = m !== 'token';
+}
+if ($('loomyMethodSeg')) document.querySelectorAll('#loomyMethodSeg .seg-btn').forEach(b => {
+  b.onclick = () => switchLoomyMethod(b.dataset.lm);
+});
 if ($('btnSubmitLoomyToken')) $('btnSubmitLoomyToken').onclick = async () => {
   const tok = $('loomyTokenInput').value.trim();
   if (!tok) { toast('请输入 Session Token', 'err'); return; }

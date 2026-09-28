@@ -55,6 +55,13 @@ body {
   padding: 14px 11px 5px; font-size: 10.5px; font-weight: 650; letter-spacing: .08em;
   text-transform: uppercase; color: var(--ink-3); user-select: none;
 }
+.nav .group-label.tog { display: flex; align-items: center; justify-content: space-between; cursor: pointer; border-radius: 6px; }
+.nav .group-label.tog:hover { color: var(--ink-2); background: var(--surface-2); }
+.nav .group-label .chev { width: 12px; height: 12px; transition: transform .15s ease; opacity: .7; }
+.nav .group-label.tog.open .chev { transform: rotate(180deg); }
+.nav li.sub a { padding-left: 22px; font-size: 13px; }
+.nav li.sub { display: none; }
+.nav li.sub.show { display: block; }
 .nav ul li:first-child.group-label { padding-top: 4px; }
 .nav a {
   display: flex; align-items: center; gap: 10px; padding: 7px 11px 7px 13px; margin-bottom: 1px;
@@ -441,14 +448,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12"/><path d="M4.5 13.5V8.2M8 13.5V3.5M11.5 13.5v-3"/></svg>
         用量</a></li>
 
-      <li class="group-label">自动化</li>
-      <li><a href="#taskscenter" data-view="taskscenter">
+      <li class="group-label tog" id="autoGroupToggle" aria-expanded="false">
+        自动化 <svg class="chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6l4 4 4-4"/></svg>
+      </li>
+      <li class="sub" data-sub="taskscenter"><a href="#taskscenter" data-view="taskscenter">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 2.5h10v9H8l-3 3v-3H3z"/><path d="M6 6.5h4M6 9h2.5"/></svg>
         腾讯任务</a></li>
-      <li><a href="#loomy" data-view="loomy">
+      <li class="sub" data-sub="loomy"><a href="#loomy" data-view="loomy">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6.2"/><path d="M8 4.5V8l2.4 1.6"/></svg>
         Loomy（讯飞）</a></li>
-      <li><a href="#ext" data-view="ext">
+      <li class="sub" data-sub="ext"><a href="#ext" data-view="ext">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M2.5 6.5h11M6.5 6.5v7"/></svg>
         外部平台</a></li>
 
@@ -992,10 +1001,14 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
       <!-- Loomy -->
       <div id="addTabLoomy" class="tab-panel" hidden>
-        <div class="hint" style="margin-bottom:12px">支持一键读取本机已登录的 Loomy 客户端，或手动填入 Session Token。</div>
+        <div class="seg" id="loomyMethodSeg" style="margin-bottom:14px">
+          <button type="button" class="seg-btn on" data-lm="detect">自动检测客户端</button>
+          <button type="button" class="seg-btn" data-lm="pwd">账号密码登录</button>
+          <button type="button" class="seg-btn" data-lm="token">手动 Token</button>
+        </div>
+        <div id="loomyMethodDetect">
         <div style="display:flex; gap:8px; margin-bottom:12px">
-          <button type="button" class="xs primary" id="btnDetectLoomy">自动检测本机客户端</button>
-          <button type="button" class="xs" id="btnToggleManualLoomy">手动输入 Token</button>
+          <button type="button" class="xs primary" id="btnDetectLoomy">开始检测</button>
         </div>
         <div id="loomyDetectBox" style="background:var(--surface-2); border:1px solid var(--line-soft); border-radius:8px; padding:12px; margin-bottom:10px" hidden>
           <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px">
@@ -1007,8 +1020,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <button type="button" class="xs primary" id="btnLoomyModalAutoAll">一键自动完成所有任务</button>
           </div>
         </div>
+        </div>
+        <div id="loomyMethodPwd" hidden>
         <div style="background:var(--surface-2); border:1px solid var(--line-soft); border-radius:8px; padding:12px; margin-bottom:10px">
-          <div style="font-size:12px; font-weight:600; margin-bottom:8px">账号密码登录（推荐 · 全自动）</div>
+          <div style="font-size:12px; font-weight:600; margin-bottom:8px">手机号 + 密码 / 短信登录（全自动）</div>
           <div style="display:flex; flex-direction:column; gap:8px">
             <input type="text" id="loomyLoginPhone" placeholder="手机号" style="padding:6px 8px; border-radius:6px; border:1px solid var(--line-soft); background:var(--surface-1); color:var(--ink-1)">
             <div style="display:flex; gap:8px">
@@ -1023,13 +1038,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <div style="font-size:11px; color:var(--ink-3)" id="loomyLoginState"></div>
           </div>
         </div>
-        <div id="loomyManualBox" hidden style="display:flex; flex-direction:column; gap:10px; margin-bottom:10px">
+        </div>
+        <div id="loomyMethodToken" hidden>
+        <div id="loomyManualBox" style="display:flex; flex-direction:column; gap:10px; margin-bottom:10px">
           <label class="fld"><span class="lb">Loomy Session Token</span>
             <input type="text" id="loomyTokenInput" placeholder="从 userData/auth-session.json 复制 session 字段">
           </label>
           <div style="display:flex; gap:8px">
             <button type="button" class="xs primary" id="btnSubmitLoomyToken">验证并保存</button>
           </div>
+        </div>
         </div>
         <div id="loomyModalState" class="state" hidden></div>
       </div>
