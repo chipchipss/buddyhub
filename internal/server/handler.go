@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
 	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/httpauth"
 	"github.com/chipchipss/buddyhub/internal/livecfg"
@@ -112,9 +113,10 @@ type Handler struct {
 	wafIP wafIPGate
 	// extManager 外部账号管理器（main 注入；Qoder 桥接刷新回写用）。nil = 桥接禁用。
 	extManager ExtManager
-	// lastQoderErr 最近一次 Qoder 桥接全账号失败的原因（观测用，非并发安全——
+	// lastQoderErr / lastCodexErr 桥接失败原因（观测用，非并发安全——
 	// 仅同账号串行失败时被写入，读取方在返回错误前立即读，竞态无害）。
 	lastQoderErr string
+	lastCodexErr string
 }
 
 // NewHandler 构建 handler。
@@ -400,6 +402,28 @@ func (h *Handler) modelList() []map[string]any {
 			out = append(out, entry)
 		}
 	}
+	// Codex 订阅池：本机有有效登录时列出。
+	if len(keypool.ListCodexAccounts()) > 0 {
+		for _, m := range []struct{ id, name string }{
+			{"gpt-6-sol", "GPT-6-Sol (ChatGPT 订阅池)"},
+			{"gpt-6-astra", "GPT-6-Astra (ChatGPT 订阅池)"},
+		} {
+			out = append(out, map[string]any{
+				"id": codexModelPrefix + m.id, "object": "model",
+				"created": 1753600000, "owned_by": "openai",
+			})
+		}
+	}
+	// 免费 key 池：配置了任一 key（或 LLM7 匿名可用）时列出四家免费档。
+	if keyConfigured() {
+		for _, m := range keypoolCatalog() {
+			out = append(out, map[string]any{
+				"id": freeModelPrefix + m.provider + "/" + m.Model.ID, "object": "model",
+				"created": 1753600000, "owned_by": m.provider,
+				"context_length": m.ContextWindow,
+			})
+		}
+	}
 	// Qoder 模型名单（qoder: 前缀）：extstore 有启用的 qoder 账号时列出。
 	// 名单 = Jet-Hub 逆向的官方模型目录（ lite/ultimate/qfmodel 等，静态表）。
 	qoderAvail := false
@@ -452,6 +476,33 @@ func qoderCatalog() []qoderModel {
 		{"smodel", 180000},
 		{"cmodel", 180000},
 	}
+}
+
+// keyConfigured 判断免费池是否有任一 key（LLM7 匿名层恒可用）。
+func keyConfigured() bool {
+	for _, p := range []string{keypool.PGroq, keypool.PZhipu, keypool.PLLMS7, keypool.POpenRouter} {
+		if keyFor(p) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// keyEntry 免费池目录条目。
+type keyEntry struct {
+	provider string
+	keypool.Model
+}
+
+// keypoolCatalog 汇总四家免费模型目录。
+func keypoolCatalog() []keyEntry {
+	var out []keyEntry
+	for _, p := range []string{keypool.PGroq, keypool.PZhipu, keypool.PLLMS7, keypool.POpenRouter} {
+		for _, m := range keypool.Catalog(p) {
+			out = append(out, keyEntry{provider: p, Model: m})
+		}
+	}
+	return out
 }
 
 // fetchGlobalModels 返回 global 模型名单（纯动态探测结果）及被探测账号。
@@ -570,6 +621,33 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			detail += "；最近失败原因: " + h.lastQoderErr
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_qoder_account", detail)
+		return
+	}
+
+	// Codex 订阅池直连（codex: 前缀）：本机 ~/.codex* 凭据 + Responses API。
+	if isCodexModel(bareModel) {
+		cm := strings.TrimPrefix(bareModel, codexModelPrefix)
+		bodyCM := body
+		if cm != bareModel {
+			bodyCM = rewriteModel(body, cm)
+		}
+		if h.codexChatStream(w, r, bodyCM, cm) {
+			return
+		}
+		detail := "本机未发现可用 Codex 登录（codex login 后重试）"
+		if h.lastCodexErr != "" {
+			detail += "；最近失败: " + h.lastCodexErr
+		}
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_codex_account", detail)
+		return
+	}
+
+	// 免费 key 池（free:<provider>/<model>）：groq/zp/l7/or 四上游。
+	if isFreeModel(bareModel) {
+		if h.keyPoolChatStream(w, r, body, bareModel) {
+			return
+		}
+		writeOpenAIError(w, http.StatusServiceUnavailable, "free_pool_unavailable", "免费池不可用")
 		return
 	}
 

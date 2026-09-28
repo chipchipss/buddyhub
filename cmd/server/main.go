@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
 	"github.com/chipchipss/buddyhub/internal/livecfg"
 	"github.com/chipchipss/buddyhub/internal/panel"
 	"github.com/chipchipss/buddyhub/internal/pool"
@@ -294,6 +295,13 @@ func main() {
 		GlobalEnabled: cfg.Global.Enabled,
 	})
 
+	// 免费 key 池注入（groq/zp/l7/or；空 key 的上游不可用，LLM7 匿名层除外）。
+	server.SetKeyPoolKeys(map[string]string{
+		keypool.PGroq:       cfg.FreePool.Groq,
+		keypool.PZhipu:      cfg.FreePool.Zhipu,
+		keypool.PLLMS7:      cfg.FreePool.LLM7,
+		keypool.POpenRouter: cfg.FreePool.OpenRouter,
+	})
 	// Qoder 桥接的凭据回写通道：server 包经闭包调 panel 的 extManager。
 	h.ExtSetManager(bridgeManager{repl: pn.ExtManagerReplaceCred})
 

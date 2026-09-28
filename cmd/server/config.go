@@ -57,11 +57,27 @@ type Config struct {
 		ExtCheckinHours   []int `json:"ext_checkin_hours"`   // [10] 外部积分账号签到时点
 		ExtCheckinEnabled bool  `json:"ext_checkin_enabled"` // 缺省 true；false = 关外部签到排程
 
+		// FreePool 免费 key 池（groq/zp/l7/or 的 API key；缺省空 = 该上游禁用）。
+		FreePool struct {
+			Groq       string `json:"groq"`
+			Zhipu      string `json:"zhipu"`
+			LLM7       string `json:"llm7"`
+			OpenRouter string `json:"openrouter"`
+		} `json:"free_pool"`
+
 		// 余额后台周期刷新：两次签到时点之间 credits 也能保持新鲜（面板/状态观测用）。
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。
 		BalanceRefreshEnabled bool `json:"balance_refresh_enabled"` // 缺省 true；false = 关闭
 		BalanceRefreshMinutes int  `json:"balance_refresh_minutes"` // 缺省 5；<=0 回落 5
 	} `json:"schedule"`
+
+	// FreePool 免费 key 池（groq/zp/l7/or 的 API key；缺省空 = 该上游禁用）。
+	FreePool struct {
+		Groq       string `json:"groq"`
+		Zhipu      string `json:"zhipu"`
+		LLM7       string `json:"llm7"`
+		OpenRouter string `json:"openrouter"`
+	} `json:"free_pool"`
 
 	Global struct {
 		// Enabled global realm 路由开关。缺省 true：Realm() 正常把 realm=global/
