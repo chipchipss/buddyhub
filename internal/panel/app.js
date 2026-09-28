@@ -553,6 +553,16 @@ function switchAddTab(tab) {
   $('addTabImport').hidden = tab !== 'import';
   $('addTabLoomy').hidden = tab !== 'loomy';
   if (tab === 'loomy') detectLoomyClient();
+  // footer 按钮跟随 Tab 语义：URL 系按钮只属于腾讯浏览器登录流程。
+  const isLogin = tab === 'login';
+  $('btnStartLogin').hidden = !isLogin;
+  if (!isLogin) {
+    // 离开登录 Tab 时把未完成的 URL 流程残留按钮一并隐藏，
+    // 防止「在浏览器打开」带着腾讯授权链接出现在 Loomy/JSON 页。
+    $('btnCopyUrl').hidden = true;
+    $('btnOpenUrl').hidden = true;
+    stopPoll();
+  }
 }
 document.querySelectorAll('#addTabs .tab').forEach(b => {
   b.onclick = () => switchAddTab(b.dataset.tab);
