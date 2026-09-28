@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/chipchipss/buddyhub/internal/extprovider/loomy"
 	"github.com/chipchipss/buddyhub/internal/extstore"
 )
 
@@ -163,4 +164,112 @@ func (p *Panel) ExtList() []*extstore.ExtAccount { return p.extManager().ExtList
 // ExtManagerReplaceCred 暴露凭据回写（server 桥接经 main 闭包调用）。
 func (p *Panel) ExtManagerReplaceCred(provider, id string, cred json.RawMessage) {
 	p.extManager().ReplaceCred(provider, id, cred)
+}
+
+// ---------------------------------------------------------------------------
+// Loomy 账号服务登录（密码 / 短信）：新增平台账号的自动路径。
+// 登录成功 = session 拿到 + 设备身份持久化 + 外部账号落库，全自动。
+// ---------------------------------------------------------------------------
+
+// loomySmsMsgID 短信验证码 msgid 缓存（phone → msgid，进程内）。
+var (
+	loomySmsMu    sync.Mutex
+	loomySmsMsgID = map[string]string{}
+)
+
+// extLoginLoomyPassword POST /panel/api/ext/loomy/login_password
+// body: {phone, password}
+func (p *Panel) extLoginLoomyPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Phone    string `json:"phone"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request json")
+		return
+	}
+	if body.Phone == "" || body.Password == "" {
+		writeErr(w, http.StatusBadRequest, "phone 与 password 必填")
+		return
+	}
+	cli := loomy.NewClient()
+	res, err := cli.LoginByPassword(body.Phone, body.Password, nil)
+	if err != nil {
+		log.Printf("panel: Loomy 密码登录失败 %s***: %v", body.Phone[:3], err)
+		writeErr(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	p.saveLoomyLogin(w, r, res, cli)
+}
+
+// extLoginLoomySendSMS POST /panel/api/ext/loomy/send_sms
+// body: {phone} → {msgid}
+func (p *Panel) extLoginLoomySendSMS(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Phone string `json:"phone"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Phone == "" {
+		writeErr(w, http.StatusBadRequest, "phone 必填")
+		return
+	}
+	cli := loomy.NewClient()
+	msgID, err := cli.SendSMSCode(body.Phone, nil)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	loomySmsMu.Lock()
+	loomySmsMsgID[body.Phone] = msgID
+	loomySmsMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "msgid": msgID})
+}
+
+// extLoginLoomySMS POST /panel/api/ext/loomy/login_sms
+// body: {phone, code, msgid}
+func (p *Panel) extLoginLoomySMS(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Phone string `json:"phone"`
+		Code  string `json:"code"`
+		MsgID string `json:"msgid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
+		body.Phone == "" || body.Code == "" || body.MsgID == "" {
+		writeErr(w, http.StatusBadRequest, "phone/code/msgid 必填")
+		return
+	}
+	if body.MsgID == "" {
+		loomySmsMu.Lock()
+		body.MsgID = loomySmsMsgID[body.Phone]
+		loomySmsMu.Unlock()
+	}
+	cli := loomy.NewClient()
+	res, err := cli.LoginBySMS(body.Phone, body.Code, body.MsgID, nil)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	p.saveLoomyLogin(w, r, res, cli)
+}
+
+// saveLoomyLogin 登录成功公共尾：落库为 lobsterai 无关的 loomy 外部账号 + 触发首次状态查询。
+// 注意：Loomy 登录产物（session）保存在独立 provider="loomy-cli" 下，
+// 与本机客户端检测路径（provider="loomy" 的 session 文件）并存不冲突——
+// ChatStream/签到以 loomy-cli 凭据优先，回退客户端 session。
+func (p *Panel) saveLoomyLogin(w http.ResponseWriter, r *http.Request, res *loomy.LoginResult, cli *loomy.Client) {
+	cred := map[string]any{
+		"session": res.Session,
+		"userid":  res.UserID,
+		"phone":   res.Phone,
+	}
+	raw, _ := json.Marshal(cred)
+	id := res.UserID
+	if id == "" {
+		id = "phone-" + res.Phone
+	}
+	if err := p.extManager().Add("loomy-cli", id, res.Phone, raw); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	log.Printf("panel: Loomy 账号已登录并保存 (%s)", res.Phone)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "userid": res.UserID})
 }

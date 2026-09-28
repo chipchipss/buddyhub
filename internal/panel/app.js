@@ -1713,6 +1713,36 @@ if ($('btnSubmitLoomyToken')) $('btnSubmitLoomyToken').onclick = async () => {
     st.className = 'state err'; st.textContent = e.message;
   }
 };
+async function loomyLogin(endpoint, payload, okMsg) {
+  const st = $('loomyLoginState');
+  st.textContent = '登录中…';
+  try {
+    const r = await api('ext/loomy/' + endpoint, { method: 'POST', body: JSON.stringify(payload) });
+    st.textContent = okMsg + '（账号已入池）';
+    toast(okMsg, 'ok');
+    detectLoomyClient();
+  } catch (e) { st.textContent = '失败: ' + e.message; toast(e.message, 'err'); }
+}
+if ($('btnLoomyLoginPwd')) $('btnLoomyLoginPwd').onclick = () => {
+  const phone = $('loomyLoginPhone').value.trim(), pwd = $('loomyLoginPwd').value;
+  if (!phone || !pwd) { toast('手机号与密码必填', 'err'); return; }
+  loomyLogin('login_password', { phone, password: pwd }, '密码登录成功');
+};
+if ($('btnLoomySendSms')) $('btnLoomySendSms').onclick = async () => {
+  const phone = $('loomyLoginPhone').value.trim();
+  if (!phone) { toast('先填手机号', 'err'); return; }
+  try {
+    await api('ext/loomy/send_sms', { method: 'POST', body: JSON.stringify({ phone }) });
+    $('loomySendMsgId').dataset.pending = '1';
+    toast('验证码已发送', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+};
+if ($('btnLoomyLoginSms')) $('btnLoomyLoginSms').onclick = async () => {
+  const phone = $('loomyLoginPhone').value.trim(), code = $('loomySmsCode').value.trim();
+  if (!phone || !code) { toast('手机号与验证码必填', 'err'); return; }
+  // msgid 由服务端 send_sms 时返回；前端简化：服务端用 phone+code 校验msgid缓存。
+  loomyLogin('login_sms', { phone, code, msgid: '' }, '短信登录成功');
+};
 if ($('btnLoomyModalAutoAll')) $('btnLoomyModalAutoAll').onclick = async () => {
   const b = $('btnLoomyModalAutoAll');
   b.disabled = true; b.textContent = '执行中…';

@@ -262,7 +262,22 @@ func (m *Manager) CheckinOne(ctx context.Context, a *ExtAccount) *CheckinResult 
 			res.Kind, res.Message = "failed", "凭据解析失败"
 			return res
 		}
+		// 双通道：campaigns（/sash/，Jet-Hub 路线）优先；无可领项时回退
+		// activity claim（openapi/v2，qoder-workflow 路线，COSY MD5 签名）。
 		r, err := qoder.New().ClaimDaily(ctx, &cred)
+		if err != nil || r.Kind == "failed" || (r.Kind == "already-claimed" && res.Message == "") {
+			ca, cerr := qoder.New().ClaimActivities(ctx, &cred)
+			if cerr == nil {
+				if len(ca.Claimed) > 0 {
+					res.Kind, res.Message = "claimed", fmt.Sprintf("活动领取成功 %d 项", len(ca.Claimed))
+					return res
+				}
+				if ca.Note != "" && (err != nil || r == nil || r.Kind == "failed") {
+					res.Kind, res.Message = "inactive", ca.Note
+					return res
+				}
+			}
+		}
 		if err != nil {
 			res.Kind, res.Message = "failed", err.Error()
 			return res
@@ -368,4 +383,3 @@ func (m *Manager) ExtList() []*ExtAccount { return m.List() }
 func (m *Manager) ReplaceCred(provider, id string, cred json.RawMessage) {
 	m.replaceCred(provider, id, cred)
 }
-

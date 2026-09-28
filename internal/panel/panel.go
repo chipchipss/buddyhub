@@ -192,6 +192,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/ext/accounts/{provider}/{id}/toggle", p.withAuth(p.extAccountToggle))
 	p.mux.HandleFunc("POST /panel/api/ext/accounts/{provider}/{id}/checkin", p.withAuth(p.extCheckinOne))
 	p.mux.HandleFunc("POST /panel/api/ext/checkin_all", p.withAuth(p.extCheckinAll))
+	p.mux.HandleFunc("POST /panel/api/ext/loomy/login_password", p.withAuth(p.extLoginLoomyPassword))
+	p.mux.HandleFunc("POST /panel/api/ext/loomy/send_sms", p.withAuth(p.extLoginLoomySendSMS))
+	p.mux.HandleFunc("POST /panel/api/ext/loomy/login_sms", p.withAuth(p.extLoginLoomySMS))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

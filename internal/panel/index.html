@@ -976,6 +976,22 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <button type="button" class="xs primary" id="btnLoomyModalAutoAll">一键自动完成所有任务</button>
           </div>
         </div>
+        <div style="background:var(--surface-2); border:1px solid var(--line-soft); border-radius:8px; padding:12px; margin-bottom:10px">
+          <div style="font-size:12px; font-weight:600; margin-bottom:8px">账号密码登录（推荐 · 全自动）</div>
+          <div style="display:flex; flex-direction:column; gap:8px">
+            <input type="text" id="loomyLoginPhone" placeholder="手机号" style="padding:6px 8px; border-radius:6px; border:1px solid var(--line-soft); background:var(--surface-1); color:var(--ink-1)">
+            <div style="display:flex; gap:8px">
+              <input type="password" id="loomyLoginPwd" placeholder="密码" style="flex:1; padding:6px 8px; border-radius:6px; border:1px solid var(--line-soft); background:var(--surface-1); color:var(--ink-1)">
+              <button type="button" class="xs primary" id="btnLoomyLoginPwd">登录</button>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center">
+              <input type="text" id="loomySmsCode" placeholder="短信验证码（备用）" style="flex:1; padding:6px 8px; border-radius:6px; border:1px solid var(--line-soft); background:var(--surface-1); color:var(--ink-1)">
+              <button type="button" class="xs" id="btnLoomySendSms">发验证码</button>
+              <button type="button" class="xs" id="btnLoomyLoginSms">短信登录</button>
+            </div>
+            <div style="font-size:11px; color:var(--ink-3)" id="loomyLoginState"></div>
+          </div>
+        </div>
         <div id="loomyManualBox" hidden style="display:flex; flex-direction:column; gap:10px; margin-bottom:10px">
           <label class="fld"><span class="lb">Loomy Session Token</span>
             <input type="text" id="loomyTokenInput" placeholder="从 userData/auth-session.json 复制 session 字段">
