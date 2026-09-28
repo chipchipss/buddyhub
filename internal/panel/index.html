@@ -414,7 +414,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 <div class="shell">
   <nav class="nav">
     <div class="brand">
-      <div class="name">WorkBuddy2API</div>
+      <div class="name">BuddyHub</div>
       <div class="sub" id="navSub">控制台</div>
     </div>
     <ul>
@@ -429,7 +429,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         积分构成</a></li>
       <li><a href="#taskscenter" data-view="taskscenter">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 2.5h10v9H8l-3 3v-3H3z"/><path d="M6 6.5h4M6 9h2.5"/></svg>
-        任务中心</a></li>
+        腾讯任务</a></li>
+      <li><a href="#loomy" data-view="loomy">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6.2"/><path d="M8 4.5V8l2.4 1.6"/></svg>
+        Loomy（讯飞）</a></li>
+      <li><a href="#ext" data-view="ext">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M2.5 6.5h11M6.5 6.5v7"/></svg>
+        外部平台</a></li>
       <li><a href="#models" data-view="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         模型与档位</a></li>
@@ -521,6 +527,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </div>
         <div id="qcList"></div>
       </div>
+     </section>
+    <!-- Loomy（讯飞） -->
+    <section class="view" id="view-loomy" hidden>
       <div class="box" id="loomyBox">
         <header>
           <h3>Loomy 新手之旅（讯飞） <span class="hint">8 项任务纯 API 直调点亮 · 总计 +10000 积分</span></h3>
@@ -545,9 +554,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <div id="loomyGrid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px;"></div>
         </div>
       </div>
+    </section>
+
+    <!-- 外部平台 -->
+    <section class="view" id="view-ext" hidden>
       <div class="box" id="extBox">
         <header>
-          <h3>外部积分账号 <span class="hint">LobsterAI · 小浣熊 · Qoder · 华为云 —— 每日积分自动领取</span></h3>
+          <h3>外部平台账号 <span class="hint">LobsterAI · 小浣熊 · Qoder · 华为云 · Loomy 密码登录 —— 每日 10:00 自动签到</span></h3>
           <span class="grow"></span>
           <span class="note" id="extSummary"></span>
           <button class="xs" id="btnExtRefresh">刷新</button>
@@ -578,7 +591,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           </details>
         </div>
       </div>
-     </section>
+    </section>
+
 
     <!-- 模型与档位 -->
     <section class="view" id="view-models" hidden>
