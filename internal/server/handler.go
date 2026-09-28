@@ -41,6 +41,11 @@ type Config struct {
 	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
 
+	// ZaiKeys / BigModelKeys Z.AI 与智谱 GLM 的 API Key 池（zai: 前缀路由目标；
+	// config schedule.zai 透传）。皆空 = zai 通道禁用。
+	ZaiKeys      []string
+	BigModelKeys []string
+
 	// ExtAccounts 返回外部积分账号快照（Qoder 桥接用）；nil = Qoder 通道禁用。
 	// 由 main 注入闭包（panel.ExtList），避免 server -> panel 的包依赖。
 	ExtAccounts func() []*extstore.ExtAccount
@@ -118,6 +123,7 @@ type Handler struct {
 	lastQoderErr string
 	lastCodexErr string
 	lastLoomyErr string
+	lastZaiErr   string
 }
 
 // NewHandler 构建 handler。
@@ -151,14 +157,56 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
+// authPlatformKey 上下文键：命中的 API Key 条目（平台授权判断用）。
+type authPlatformKey struct{}
+
+// AuthKeyEntry 从 context 取命中的 Key 条目（未命中/无多 Key 体系时返回零值=全平台）。
+func AuthKeyEntry(r *http.Request) livecfg.APIKeyEntry {
+	if v, ok := r.Context().Value(authPlatformKey{}).(livecfg.APIKeyEntry); ok {
+		return v
+	}
+	return livecfg.APIKeyEntry{}
+}
+
+// platformAllowed 判定该请求（已命中的 Key + 模型名）是否被授权访问目标平台。
+// 无多 Key 体系（APIKeys 空）恒允许；命中条目 Platforms 空 = 全平台。
+func platformAllowed(r *http.Request, snap livecfg.Snapshot, bareModel string) bool {
+	entry := AuthKeyEntry(r)
+	if entry.Key == "" || len(snap.APIKeys) == 0 {
+		return true // 走的主 APIKey 或未配置多 Key：不设平台限制
+	}
+	return entry.AllowsPlatform(PlatformOf(bareModel))
+}
+
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
-			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+		snap := h.loadLive()
+		given := bearerToken(r)
+		// 主 Key 或多 Key 列表任一命中即通过；命中条目带入 context 供平台授权。
+		if httpauth.VerifyBearer(r, snap.APIKey) {
+			next(w, r)
 			return
 		}
-		next(w, r)
+		if len(snap.APIKeys) > 0 && given != "" {
+			for _, e := range snap.APIKeys {
+				if e.Match(given) {
+					next(w, r.WithContext(context.WithValue(r.Context(), authPlatformKey{}, e)))
+					return
+				}
+			}
+		}
+		writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 	}
+}
+
+// bearerToken 从 Authorization 头剥出 token（无前缀/缺头返回空串）。
+func bearerToken(r *http.Request) string {
+	authz := r.Header.Get("Authorization")
+	const p = "Bearer "
+	if len(authz) > len(p) && authz[:len(p)] == p {
+		return authz[len(p):]
+	}
+	return ""
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
@@ -471,6 +519,23 @@ func (h *Handler) modelList() []map[string]any {
 			out = append(out, entry)
 		}
 	}
+	// Z.AI GLM 家族（zai: 前缀）：有 key 才列出（官方模型名大小写敏感）。
+	if len(h.cfg.ZaiKeys) > 0 || len(h.cfg.BigModelKeys) > 0 {
+		for _, m := range []struct{ id, desc string }{
+			{"GLM-5.3-Flash", "GLM 5.3 Flash（智谱，最快）"},
+			{"GLM-5.3", "GLM 5.3（智谱旗舰）"},
+			{"GLM-5.2", "GLM 5.2"},
+			{"GLM-5-Turbo", "GLM 5 Turbo"},
+			{"GLM-5.1", "GLM 5.1"},
+			{"GLM-4.7", "GLM 4.7"},
+		} {
+			out = append(out, map[string]any{
+				"id": zaiModelPrefix + m.id, "object": "model",
+				"created": 1753600000, "owned_by": "zai",
+				"description": m.desc,
+			})
+		}
+	}
 	return out
 }
 
@@ -629,6 +694,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel := resolveModel(peek.Model)
 
+	// 多 Key 平台授权：命中的 Key 未授权该平台时拒绝（多 Key 关闭时恒通过）。
+	if !platformAllowed(r, h.loadLive(), bareModel) {
+		writeOpenAIError(w, http.StatusForbidden, "platform_not_authorized",
+			"该 API Key 未授权平台 "+PlatformOf(bareModel))
+		return
+	}
+
 	// Qoder 直连通道（qoder: 前缀模型）：独立于腾讯池，走 extstore 里的
 	// Qoder 账号（api2-v2 新版协议纯 Bearer）。找不到可用账号时回 404 提示，
 	// 不静默回落腾讯池——模型名就是路由协议，回落会把语义搞乱。
@@ -687,6 +759,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			detail += "；最近失败原因: " + h.lastLoomyErr
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_loomy_account", detail)
+		return
+	}
+
+	// Z.AI / 智谱 GLM API Key 通道（zai: 前缀）：Anthropic 兼容端点转发，
+	// OpenAI 双向翻译；凭据 config schedule.zai（x-api-key，免验证码）。
+	if strings.HasPrefix(bareModel, zaiModelPrefix) {
+		if h.ZaiChatStream(w, r, body, bareModel) {
+			return
+		}
+		detail := "没有可用的 Z.AI / 智谱 API Key（配置 schedule.zai 后重试）"
+		if h.lastZaiErr != "" {
+			detail += "；最近失败原因: " + h.lastZaiErr
+		}
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_zai_key", detail)
 		return
 	}
 

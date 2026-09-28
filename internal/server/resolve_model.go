@@ -2,6 +2,9 @@ package server
 
 import "strings"
 
+// zaiModelPrefix Z.AI（GLM Coding Plan API Key 通道）路由前缀。
+const zaiModelPrefix = "zai:"
+
 // resolveModel 解析模型名协议（PLAN D6）：
 //
 //	分布式前缀： "[realm:]model"
@@ -24,3 +27,21 @@ func resolveModel(model string) (realm, bare string) {
 
 // ResolveModel 是 resolveModel 的导出面（跨包调用）。
 func ResolveModel(model string) (realm, bare string) { return resolveModel(model) }
+
+// PlatformOf 由裸模型名判定其所属平台（多 Key 平台授权用）。
+// 与 handler 路由分支一一对应：qoder:/codex:/free:/loomy:/zai: 前缀通道，
+// 其余（裸名）归腾讯池（realm 细分 cn/global 由调用方按需二次判断）。
+func PlatformOf(bare string) string {
+	for _, p := range []struct{ prefix, name string }{
+		{qoderModelPrefix, "qoder"},
+		{codexModelPrefix, "codex"},
+		{freeModelPrefix, "free"},
+		{loomyModelPrefix, "loomy"},
+		{zaiModelPrefix, "zai"},
+	} {
+		if strings.HasPrefix(bare, p.prefix) {
+			return p.name
+		}
+	}
+	return "workbuddy"
+}

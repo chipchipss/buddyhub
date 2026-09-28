@@ -130,6 +130,28 @@ func (p *Panel) RunExtCheckinAll() {
 	log.Printf("ext-checkin 完成: 成功 %d · 失败 %d · 共 %d 账号", claimed, failed, len(results))
 }
 
+// RunLoomyDailyCheckin 调度器 ExtHook 入口：触发 Loomy 每日赠送额度（幂等）。
+// 与面板 loomyCheckin 同管线：FindLoomySession → CheckinDailyQuota；无本地
+// 登录态/已处理/失败均只记日志，不影响同 hook 的外部账号签到。
+func (p *Panel) RunLoomyDailyCheckin() {
+	client := getLoomyClient()
+	session, err := upstream.FindLoomySession()
+	if err != nil || session == nil {
+		log.Printf("loomy-checkin 跳过: 未检测到本地 Loomy 客户端登录态 (auth-session.json): %v", err)
+		return
+	}
+	res, err := client.CheckinDailyQuota(session.Session)
+	if err != nil {
+		log.Printf("loomy-checkin 失败: %v", err)
+		return
+	}
+	if res.AlreadyProcessed {
+		log.Printf("loomy-checkin 已处理: %s", res.Message)
+	} else {
+		log.Printf("loomy-checkin 成功: %s", res.Message)
+	}
+}
+
 // extCheckinOne POST /panel/api/ext/accounts/{provider}/{id}/checkin —— 单账号签到
 func (p *Panel) extCheckinOne(w http.ResponseWriter, r *http.Request) {
 	provider, id := r.PathValue("provider"), r.PathValue("id")

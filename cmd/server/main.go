@@ -231,6 +231,7 @@ func main() {
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
 	live := livecfg.New(livecfg.Snapshot{
 		APIKey:               cfg.APIKey,
+		APIKeys:              cfg.APIKeys,
 		SoftCooldown:         cfg.SoftRateDur,
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 	})
@@ -267,10 +268,12 @@ func main() {
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
-	// 外部积分账号每日自动签到（lobsterai/raccoon/qoder/codearts 全遍历，
-	// 与「一键签到全部」同管线；hook 返回即执行，串行遍历有界耗时）。
+	// 外部积分账号每日自动签到（lobsterai/raccoon/qoder/codearts 全遍历 +
+	// Loomy 每日赠送额度，与「一键签到全部」同管线；签到均幂等，hook 返回
+	// 即执行，串行遍历有界耗时）。
 	sch.SetExtHook(func() {
 		go pn.RunExtCheckinAll()
+		go pn.RunLoomyDailyCheckin()
 	})
 	// Loomy 无人值守续期（每 6h；剩余 <3 天且有存密密码时静默重登并双写
 	// 外部池 + loomy-session.json；无密码账号跳过等手动重登）。
@@ -282,6 +285,8 @@ func main() {
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,
+		ZaiKeys:      cfg.Schedule.Zai.ZaiKeys,
+		BigModelKeys: cfg.Schedule.Zai.BigModelKeys,
 		Session:      sessRouter,
 		StickyCount:  sessCount,
 		RedisMode:    redisMode,
@@ -427,6 +432,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
 	live.Store(livecfg.Snapshot{
 		APIKey:               newCfg.APIKey,
+		APIKeys:              newCfg.APIKeys,
 		SoftCooldown:         newCfg.SoftRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
 	})

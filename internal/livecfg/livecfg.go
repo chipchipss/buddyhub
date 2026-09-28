@@ -9,6 +9,7 @@
 package livecfg
 
 import (
+	"crypto/subtle"
 	"sync/atomic"
 	"time"
 )
@@ -16,8 +17,40 @@ import (
 // Snapshot 一次读取的不可变配置视图。
 type Snapshot struct {
 	APIKey               string        // 网关/面板共同鉴权密钥；空 = 不鉴权
+	APIKeys              []APIKeyEntry // 多 Key 列表（平台级授权）；与 APIKey 任一命中即可
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
+}
+
+// APIKeyEntry 一把可下发的网关 Key。Platforms 空/含 "*" = 全平台；
+// 否则仅列出的前缀平台可用（"cn"/"global"/"loomy"/"qoder"/"codex"/"free"/"zai"）。
+type APIKeyEntry struct {
+	Key        string    `json:"key"`
+	Name       string    `json:"name"`
+	Platforms  []string  `json:"platforms,omitempty"`
+	CreatedAt  time.Time `json:"created_at,omitempty"`
+	Note       string    `json:"note,omitempty"`
+}
+
+// AllowsPlatform 该 Key 是否授权访问指定平台前缀。空平台列表 = 全平台。
+func (e APIKeyEntry) AllowsPlatform(platform string) bool {
+	if len(e.Platforms) == 0 {
+		return true
+	}
+	for _, p := range e.Platforms {
+		if p == "*" || p == platform {
+			return true
+		}
+	}
+	return false
+}
+
+// Match 常量时间比较 Key 是否等于给定值（逐字节异或累积，长度不同也不提前返回）。
+func (e APIKeyEntry) Match(given string) bool {
+	if e.Key == "" || given == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(e.Key), []byte(given)) == 1
 }
 
 // Holder 原子持有当前快照。

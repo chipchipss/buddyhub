@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/chipchipss/buddyhub/internal/livecfg"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,12 +16,18 @@ import (
 	"github.com/chipchipss/buddyhub/internal/prompt"
 )
 
+// APIKeyEntry 引用 livecfg 的定义（单一真相源；JSON 形状同面板契约）。
+type APIKeyEntry = livecfg.APIKeyEntry
+
 // Config 顶层配置。
 type Config struct {
-	Listen    string `json:"listen"`     // ":7863"
-	APIKey    string `json:"api_key"`    // 空 = 不鉴权
-	AuthDir   string `json:"auth_dir"`   // ./auths
-	StateFile string `json:"state_file"` // ./data/state.json
+	Listen string `json:"listen"`  // ":7863"
+	APIKey string `json:"api_key"` // 空 = 不鉴权
+	// APIKeys 多 Key 体系：每把 Key 可授权平台子集（platforms 空 = 全平台）。
+	// 与 api_key 任一命中即通过；面板可在线增删。持久化在本文件。
+	APIKeys   []APIKeyEntry `json:"api_keys,omitempty"`
+	AuthDir   string        `json:"auth_dir"`   // ./auths
+	StateFile string        `json:"state_file"` // ./data/state.json
 
 	Cooldown struct {
 		// hard_credit / err_threshold / err_cooldown 三个历史键已退役：
@@ -64,6 +71,15 @@ type Config struct {
 			LLM7       string `json:"llm7"`
 			OpenRouter string `json:"openrouter"`
 		} `json:"free_pool"`
+
+		// Zai Z.AI / 智谱 GLM API Key 池（zai: 前缀模型路由目标）。
+		// ZaiKeys 为 api.z.ai 的 API Key（GLM Coding Plan / 充值 key，x-api-key 鉴权、
+		// 无验证码）；BigModelKeys 为智谱开放平台 key（open.bigmodel.cn 同形端点）。
+		// 两池皆空 = zai: 通道禁用（模型列表不列、请求 404 提示）。
+		Zai struct {
+			ZaiKeys      []string `json:"zai_keys,omitempty"`
+			BigModelKeys []string `json:"bigmodel_keys,omitempty"`
+		} `json:"zai"`
 
 		// 余额后台周期刷新：两次签到时点之间 credits 也能保持新鲜（面板/状态观测用）。
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。

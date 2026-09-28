@@ -517,6 +517,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#models" data-view="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         模型与档位</a></li>
+      <li><a href="#apikeys" data-view="apikeys">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="5.5" cy="10.5" r="3"/><path d="M7.8 8.2 13 3m-2 0h2v2"/></svg>
+        API 密钥</a></li>
       <li><a href="#config" data-view="config">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
         配置</a></li>
@@ -780,6 +783,38 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     </section>
 
     <!-- 配置 -->
+    <!-- API 密钥 -->
+    <section class="view" id="view-apikeys" hidden>
+      <div class="box">
+        <header>
+          <h3>API 密钥 <span class="hint">每把 Key 可授权平台子集；平台列表留空 = 全平台。客户端用任一 Key 以 Bearer 调用</span></h3>
+          <span class="grow"></span>
+          <button class="xs" id="btnKeyList">刷新</button>
+          <button class="xs primary" id="btnKeyGen">生成新 Key</button>
+        </header>
+        <div class="pad">
+          <div id="newKeyForm" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:14px;">
+            <input type="text" id="nkName" placeholder="Key 名称（如：张三的 Cline）" style="flex:1; min-width:180px">
+            <div class="seg" id="nkPlatforms" style="flex-wrap:wrap">
+              <button type="button" class="seg-btn on" data-plat="*">全平台</button>
+              <button type="button" class="seg-btn" data-plat="workbuddy">腾讯</button>
+              <button type="button" class="seg-btn" data-plat="loomy">Loomy</button>
+              <button type="button" class="seg-btn" data-plat="qoder">Qoder</button>
+              <button type="button" class="seg-btn" data-plat="zai">Z.AI</button>
+              <button type="button" class="seg-btn" data-plat="codex">Codex</button>
+              <button type="button" class="seg-btn" data-plat="free">免费池</button>
+            </div>
+            <input type="text" id="nkNote" placeholder="备注（可选）" style="flex:1; min-width:140px">
+          </div>
+          <div class="state" id="akState" hidden></div>
+          <div id="akGrid" style="display:grid; gap:8px;"></div>
+          <div class="hint" style="margin-top:10px; font-size:11.5px; color:var(--ink-3)">
+            平台未勾选的 Key 调用对应模型会返回 403 platform_not_authorized。主 api_key（配置页）始终全平台。
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section class="view" id="view-config" hidden>
       <form id="cfgForm">
         <div class="box">

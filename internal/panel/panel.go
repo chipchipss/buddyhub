@@ -181,6 +181,10 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
+	// 多 API Key 管理（生成/删除/列表；与配置页整表单解耦的原子操作）
+	p.mux.HandleFunc("GET /panel/api/apikeys", p.withAuth(p.getAPIKeys))
+	p.mux.HandleFunc("POST /panel/api/apikeys", p.withAuth(p.postAPIKeys))
+	p.mux.HandleFunc("POST /panel/api/apikeys/delete", p.withAuth(p.deleteAPIKeys))
 	p.mux.HandleFunc("GET /panel/api/loomy/status", p.withAuth(p.loomyStatus))
 	p.mux.HandleFunc("POST /panel/api/loomy/complete_all", p.withAuth(p.loomyCompleteAll))
 	p.mux.HandleFunc("POST /panel/api/loomy/save", p.withAuth(p.loomySave))
