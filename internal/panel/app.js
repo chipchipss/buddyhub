@@ -1,7 +1,11 @@
 'use strict';
 /* ── 状态 ─────────────────────────────────────────────────────────── */
 const LS_KEY = 'buddyhub.key', LS_THEME = 'buddyhub.theme';
-let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
+const _urlParams = new URLSearchParams(location.search);
+const _themeParam = _urlParams.get('theme');
+const _keyParam = _urlParams.get('key');
+if (_keyParam) { try { localStorage.setItem(LS_KEY, _keyParam); } catch (e) {} }
+let theme = _themeParam === 'light' || _themeParam === 'dark' ? _themeParam : (localStorage.getItem(LS_THEME) || 'auto');   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
 let logPin = true, loginState = null, loginTimer = null;
@@ -360,14 +364,14 @@ async function loadModels() {
     tb.innerHTML = list.map(m => {
       const eff = (m.supported_efforts || []).slice();
       if (m.can_disable_thinking && eff.length && !eff.includes('off')) eff.push('off（可关）');
-      const effs = eff.length ? eff.map(e => '<span class="tag warn">' + esc(e) + '</span>').join(' ')
+      const effs = eff.length ? eff.map(e => '<span class="tag info">' + esc(e) + '</span>').join(' ')
         : '<span style="color:var(--ink-3);font-size:12.5px">' + (m.supports_reasoning ? '固定档 · 默认 ' + esc(m.default_effort || '?') : '不支持思考') + '</span>';
       // 能力徽标：默认模型 / 工具调用 / 视觉 / 纯推理（上游目录全字段透出，缺失不显示）
       const caps = [];
       if (m.is_default) caps.push('<span class="tag ok">默认</span>');
-      if (m.supports_tool_call) caps.push('<span class="tag warn">工具</span>');
-      if (m.supports_images) caps.push('<span class="tag warn">视觉</span>');
-      if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag warn">思考常开</span>');
+      if (m.supports_tool_call) caps.push('<span class="tag info">工具</span>');
+      if (m.supports_images) caps.push('<span class="tag info">视觉</span>');
+      if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag" style="background:rgba(155,81,224,.12);color:#7627bb">思考常开</span>');
       const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
       const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
       return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
