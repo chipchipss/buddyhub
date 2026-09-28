@@ -1376,7 +1376,7 @@ function renderUsageChart(series) {
     return;
   }
 
-  const W = 760, H = 180, PL = 52, PR = 12, PT = 12, PB = 30;
+  const W = 760, H = 196, PL = 52, PR = 12, PT = 12, PB = 46;
   const iw = W - PL - PR, ih = H - PT - PB;
 
   const t0 = pts[0].t;
@@ -1447,11 +1447,16 @@ function renderUsageChart(series) {
     const lab = p.scope === 'day'
       ? (d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0')
       : String(d.getHours()).padStart(2, '0') + ':00';
-    // 首尾标签靠边对齐，避免被裁掉
+    // 首尾标签靠边对齐，避免被裁掉。两侧都用「向内」锚定（end/middle），
+    // start 锚定会把文字推出 viewBox 右缘被裁（"13:00"变"13"）。
+    // 标签在基线下方 18px,柱子只长在基线上方,天然无重叠。
     const cx = xOf(p.t);
-    const anchor = cx < PL + 14 ? 'start' : (cx > W - PR - 14 ? 'end' : 'middle');
-    out += '<text class="tk" x="' + Math.max(PL, Math.min(W - PR, cx)).toFixed(1) +
-           '" y="' + (PT + ih + 15) + '" text-anchor="' + anchor + '">' + esc(lab) + '</text>';
+    let anchor = 'middle';
+    if (cx < PL + 14) anchor = 'end';
+    else if (cx > W - PR - 14) anchor = 'end';
+    const tx = Math.max(PL - 2, Math.min(W - PR, cx)).toFixed(1);
+    out += '<text class="tk" x="' + tx +
+           '" y="' + (PT + ih + 18) + '" text-anchor="' + anchor + '">' + esc(lab) + '</text>';
   }
 
   // 跨天时补一条日期分隔线，让「日界」在长窗口里可见
