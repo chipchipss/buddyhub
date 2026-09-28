@@ -1786,7 +1786,8 @@ if ($('btnLoomySendSms')) $('btnLoomySendSms').onclick = async () => {
 if ($('btnLoomyLoginSms')) $('btnLoomyLoginSms').onclick = async () => {
   const phone = $('loomyLoginPhone').value.trim(), code = $('loomySmsCode').value.trim();
   if (!phone || !code) { toast('手机号与验证码必填', 'err'); return; }
-  // msgid 由服务端 send_sms 时返回；前端简化：服务端用 phone+code 校验msgid缓存。
+  // msgid 由服务端 send_sms 时缓存（phone → msgid）；前端不持有，空串即可，
+  // 服务端按 phone 回填后调 LoginBySMS。
   loomyLogin('login_sms', { phone, code, msgid: '' }, '短信登录成功');
 };
 if ($('btnLoomyModalAutoAll')) $('btnLoomyModalAutoAll').onclick = async () => {

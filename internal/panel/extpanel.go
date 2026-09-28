@@ -225,7 +225,7 @@ func (p *Panel) extLoginLoomySendSMS(w http.ResponseWriter, r *http.Request) {
 }
 
 // extLoginLoomySMS POST /panel/api/ext/loomy/login_sms
-// body: {phone, code, msgid}
+// body: {phone, code, msgid?}——msgid 可空:进程内缓存按 phone 回填 send_sms 时返回的 msgid。
 func (p *Panel) extLoginLoomySMS(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Phone string `json:"phone"`
@@ -233,14 +233,18 @@ func (p *Panel) extLoginLoomySMS(w http.ResponseWriter, r *http.Request) {
 		MsgID string `json:"msgid"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
-		body.Phone == "" || body.Code == "" || body.MsgID == "" {
-		writeErr(w, http.StatusBadRequest, "phone/code/msgid 必填")
+		body.Phone == "" || body.Code == "" {
+		writeErr(w, http.StatusBadRequest, "phone/code 必填")
 		return
 	}
 	if body.MsgID == "" {
 		loomySmsMu.Lock()
 		body.MsgID = loomySmsMsgID[body.Phone]
 		loomySmsMu.Unlock()
+		if body.MsgID == "" {
+			writeErr(w, http.StatusBadRequest, "msgid 缺失:请先「发验证码」（服务端按手机号缓存 msgid）")
+			return
+		}
 	}
 	cli := loomy.NewClient()
 	res, err := cli.LoginBySMS(body.Phone, body.Code, body.MsgID, nil)
