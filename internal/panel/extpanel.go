@@ -15,6 +15,7 @@ import (
 
 	"github.com/chipchipss/buddyhub/internal/extprovider/loomy"
 	"github.com/chipchipss/buddyhub/internal/extstore"
+	"github.com/chipchipss/buddyhub/internal/upstream"
 )
 
 // extPath 外部账号持久化文件路径（state 文件同目录）。
@@ -255,10 +256,10 @@ func (p *Panel) extLoginLoomySMS(w http.ResponseWriter, r *http.Request) {
 	p.saveLoomyLogin(w, r, res, cli)
 }
 
-// saveLoomyLogin 登录成功公共尾：落库为 lobsterai 无关的 loomy 外部账号 + 触发首次状态查询。
-// 注意：Loomy 登录产物（session）保存在独立 provider="loomy-cli" 下，
-// 与本机客户端检测路径（provider="loomy" 的 session 文件）并存不冲突——
-// ChatStream/签到以 loomy-cli 凭据优先，回退客户端 session。
+// saveLoomyLogin 登录成功公共尾：落库为 loomy-cli 外部账号 + 同步写 data/loomy-session.json。
+// 双写原因：外部池（ext-accounts.json）承担签到/用量展示；而 Loomy 页的任务进度、
+// 每日签到、双积分池查询走 upstream.FindLoomySession()，其第 0 优先级来源是
+// data/loomy-session.json（本机无桌面客户端时唯一的凭据来源）。缺任一份，对应页面即"什么都没有"。
 func (p *Panel) saveLoomyLogin(w http.ResponseWriter, r *http.Request, res *loomy.LoginResult, cli *loomy.Client) {
 	cred := map[string]any{
 		"session": res.Session,
@@ -273,6 +274,14 @@ func (p *Panel) saveLoomyLogin(w http.ResponseWriter, r *http.Request, res *loom
 	if err := p.extManager().Add("loomy-cli", id, res.Phone, raw); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// 同步 Loomy 页凭据（FindLoomySession 第 0 优先级读取此文件）
+	if err := upstream.SaveLoomySession(&upstream.LoomySession{
+		Session: res.Session,
+		UserID:  res.UserID,
+		Phone:   res.Phone,
+	}); err != nil {
+		log.Printf("panel: Loomy 会话文件写入失败（外部池已保存，任务页可能不可用）: %v", err)
 	}
 	log.Printf("panel: Loomy 账号已登录并保存 (%s)", res.Phone)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "userid": res.UserID})
