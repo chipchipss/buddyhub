@@ -117,6 +117,7 @@ type Handler struct {
 	// 仅同账号串行失败时被写入，读取方在返回错误前立即读，竞态无害）。
 	lastQoderErr string
 	lastCodexErr string
+	lastLoomyErr string
 }
 
 // NewHandler 构建 handler。
@@ -446,6 +447,30 @@ func (h *Handler) modelList() []map[string]any {
 			})
 		}
 	}
+	// Loomy 模型名单（loomy: 前缀）：有可用凭据时实时拉上游目录透出
+	// （原样无别名；上游对未知模型静默回落 deepseek，故客户端应读响应 model 字段）。
+	if mods := h.loomyCatalog(); len(mods) > 0 {
+		for _, m := range mods {
+			id, _ := m["id"].(string)
+			if id == "" {
+				continue
+			}
+			entry := map[string]any{
+				"id":       loomyModelPrefix + id,
+				"object":   "model",
+				"created":  1753600000,
+				"owned_by": "loomy",
+			}
+			if cl, ok := m["context_length"].(float64); ok && cl > 0 {
+				entry["context_length"] = int64(cl)
+			}
+			// name 字段含倍率（如 "Spark X2.5 (x0.1)"）→ 透传为描述。
+			if name, ok := m["name"].(string); ok && name != "" {
+				entry["description"] = name
+			}
+			out = append(out, entry)
+		}
+	}
 	return out
 }
 
@@ -648,6 +673,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "free_pool_unavailable", "免费池不可用")
+		return
+	}
+
+	// Loomy 模型网关直连（loomy: 前缀）：讯飞模型上游 OpenAI 兼容，
+	// 登录 session 即 Bearer。凭据走外部池 loomy-cli + session 文件。
+	if isLoomyModel(bareModel) {
+		if h.LoomyChatStream(w, r, body, bareModel) {
+			return
+		}
+		detail := "没有可用的 Loomy 账号（面板-添加账号-Loomy 登录后重试）"
+		if h.lastLoomyErr != "" {
+			detail += "；最近失败原因: " + h.lastLoomyErr
+		}
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_loomy_account", detail)
 		return
 	}
 
