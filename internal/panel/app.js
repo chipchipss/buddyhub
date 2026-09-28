@@ -557,8 +557,15 @@ function switchAddTab(tab) {
 document.querySelectorAll('#addTabs .tab').forEach(b => {
   b.onclick = () => switchAddTab(b.dataset.tab);
 });
+document.querySelectorAll('#addRealmSeg .seg-btn').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#addRealmSeg .seg-btn').forEach(x => x.classList.toggle('on', x === b));
+  $('addRealmValue').value = b.dataset.realm;
+  $('addRealmHint').textContent = b.dataset.realm === 'global'
+    ? '国际版登录后，网关自动完成注册地区、激活与试用额度领取，全程无需手动操作。'
+    : '登录后自动完成签到与积分初始化。';
+});
 function startAddLogin() {
-  const realm = (document.querySelector('input[name="addRealm"]:checked') || {}).value || 'cn';
+  const realm = $('addRealmValue').value || 'cn';
   $('btnStartLogin').disabled = true;
   $('addLoad').hidden = false; $('addErr').hidden = true;
   api('login/start', { method: 'POST', body: JSON.stringify({ realm }) }).then(r => {

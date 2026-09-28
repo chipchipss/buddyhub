@@ -51,8 +51,13 @@ body {
 .brand .name { font-weight: 650; letter-spacing: -.01em; font-size: 15px; }
 .brand .sub { color: var(--ink-3); font-size: 11.5px; font-family: var(--mono); margin-top: 3px; }
 .nav ul { list-style: none; padding: 10px 8px; flex: 1; }
+.nav .group-label {
+  padding: 14px 11px 5px; font-size: 10.5px; font-weight: 650; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--ink-3); user-select: none;
+}
+.nav ul li:first-child.group-label { padding-top: 4px; }
 .nav a {
-  display: flex; align-items: center; gap: 10px; padding: 8px 11px; margin-bottom: 2px;
+  display: flex; align-items: center; gap: 10px; padding: 7px 11px 7px 13px; margin-bottom: 1px;
   color: var(--ink-2); text-decoration: none; border-radius: 7px; font-size: 13.5px;
 }
 .nav a:hover { background: var(--surface-2); color: var(--ink); }
@@ -230,6 +235,13 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .who .nm { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .who .id { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .realm-tag { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 4px; font: 500 10px/1 var(--sans); color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); vertical-align: 1px; }
+.seg { display: inline-flex; background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 8px; padding: 3px; gap: 2px; }
+.seg-btn {
+  border: none; background: none; cursor: pointer; padding: 5px 14px; border-radius: 6px;
+  font: 550 12.5px var(--sans); color: var(--ink-3); transition: all .12s ease;
+}
+.seg-btn:hover { color: var(--ink); }
+.seg-btn.on { background: var(--surface); color: var(--accent); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
 .realm-row { display: flex; align-items: center; gap: 14px; padding: 4px 0 10px; }
 .realm-opt { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; }
 .realm-opt input { accent-color: var(--accent); margin: 0; }
@@ -418,15 +430,18 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div class="sub" id="navSub">控制台</div>
     </div>
     <ul>
+      <li class="group-label">账号</li>
       <li><a href="#accounts" data-view="accounts" class="on">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4"/></svg>
         账号池</a></li>
+      <li><a href="#packages" data-view="packages">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.2 5.4 8 2.5l5.8 2.9v5.2L8 13.5l-5.8-2.9z"/><path d="M2.2 5.4 8 8.3l5.8-2.9M8 8.3v5.2"/></svg>
+        积分对比</a></li>
       <li><a href="#usage" data-view="usage">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12"/><path d="M4.5 13.5V8.2M8 13.5V3.5M11.5 13.5v-3"/></svg>
         用量</a></li>
-      <li><a href="#packages" data-view="packages">
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.2 5.4 8 2.5l5.8 2.9v5.2L8 13.5l-5.8-2.9z"/><path d="M2.2 5.4 8 8.3l5.8-2.9M8 8.3v5.2"/></svg>
-        积分构成</a></li>
+
+      <li class="group-label">自动化</li>
       <li><a href="#taskscenter" data-view="taskscenter">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 2.5h10v9H8l-3 3v-3H3z"/><path d="M6 6.5h4M6 9h2.5"/></svg>
         腾讯任务</a></li>
@@ -436,6 +451,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#ext" data-view="ext">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M2.5 6.5h11M6.5 6.5v7"/></svg>
         外部平台</a></li>
+
+      <li class="group-label">网关</li>
       <li><a href="#models" data-view="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         模型与档位</a></li>
@@ -570,7 +587,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div id="extContent" hidden style="padding: 14px 16px;">
           <div id="extGrid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px;"></div>
           <details style="margin-top: 12px; border-top: 1px solid var(--line-soft); padding-top: 10px;">
-            <summary style="cursor: pointer; font-size: 12.5px; color: var(--ink-3);">手工添加账号（粘贴凭据 JSON）</summary>
+            <summary style="cursor: pointer; font-size: 12.5px; color: var(--ink-3);">高级：手工粘贴凭据 JSON 添加（常规请用「添加账号」弹窗）</summary>
             <div style="display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center;">
               <select id="extProvider" style="padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line-soft); background: var(--surface-2); color: var(--ink-1);">
                 <option value="lobsterai">LobsterAI（有道）</option>
@@ -941,21 +958,21 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <header>
       <h3>添加账号</h3>
       <div class="tabs" id="addTabs">
-        <button class="tab on" data-tab="login">浏览器登录</button>
-        <button class="tab" data-tab="import">导入 JSON</button>
+        <button class="tab on" data-tab="login">腾讯 WorkBuddy</button>
         <button class="tab" data-tab="loomy">Loomy</button>
+        <button class="tab" data-tab="import">手动 JSON</button>
       </div>
     </header>
     <div class="body">
       <!-- 浏览器登录 -->
       <div id="addTabLogin" class="tab-panel">
         <div id="addPick">
-          <div class="realm-row">
-            <span class="hint" style="font-size:12px">版本：</span>
-            <label class="realm-opt"><input type="radio" name="addRealm" value="cn" checked> 国内版（CN）</label>
-            <label class="realm-opt"><input type="radio" name="addRealm" value="global"> 国际版（Global）</label>
+          <div class="seg" id="addRealmSeg">
+            <button type="button" class="seg-btn on" data-realm="cn">国内版 CN</button>
+            <button type="button" class="seg-btn" data-realm="global">国际版 Global</button>
           </div>
-          <div class="hint" style="font-size:12px;margin-top:2px">国际版登录后，网关自动完成注册地区、激活与试用额度领取，全程无需手动操作。</div>
+          <input type="hidden" id="addRealmValue" value="cn">
+          <div class="hint" style="font-size:12px;margin-top:8px" id="addRealmHint">登录后自动完成签到与积分初始化。</div>
         </div>
         <div id="addLoad" class="state" hidden><span class="dots">正在获取授权链接</span></div>
         <div id="addReady" hidden>
