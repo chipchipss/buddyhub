@@ -10,7 +10,7 @@ data/
 # Binaries (anchored to repo root only — bare "login"/"credit" would also ignore cmd/login/, cmd/credit/)
 /login
 /credit
-/wb2api
+/buddyhub
 /signin_bin
 
 # Config with secrets (use config.example.json)
@@ -36,7 +36,7 @@ docs/
 !README.md
 
 # Windows binaries
-/wb2api.exe
+/buddyhub.exe
 /login.exe
 /credit.exe
 
