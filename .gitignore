@@ -44,3 +44,6 @@ docs/
 /cmd/desktopverify*/
 *.zip
 server.exe
+
+# 本地临时产物（截图 / 验证二进制）
+tmp/
