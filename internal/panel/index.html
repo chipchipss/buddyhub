@@ -501,17 +501,17 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         用量</a></li>
 
       <li class="group-label tog" id="autoGroupToggle" aria-expanded="false">
-        自动化 <svg class="chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6l4 4 4-4"/></svg>
+        任务 <svg class="chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6l4 4 4-4"/></svg>
       </li>
       <li class="sub" data-sub="taskscenter"><a href="#taskscenter" data-view="taskscenter">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 2.5h10v9H8l-3 3v-3H3z"/><path d="M6 6.5h4M6 9h2.5"/></svg>
-        腾讯任务</a></li>
+        任务 · 腾讯</a></li>
       <li class="sub" data-sub="loomy"><a href="#loomy" data-view="loomy">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6.2"/><path d="M8 4.5V8l2.4 1.6"/></svg>
-        Loomy（讯飞）</a></li>
+        任务 · Loomy</a></li>
       <li class="sub" data-sub="ext"><a href="#ext" data-view="ext">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M2.5 6.5h11M6.5 6.5v7"/></svg>
-        外部平台</a></li>
+        任务 · 外部平台</a></li>
 
       <li class="group-label">网关</li>
       <li><a href="#models" data-view="models">
@@ -713,6 +713,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <h3>账号对比</h3>
           <span class="grow"></span>
           <span class="note" id="pkNote">—</span>
+          <select id="pkPlat" class="xs" title="按平台筛选">
+            <option value="all" selected>全部平台</option>
+            <option value="workbuddy">腾讯</option>
+            <option value="loomy">Loomy</option>
+            <option value="qoder">Qoder</option>
+            <option value="zai">Z.AI</option>
+          </select>
           <button class="xs" id="btnPk">刷新</button>
         </header>
         <div class="pad"><div class="pk-grid" id="pkSummary"></div></div>
@@ -727,6 +734,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <h3>用量总览</h3>
           <span class="grow"></span>
           <span class="note" id="usNote">—</span>
+          <select id="usPlat" class="xs" title="按平台筛选">
+            <option value="all" selected>全部平台</option>
+            <option value="cn">腾讯 CN</option>
+            <option value="global">腾讯 Global</option>
+            <option value="loomy">Loomy</option>
+            <option value="qoder">Qoder</option>
+            <option value="codex">Codex</option>
+            <option value="zai">Z.AI</option>
+            <option value="free">免费池</option>
+          </select>
           <select id="usWindow" class="xs">
             <option value="24">近 24 小时</option>
             <option value="72" selected>近 3 天</option>

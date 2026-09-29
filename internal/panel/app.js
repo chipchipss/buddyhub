@@ -130,7 +130,7 @@ $('btnKey').onclick = async () => {
 $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分对比', taskscenter: '腾讯任务', loomy: 'Loomy（讯飞）', ext: '外部平台', models: '模型与档位', apikeys: 'API 密钥', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分对比', taskscenter: '任务 · 腾讯', loomy: '任务 · Loomy', ext: '任务 · 外部平台', models: '模型与档位', apikeys: 'API 密钥', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -1479,11 +1479,39 @@ function renderUsageChart(series) {
 
 function fmtTokTip(v) { return fmtTok(v); }
 
+let _lastUsage = null;   // 最近一次原始快照（平台筛选在本地重渲,避免重复拉取）
+function currentUsagePlat() { return ($('usPlat') && $('usPlat').value) || 'all'; }
+
+function renderUsageFiltered() {
+  if (!_lastUsage) return;
+  const plat = currentUsagePlat();
+  if (plat === 'all') { renderUsage(_lastUsage); return; }
+  const d = JSON.parse(JSON.stringify(_lastUsage));  // 深拷贝避免污染缓存
+  const match = k => k === plat || k === plat + ':' || (plat === 'cn' && (k === 'cn' || !k)) || (plat === 'global' && k === 'global');
+  // 按模型行:模型 id 带 zai:/loomy: 等前缀,也按前缀匹配
+  d.by_model = (d.by_model || []).filter(x => match(x.key) || x.key.startsWith(plat + ':'));
+  d.by_account = (d.by_account || []).filter(x => match(x.realm || ''));
+  d.by_realm = (d.by_realm || []).filter(x => match(x.key));
+  // totals 重算
+  const t = { requests: 0, total_tokens: 0, prompt_tokens: 0, completion_tokens: 0, errors: 0 };
+  for (const x of d.by_account) {
+    t.requests += x.requests || 0; t.total_tokens += x.total_tokens || 0;
+    t.prompt_tokens += x.prompt_tokens || 0; t.completion_tokens += x.completion_tokens || 0;
+    t.errors += x.errors || 0;
+  }
+  t.avg_latency_ms = d.by_account.length
+    ? d.by_account.reduce((a, x) => a + (x.avg_latency_ms || 0), 0) / d.by_account.length : 0;
+  d.totals = t;
+  d.series = (d.series || []).filter(() => true);  // series 混合 realm,平台粒度重算成本高——保留原曲线并在 note 说明
+  renderUsage(d);
+}
+
 async function loadUsage() {
   const hours = ($('usWindow') && $('usWindow').value) || 72;
   try {
     const d = await api('usage?hours=' + encodeURIComponent(hours));
-    renderUsage(d);
+    _lastUsage = d;
+    renderUsageFiltered();
   } catch (e) {
     $('usChart').innerHTML = '<div class="us-empty">读取用量失败：' + esc(e.message) + '</div>';
   }
@@ -1491,6 +1519,7 @@ async function loadUsage() {
 
 if ($('btnUsage')) $('btnUsage').onclick = loadUsage;
 if ($('usWindow')) $('usWindow').onchange = loadUsage;
+if ($('usPlat')) $('usPlat').onchange = renderUsageFiltered;
 
 /* ── 积分构成 ─────────────────────────────────────────────────────── */
 /* 一个账号的余额是若干积分包之和。包按来源命名（「国内运营裂变包」「拉新权益包」
@@ -1531,7 +1560,13 @@ function pkBySource(packs) {
 }
 
 function renderPackages(d) {
-  const list = (d.accounts || []);
+  let list = (d.accounts || []);
+  // 平台筛选:积分对比只统计腾讯池账号(realm=cn/global);loomy/qoder/zai 的
+  // 额度形态不同,分别在外部平台/任务页呈现,不在本页混排。
+  const plat = ($('pkPlat') && $('pkPlat').value) || 'all';
+  if (plat !== 'all') {
+    list = list.filter(a => (a.realm || 'cn') === (plat === 'workbuddy' ? 'cn' : plat));
+  }
   if (!list.length) {
     $('pkSummary').innerHTML = '<div class="empty">没有账号</div>';
     return;
@@ -1623,6 +1658,7 @@ async function loadPackages() {
   $('pkDetail').innerHTML = '';
   try {
     const d = await api('packages');
+    _lastPk = d;
     renderPackages(d);
   } catch (e) {
     $('pkSummary').innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>';
@@ -1630,6 +1666,8 @@ async function loadPackages() {
 }
 
 if ($('btnPk')) $('btnPk').onclick = loadPackages;
+if ($('pkPlat')) $('pkPlat').onchange = () => { if (_lastPk) renderPackages(_lastPk); };
+let _lastPk = null;
 
 /* ── Loomy 新手之旅任务（讯飞） ─────────────────────────────────────── */
 async function loadLoomyStatus(quiet) {
