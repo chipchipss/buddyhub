@@ -363,7 +363,21 @@ async function loadModels() {
     const probes = pr.probes || {};
     const probeKeys = Object.keys(probes);
     const probeOf = id => probes[id] || probes[probeKeys.find(k => k.endsWith(':' + id))];
-    tb.innerHTML = list.map(m => {
+    // 按平台分组（网关拆分展示）；顺序即导航语义
+    const platOf = id => id.startsWith('loomy:') ? ['loomy', 'Loomy（讯飞）', 'rgba(155,81,224,.12);color:#7627bb']
+      : id.startsWith('qoder:') ? ['qoder', 'Qoder（阿里）', null]
+      : id.startsWith('zai:') ? ['zai', 'Z.AI 智谱 GLM', null]
+      : id.startsWith('codex:') ? ['codex', 'Codex 订阅池', null]
+      : id.startsWith('free:') ? ['free', '免费 Key 池', null]
+      : ['workbuddy', '腾讯 WorkBuddy', null];
+    const groups = [];
+    for (const m of list) {
+      const pk = platOf(m.id);
+      let g = groups.find(x => x.key === pk[0]);
+      if (!g) { g = { key: pk[0], name: pk[1], badge: pk[2], models: [] }; groups.push(g); }
+      g.models.push(m);
+    }
+    function rowOf(m) {
       const eff = (m.supported_efforts || []).slice();
       if (m.can_disable_thinking && eff.length && !eff.includes('off')) eff.push('off（可关）');
       const effs = eff.length ? eff.map(e => '<span class="tag info">' + esc(e) + '</span>').join(' ')
@@ -382,7 +396,17 @@ async function loadModels() {
         '<td class="efs" style="white-space:normal">' + effs + '</td>' +
         '<td class="num">' + (m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—') + '</td>' +
         outCell(m, probeOf(m.id)) + '</tr>';
-    }).join('');
+    }
+    let html = '';
+    for (const g of groups) {
+      const badge = g.badge
+        ? '<span class="tag" style="vertical-align:1px; margin-right:6px; background:' + g.badge + '">' + g.name + '</span>'
+        : '<span class="tag info" style="vertical-align:1px; margin-right:6px">' + g.name + '</span>';
+      html += '<tr><td colspan="7" style="padding:9px 11px 5px; background:var(--surface);">' + badge +
+        '<span style="font-size:11.5px; color:var(--ink-3)">共 ' + g.models.length + ' 个模型</span></td></tr>';
+      html += g.models.map(rowOf).join('');
+    }
+    tb.innerHTML = html;
     const hit = list.filter(m => probeOf(m.id)).length;
     $('mdNote').textContent = list.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '');
   } catch (e) {
