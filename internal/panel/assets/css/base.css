@@ -310,6 +310,7 @@ body::after {
   .brand .sub { display: none; }
   .nav ul { display: flex; overflow-x: auto; padding: 6px; }
   .nav .group-label { display: none; }
+  .nav .group-label.tog { display: none; } /* flex 覆盖上一行，需显式再藏 */
   .nav li.sub { display: none !important; }
   .nav a { white-space: nowrap; padding: 7px 12px; }
   .nav .sig { display: none; }
