@@ -54,6 +54,13 @@ type Config struct {
 	// StickyCount 返回粘性会话绑定数；nil 时报告 0。
 	StickyCount func() int
 
+	// ZaiKeys Z.AI API Key 池（统一账号目录展示用，掩码呈现）。
+	ZaiKeys []string
+	// CodexCount 本机 Codex 登录数（nil 时目录不列 codex 组）。
+	CodexCount func() int
+	// FreeKeysDesc 免费池概览（nil 时不列 free 组）。
+	FreeKeysDesc func() []struct{ Provider, Masked string }
+
 	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
 	Usage *usage.Recorder
 
@@ -182,6 +189,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
 	// 多 API Key 管理（生成/删除/列表；与配置页整表单解耦的原子操作）
+	p.mux.HandleFunc("GET /panel/api/accounts/dir", p.withAuth(p.accountsDir))
 	p.mux.HandleFunc("GET /panel/api/apikeys", p.withAuth(p.getAPIKeys))
 	p.mux.HandleFunc("POST /panel/api/apikeys", p.withAuth(p.postAPIKeys))
 	p.mux.HandleFunc("POST /panel/api/apikeys/delete", p.withAuth(p.deleteAPIKeys))

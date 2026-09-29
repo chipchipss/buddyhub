@@ -252,6 +252,11 @@ func main() {
 		APIKey:      cfg.APIKey,
 		RedisMode:   redisMode,
 		StickyCount: sessCount,
+		ZaiKeys:     cfg.Schedule.Zai.ZaiKeys,
+		CodexCount:  server.CodexCount,
+		FreeKeysDesc: func() []struct{ Provider, Masked string } {
+			return server.KeyPoolDesc()
+		},
 		Version:     appVersion,
 		Live:        live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：

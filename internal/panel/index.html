@@ -548,6 +548,18 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
     <!-- 账号池 -->
     <section class="view" id="view-accounts">
+      <div class="box" id="accDirBox">
+        <header>
+          <h3>账号目录 <span class="hint">全部平台 · 点击平台进入其管理页</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="dirSummary"></span>
+          <button class="xs" id="btnDirRefresh">刷新</button>
+        </header>
+        <div class="pad" style="padding: 12px 16px;">
+          <div id="dirTabs" style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px;"></div>
+          <div id="dirGrid" style="display:grid; gap:8px;"></div>
+        </div>
+      </div>
       <div class="stats">
         <div class="stat"><div class="v" id="sTotal">-</div><div class="k">账号总数</div></div>
         <div class="stat good"><div class="v" id="sHealthy">-</div><div class="k">可用</div></div>

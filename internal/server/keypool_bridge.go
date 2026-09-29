@@ -38,6 +38,29 @@ func SetKeyPoolKeys(keys map[string]string) {
 	poolKeys.mu.Unlock()
 }
 
+// KeyPoolDesc 免费池概览（provider + 掩码 key；面板统一账号目录用）。
+func KeyPoolDesc() []struct{ Provider, Masked string } {
+	poolKeys.mu.RLock()
+	defer poolKeys.mu.RUnlock()
+	out := make([]struct{ Provider, Masked string }, 0, len(poolKeys.keys))
+	for k, v := range poolKeys.keys {
+		if v == "" {
+			continue
+		}
+		masked := v
+		if len(v) > 8 {
+			masked = v[:6] + "…" + v[len(v)-4:]
+		} else {
+			masked = strings.Repeat("*", len(v))
+		}
+		out = append(out, struct{ Provider, Masked string }{k, masked})
+	}
+	return out
+}
+
+// CodexCount 本机 Codex 登录数。
+func CodexCount() int { return len(keypool.ListCodexAccounts()) }
+
 // keyFor 取指定上游的 key（缺省空串 = 匿名层，仅 LLM7 支持）。
 func keyFor(provider string) string {
 	poolKeys.mu.RLock()

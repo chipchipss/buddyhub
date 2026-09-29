@@ -147,6 +147,7 @@ function go(v) {
   if (v === 'loomy') { if (typeof loadLoomyStatus === 'function') loadLoomyStatus(true); }
   if (v === 'ext') { if (typeof loadExtAccounts === 'function') loadExtAccounts(true); }
   if (v === 'apikeys') { if (typeof loadAPIKeys === 'function') loadAPIKeys(); }
+  if (v === 'accounts') { if (typeof loadAccountDir === 'function') loadAccountDir(); }
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
 
@@ -1984,3 +1985,53 @@ if ($('btnKeyGen')) $('btnKeyGen').onclick = async () => {
     loadAPIKeys();
   } catch (e) { toast(e.message, 'err'); }
 };
+
+
+/* ── 统一账号目录（全部 + 平台子目录）────────────────────────────── */
+const DIR_PLAT_NAMES = { workbuddy: '腾讯 WorkBuddy', loomy: 'Loomy（讯飞）', qoder: 'Qoder', lobsterai: 'LobsterAI', raccoon: '小浣熊', codearts: 'CodeArts', zai: 'Z.AI 智谱', codex: 'Codex', free: '免费池' };
+let dirActive = 'all';
+
+async function loadAccountDir() {
+  const tabs = $('dirTabs'), grid = $('dirGrid');
+  try {
+    const d = await api('accounts/dir');
+    const plats = d.platforms || [];
+    // tabs: 全部 + 各平台(带账号数)
+    const counts = plats.map(p => ({ id: p.id, name: DIR_PLAT_NAMES[p.id] || p.name, n: (p.accounts || []).length }));
+    const total = counts.reduce((a, c) => a + c.n, 0);
+    tabs.innerHTML = [{ id: 'all', name: '全部', n: total }].concat(counts).map(c =>
+      '<button class="chip' + (dirActive === c.id ? ' on' : '') + '" data-dir-plat="' + c.id + '">' +
+      c.name + ' <span style="opacity:.65">' + c.n + '</span></button>').join('');
+    tabs.querySelectorAll('[data-dir-plat]').forEach(b => b.onclick = () => { dirActive = b.dataset.dirPlat; loadAccountDir(); });
+    $('dirSummary').textContent = total + ' 个账号 · ' + counts.filter(c => c.n > 0).length + ' 个平台';
+
+    const shown = dirActive === 'all' ? plats : plats.filter(p => p.id === dirActive);
+    const ST = { healthy: '<span class="tag ok">正常</span>', cooling: '<span class="tag warn">冷却</span>', off: '<span class="tag mute">停用</span>' };
+    grid.innerHTML = shown.map(p => {
+      const n = (p.accounts || []).length;
+      const rows = (p.accounts || []).map(a =>
+        '<tr>' +
+        '<td class="mark" aria-hidden="true"><i style="background:' + (a.status === 'healthy' ? 'var(--ok)' : a.status === 'cooling' ? 'var(--warn)' : 'var(--ink-3)') + '"></i></td>' +
+        '<td><div class="who"><div class="nm">' + esc(a.label || a.id) + '</div><div class="id">' + esc(a.id) + '</div></div></td>' +
+        '<td>' + (ST[a.status] || '<span class="tag mute">未知</span>') + '</td>' +
+        '<td class="num">' + esc(a.quota || '—') + '</td>' +
+        '<td style="color:var(--ink-3); font-size:12px">' + esc(a.detail || '') + '</td>' +
+        '<td class="c-acts"><a href="' + (a.manage_to || '#accounts') + '" style="font-size:12px; color:var(--accent); text-decoration:none">管理 →</a></td>' +
+        '</tr>').join('');
+      const apiTag = p.api_model ? '<span class="tag info">API ' + esc(p.api_model) + '*</span>' : '<span class="tag mute">无对话 API</span>';
+      return '<div style="background: var(--raise); border-radius: 14px; overflow:hidden; margin-bottom: 2px;">' +
+        '<div style="display:flex; align-items:center; gap:8px; padding:10px 14px;">' +
+          '<span style="font-weight:650; font-size:13.5px">' + (DIR_PLAT_NAMES[p.id] || p.name) + '</span>' + apiTag +
+          '<span style="color:var(--ink-3); font-size:12px">' + n + ' 个账号</span>' +
+          '<span class="grow" style="flex:1"></span>' +
+          '<a href="' + (p.manage_to || '#accounts') + '" style="font-size:12px; color:var(--accent); text-decoration:none">平台管理 →</a>' +
+        '</div>' +
+        (n ? '<table class="acc" style="min-width:0"><thead><tr><th class="mark" aria-hidden="true"></th><th>账号</th><th>状态</th><th>额度</th><th>备注</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>'
+           : '<div style="padding:10px 14px; color:var(--ink-3); font-size:12px">暂无账号 —— 添加入口见平台管理页</div>') +
+      '</div>';
+    }).join('') || '<div class="empty">该平台暂无账号</div>';
+  } catch (e) {
+    grid.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  }
+}
+if ($('btnDirRefresh')) $('btnDirRefresh').onclick = loadAccountDir;
