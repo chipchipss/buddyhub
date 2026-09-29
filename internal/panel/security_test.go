@@ -63,15 +63,15 @@ func TestCSPDisallowsInlineScriptAndFraming(t *testing.T) {
 	}
 }
 
-// 页面必须引用外部脚本（内联脚本会被上面的 CSP 拦掉，页面将完全不可用）。
+// 页面必须以 ES 模块形式外链入口（内联脚本会被上面的 CSP 拦掉，页面完全不可用）。
 func TestIndexReferencesExternalScript(t *testing.T) {
 	p := newTestPanel()
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
 	body := rec.Body.String()
 
-	if !strings.Contains(body, `<script src="app.js"></script>`) {
-		t.Error("index.html must load app.js externally (inline script is blocked by CSP)")
+	if !strings.Contains(body, `<script type="module" src="js/boot.js"></script>`) {
+		t.Error("index.html must load the module entry externally (inline script is blocked by CSP)")
 	}
 	// 反例保护：出现内联 <script>...</script> 内容块即为回归
 	if strings.Contains(body, "<script>\n") || strings.Contains(body, "<script> ") {
@@ -79,19 +79,19 @@ func TestIndexReferencesExternalScript(t *testing.T) {
 	}
 }
 
-// app.js 必须能作为同源脚本取到且类型正确（否则页面白屏）。
+// 入口模块必须能作为同源脚本取到且类型正确（否则页面白屏）。
 func TestAppScriptServed(t *testing.T) {
 	p := newTestPanel()
 	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/app.js", nil))
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/js/boot.js", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code=%d want 200", rec.Code)
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
 		t.Errorf("Content-Type=%q want javascript", ct)
 	}
-	if !strings.Contains(rec.Body.String(), "'use strict'") {
-		t.Error("app.js body looks wrong")
+	if !strings.Contains(rec.Body.String(), "startShell") {
+		t.Error("boot.js body looks wrong")
 	}
 }
 

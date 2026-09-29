@@ -2,6 +2,7 @@ package panel
 
 import (
 	"bytes"
+	"io/fs"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -10,36 +11,142 @@ import (
 	"testing"
 )
 
-// TestAppJSSyntax 拼接后的 app.js 必须能通过 JS 解析器语法校验。
+// copyModules 把内嵌的前端模块树复制到临时目录，并写入 package.json
+// （{"type":"module"}）——Node 据此把 .js 当 ES 模块解析，从而能用原生
+// 语法检查与动态 import 验证前端，而不引入任何构建步骤。
+func copyModules(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	err := fs.WalkDir(webFS, "web/js", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, rerr := fs.ReadFile(webFS, p)
+		if rerr != nil {
+			return rerr
+		}
+		out := filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(p, "web/js/")))
+		if merr := os.MkdirAll(filepath.Dir(out), 0o755); merr != nil {
+			return merr
+		}
+		return os.WriteFile(out, data, 0o644)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"type":"module"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestModuleSyntax 每个前端模块都必须通过 JS 解析器语法校验。
 //
-// 为什么需要：app.js 是 go:embed 进二进制的静态资源，Go 编译器不检查其内容——
-// 一次对象字面量键名未加引号（Model_chat_GLM5.2 被解析成属性访问 + 数字字面量）
-// 就让整个面板白屏，而所有 Go 测试依然全绿。此测试把语法校验前移到 CI。
-// 校验对象是「按 jsOrder 拼接后的产物」（与运行时同一顺序），而非单文件——
-// 模块顺序错误（用了未定义的全局）同样能在此暴露。无 node 环境时跳过。
-func TestAppJSSyntax(t *testing.T) {
+// 为什么需要：模块是 go:embed 进二进制的静态资源，Go 编译器不检查其内容——
+// 一次语法错误就让整个面板白屏，而所有 Go 测试依然全绿。无 node 时跳过。
+func TestModuleSyntax(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not available; skipping JS syntax check")
 	}
-	joined := string(concatDir("assets/js/", jsOrder))
-	if len(joined) == 0 {
-		t.Fatal("concatenated app.js is empty — check jsOrder against assets/js/")
-	}
-	// Windows 的 node --check 不支持 stdin（"-"），统一写临时文件校验
-	tmp := filepath.Join(t.TempDir(), "app.js")
-	if werr := os.WriteFile(tmp, []byte(joined), 0o644); werr != nil {
-		t.Fatal(werr)
-	}
-	out, err := exec.Command(node, "--check", tmp).CombinedOutput()
+	dir := copyModules(t)
+	var checked int
+	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".js") {
+			return err
+		}
+		checked++
+		out, cerr := exec.Command(node, "--check", p).CombinedOutput()
+		if cerr != nil {
+			t.Fatalf("%s 语法错误:\n%s", filepath.Base(p), out)
+		}
+		return nil
+	})
 	if err != nil {
-		t.Fatalf("app.js syntax error:\n%s", out)
+		t.Fatal(err)
+	}
+	if checked < 8 {
+		t.Fatalf("只检查到 %d 个模块，模块树疑似不完整", checked)
+	}
+}
+
+// TestModuleTopLevelSmoke 顶层求值冒烟：用 DOM 桩真实 import 入口模块，
+// 抓 TDZ / ReferenceError / 循环依赖一类的运行时错误——语法检查对此全盲。
+// 无 node 时跳过。
+func TestModuleTopLevelSmoke(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; JS smoke skipped")
+	}
+	dir := copyModules(t)
+	harness := `const inert = () => new Proxy(function () {}, {
+  get(t, k) {
+    if (k === Symbol.toPrimitive) return () => '';
+    if (k === 'nodeType') return 1;
+    if (k === 'value' || k === 'textContent') return '';
+    if (k === 'children' || k === 'childNodes' || k === 'files') return [];
+    if (k === 'classList' || k === 'style' || k === 'dataset') return inert();
+    if (k === 'parentNode') return null;
+    return inert();
+  },
+  set() { return true; },
+  apply() { return inert(); },
+  construct() { return inert(); },
+  has() { return true; },
+});
+const doc = {
+  createElement: () => inert(),
+  createElementNS: () => inert(),
+  createDocumentFragment: () => inert(),
+  createComment: () => inert(),
+  createTextNode: () => inert(),
+  getElementById: () => inert(),
+  querySelector: () => inert(),
+  querySelectorAll: () => [],
+  addEventListener() {}, removeEventListener() {},
+  documentElement: inert(), head: inert(), body: inert(),
+  cookie: '',
+};
+globalThis.document = doc;
+globalThis.Node = class Node {};
+globalThis.window = globalThis;
+globalThis.location = { hash: process.env.SMOKE_HASH || '#overview', search: '' };
+globalThis.history = { replaceState() {} };
+globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+Object.defineProperty(globalThis, 'navigator', {
+  value: { clipboard: { writeText: () => Promise.resolve() } },
+  configurable: true, writable: true,
+});
+globalThis.matchMedia = () => ({ matches: false, addEventListener() {} });
+globalThis.fetch = () => new Promise(() => {});
+globalThis.requestAnimationFrame = () => 0;
+globalThis.addEventListener = () => {};
+globalThis.removeEventListener = () => {};
+globalThis.isSecureContext = false;
+await import('./boot.js');
+console.log('SMOKE OK');
+process.exit(0);
+`
+	hf := filepath.Join(dir, "smoke.mjs")
+	if err := os.WriteFile(hf, []byte(harness), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, hash := range []string{"#overview", "#accounts", "#usage", "#automation", "#models", "#keys", "#config", "#logs"} {
+		cmd := exec.Command(node, hf)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "SMOKE_HASH="+hash)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("入口模块顶层求值 %s 崩溃: %v\n%s", hash, err, out)
+		}
+		if !bytes.Contains(out, []byte("SMOKE OK")) {
+			t.Fatalf("冒烟 %s 未通过:\n%s", hash, out)
+		}
 	}
 }
 
 // TestIndexHTMLNoInlineScript index.html 不得含内联 <script> 块：
 // 严格 CSP（script-src 'self'）会拦截内联脚本，页面将完全不可用。
-// 外链形式 <script src="..."> 允许。
 func TestIndexHTMLNoInlineScript(t *testing.T) {
 	p := newTestPanel()
 	rec := httptest.NewRecorder()
@@ -63,101 +170,61 @@ func TestIndexHTMLNoInlineScript(t *testing.T) {
 		}
 		rest = rest[end:]
 	}
-}
-
-// TestAppCSSServed 拼接样式入口必须可取且内容非空（防 cssOrder 与文件名漂移）。
-func TestAppCSSServed(t *testing.T) {
-	p := newTestPanel()
-	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/app.css", nil))
-	if rec.Code != 200 {
-		t.Fatalf("code=%d want 200", rec.Code)
-	}
-	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/css") {
-		t.Errorf("Content-Type=%q want text/css", ct)
-	}
-	if !strings.Contains(rec.Body.String(), "--glass") {
-		t.Error("app.css missing design tokens (--glass) — cssOrder or asset files drifted")
+	if !strings.Contains(body, `type="module"`) {
+		t.Error("index.html should load the entry as an ES module")
 	}
 }
 
-// TestAppJSTopLevelSmoke app.js 顶层求值冒烟（v1.11.3/1.11.4 两连炸后补的运行时闸门）：
-// node + DOM 桩执行「按 jsOrder 拼接后的产物」（与 /panel/app.js 返回体逐字节一致，
-// 经 HTTP handler 取得，杜绝测试与运行时顺序漂移），抓 TDZ/ReferenceError 类运行时
-// 错误——Go 侧不执行 JS，语法层检查对此全盲。无 node 的环境跳过。
-func TestAppJSTopLevelSmoke(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed; JS smoke skipped")
-	}
-	// 经真实 handler 拿产物：测试的就是线上这一份字节。
+// TestWebAssetsServed 模块与样式必须作为同源资源可取，且 Content-Type 正确
+// （类型错了浏览器会拒绝执行模块 → 页面白屏）。
+func TestWebAssetsServed(t *testing.T) {
 	p := newTestPanel()
-	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/app.js", nil))
-	joined := rec.Body.String()
-	if len(joined) == 0 {
-		t.Fatal("/panel/app.js returned empty body")
+	cases := []struct{ path, ctype, want string }{
+		{"/panel/js/boot.js", "javascript", "import"},
+		{"/panel/js/kernel.js", "javascript", "export function signal"},
+		{"/panel/css/tokens.css", "text/css", "--fg"},
 	}
-	harness := `const fs = require('fs');
-const vm = require('vm');
-const src = fs.readFileSync(process.argv[2], 'utf8');
-const inert = new Proxy(function () {}, {
-  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
-  set() { return true; },
-  apply() { return inert; },
-  construct() { return inert; },
-  has() { return true; },
-});
-const sandbox = new Proxy({
-  location: { hash: process.env.SMOKE_HASH || '#taskscenter' },
-  history: { replaceState() {} },
-  localStorage: { getItem: () => null, setItem() {} },
-  navigator: { clipboard: { writeText: () => Promise.resolve() } },
-  document: { querySelectorAll: () => [], querySelector: () => inert, getElementById: () => inert, addEventListener() {}, documentElement: inert, head: inert, body: inert, createElement: () => inert, cookie: '' },
-  fetch: () => new Promise(() => {}),
-  addEventListener() {}, removeEventListener() {},
-  matchMedia: () => ({ matches: false, addEventListener() {} }),
-  setInterval, clearInterval, setTimeout, clearTimeout,
-  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, URL, URLSearchParams, Symbol, Proxy, Reflect,
-}, { get(t, k) { return t[k]; }, has() { return true; } });
-sandbox.window = sandbox; sandbox.globalThis = sandbox;
-vm.createContext(sandbox);
-try {
-  vm.runInContext(src, sandbox, { filename: 'app.js' });
-  console.log('SMOKE OK');
-  process.exit(0);
-} catch (e) {
-  console.log('SMOKE FAIL:', (e && e.stack ? e.stack : e).toString().split('\n').slice(0, 5).join('\n'));
-  process.exit(1);
-}
-`
-	hf, err := os.CreateTemp(t.TempDir(), "smoke-*.cjs")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := hf.WriteString(harness); err != nil {
-		t.Fatal(err)
-	}
-	hf.Close()
-	// Windows 下 node 脚本不支持 "-" 读 stdin，产物写临时文件传入
-	jf, err := os.CreateTemp(t.TempDir(), "joined-*.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := jf.WriteString(joined); err != nil {
-		t.Fatal(err)
-	}
-	jf.Close()
-	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages"} {
-		cmd := exec.Command(node, hf.Name(), jf.Name())
-		cmd.Dir = "." // 测试工作目录 = internal/panel
-		cmd.Env = append(os.Environ(), "SMOKE_HASH="+hash)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("app.js 顶层求值 %s 崩溃: %v\n%s", hash, err, out)
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest("GET", c.path, nil))
+		if rec.Code != 200 {
+			t.Fatalf("%s code=%d want 200", c.path, rec.Code)
 		}
-		if !bytes.Contains(out, []byte("SMOKE OK")) {
-			t.Fatalf("app.js smoke %s 未通过:\n%s", hash, out)
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, c.ctype) {
+			t.Errorf("%s Content-Type=%q want %s", c.path, ct, c.ctype)
+		}
+		if !strings.Contains(rec.Body.String(), c.want) {
+			t.Errorf("%s 内容异常，未包含 %q", c.path, c.want)
+		}
+	}
+}
+
+// TestAssetTraversalBlocked 静态资源服务不得穿越目录或吐出未白名单的文件。
+// 穿越路径由 net/http 的 mux 先行 301/307 归一（重定向目标是 /panel 之外，
+// 不会落到本 handler），未白名单与不存在的路径必须 404。
+func TestAssetTraversalBlocked(t *testing.T) {
+	p := newTestPanel()
+	cases := []struct {
+		path string
+		want []int
+	}{
+		{"/panel/../index.go", []int{301, 307, 404}},
+		{"/panel/js/../../../go.mod", []int{301, 307, 404}},
+		{"/panel/js/nope.js", []int{404}},
+		{"/panel/js/boot.txt", []int{404}},
+		{"/panel/panel.go", []int{404}},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest("GET", c.path, nil))
+		ok := false
+		for _, w := range c.want {
+			if rec.Code == w {
+				ok = true
+			}
+		}
+		if !ok {
+			t.Errorf("%s code=%d want one of %v", c.path, rec.Code, c.want)
 		}
 	}
 }

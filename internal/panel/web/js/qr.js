@@ -1,8 +1,11 @@
-/* ── 精简 QR 编码器（券码二维码用）────────────────────────────────────
+/* ══════════════════════════════════════════════════════════════════
+   qr.js · 精简 QR 编码器（券码二维码用）
    规格子集：byte 模式、ECC L、版本 1-5（全部单纠错块，免块交织）、固定掩码 0。
-   完整性：规范允许任选掩码（解码器按格式信息位自行去掩码），固定掩码不影响
-   可扫描性；已用 python qrcode 库对多输入多版本做逐像素交叉验证（强制 byte
-   模式 + mask 0，5/5 全部 diff=0）。面板 CSP 只允许 self，外链 QR 服务不可用。 */
+   完整性：规范允许任选掩码（解码器按格式信息位自行去掩码），固定掩码不影响可扫描性；
+   已用 python qrcode 库对多输入多版本做逐像素交叉验证（5/5 diff=0）。
+   面板 CSP 只允许 self，外链 QR 服务不可用，故自带编码器。
+   ══════════════════════════════════════════════════════════════════ */
+
 // qr_gen.js —— 精简 QR 编码器（浏览器用 + node 可跑交叉验证）
 // 规格子集：byte 模式、ECC L、版本 1-5（全部单纠错块，免块交织）、固定掩码 0。
 // 完整性说明：规范允许编码器任选掩码（解码器按格式信息位自行去掩码），
@@ -68,7 +71,7 @@ function qrDataCodewords(text, dataCap) {
 }
 
 // 主入口：text → 布尔矩阵（true=深色模块）
-function qrMatrix(text) {
+export function qrMatrix(text) {
   const bytes = Array.from(new TextEncoder().encode(text));
   // 版本选择：需求 ≈ 2 码字头 + 文本长度，取首个放得下的版本
   let ver = 0;
@@ -145,7 +148,7 @@ function qrMatrix(text) {
 }
 
 // 矩阵 → SVG（quiet zone 4 模块）
-function qrSVG(M, px) {
+export function qrSVG(M, px) {
   const n = M.length, q = 4, total = n + q * 2;
   let s = '<svg viewBox="0 0 ' + total + ' ' + total + '" width="' + px + '" height="' + px + '" shape-rendering="crispEdges" role="img" style="background:#fff">';
   for (let r = 0; r < n; r++) for (let c = 0; c < n; c++)

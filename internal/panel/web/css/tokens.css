@@ -1,0 +1,152 @@
+/* ══════════════════════════════════════════════════════════════════
+   BuddyHub · tokens.css
+   单色设计系统：只有「淡黑」与「牛奶白」两个色相，靠明度/透明度/质感分层。
+
+   暗色（默认）：淡黑画布 + 牛奶白文字，玻璃取亮（white 低透明度叠加）
+   浅色        ：牛奶白画布 + 淡黑文字，玻璃取白（white 高透明度叠加）
+
+   没有任何彩色语义色——状态靠「形」而非「色」表达：
+     实心点 = 可用 · 空心环 = 冷却 · 虚线环 = 停用 · 描边加重 = 强调
+   ══════════════════════════════════════════════════════════════════ */
+
+:root {
+  color-scheme: dark;
+
+  /* 墨阶（画布由深到浅） */
+  --canvas: #0B0B0C;
+  --canvas-2: #101011;
+  --raise: #161617;
+
+  /* 玻璃（叠加层） */
+  --glass: rgba(255, 255, 255, .038);
+  --glass-2: rgba(255, 255, 255, .062);
+  --glass-3: rgba(255, 255, 255, .092);
+  --sheet: rgba(14, 14, 15, .82);      /* 抽屉 / 弹层（要挡内容，更实） */
+
+  /* 描边与高光 */
+  --edge: rgba(255, 255, 255, .085);
+  --edge-2: rgba(255, 255, 255, .17);
+  --hi: rgba(255, 255, 255, .20);      /* 玻璃上缘高光 */
+
+  /* 文字（牛奶白三阶） */
+  --fg: #F4F2EE;
+  --fg-2: rgba(244, 242, 238, .58);
+  --fg-3: rgba(244, 242, 238, .34);
+
+  /* 流光（按钮扫光渐变 + 强度） */
+  --sheen: linear-gradient(105deg,
+    transparent 30%,
+    rgba(255, 255, 255, .09) 43%,
+    rgba(255, 255, 255, .32) 50%,
+    rgba(255, 255, 255, .09) 57%,
+    transparent 70%);
+  --glow: rgba(255, 255, 255, .10);    /* 柔和外发光 */
+
+  /* 投影 */
+  --shadow: 0 20px 50px -22px rgba(0, 0, 0, .85), 0 2px 10px -4px rgba(0, 0, 0, .6);
+  --shadow-sm: 0 8px 22px -12px rgba(0, 0, 0, .7);
+  --shadow-pop: 0 40px 90px -30px rgba(0, 0, 0, .9);
+
+  /* 几何 */
+  --r: 18px;
+  --r-sm: 11px;
+  --r-xs: 8px;
+  --pill: 999px;
+
+  /* 动效 */
+  --ease: cubic-bezier(.32, .72, .28, 1);
+  --t: 220ms var(--ease);
+  --t-slow: 480ms var(--ease);
+
+  /* 字体 */
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+          "Segoe UI Variable Text", "Segoe UI", "PingFang SC",
+          "HarmonyOS Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+
+  --blur: blur(20px) saturate(1.35);
+  --blur-strong: blur(30px) saturate(1.5);
+}
+
+/* ── 牛奶白（浅色）─────────────────────────────────────────────── */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --canvas: #F5F3EF;
+  --canvas-2: #FBFAF7;
+  --raise: #FFFFFF;
+
+  --glass: rgba(255, 255, 255, .58);
+  --glass-2: rgba(255, 255, 255, .74);
+  --glass-3: rgba(255, 255, 255, .90);
+  --sheet: rgba(250, 249, 246, .88);
+
+  --edge: rgba(20, 18, 16, .085);
+  --edge-2: rgba(20, 18, 16, .18);
+  --hi: rgba(255, 255, 255, .95);
+
+  --fg: #171614;                        /* 淡黑 */
+  --fg-2: rgba(23, 22, 20, .58);
+  --fg-3: rgba(23, 22, 20, .36);
+
+  --sheen: linear-gradient(105deg,
+    transparent 30%,
+    rgba(255, 255, 255, .55) 43%,
+    rgba(255, 255, 255, 1) 50%,
+    rgba(255, 255, 255, .55) 57%,
+    transparent 70%);
+  --glow: rgba(255, 255, 255, .9);
+
+  --shadow: 0 20px 50px -26px rgba(35, 32, 28, .30), 0 2px 10px -6px rgba(35, 32, 28, .16);
+  --shadow-sm: 0 8px 22px -14px rgba(35, 32, 28, .26);
+  --shadow-pop: 0 40px 90px -34px rgba(35, 32, 28, .34);
+}
+
+/* ── 底座 ─────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; padding: 0; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  background: var(--canvas);
+  color: var(--fg);
+  font: 14px/1.6 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;                     /* 壳层内部滚动，页面本身不滚 */
+}
+::selection { background: rgba(255, 255, 255, .18); }
+:root[data-theme="light"] ::selection { background: rgba(23, 22, 20, .12); }
+:focus-visible { outline: 1.5px solid var(--edge-2); outline-offset: 2px; border-radius: 6px; }
+button, input, select, textarea { font: inherit; color: inherit; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* 滚动条：细、融进玻璃 */
+* { scrollbar-width: thin; scrollbar-color: var(--edge-2) transparent; }
+*::-webkit-scrollbar { width: 7px; height: 7px; }
+*::-webkit-scrollbar-thumb { background: var(--edge-2); border-radius: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* 画布质感：单色微光 + 细噪点（抑制渐变色带，给玻璃「材质」实感）*/
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: -2; pointer-events: none;
+  background:
+    radial-gradient(60% 45% at 18% -8%, rgba(255, 255, 255, .07), transparent 62%),
+    radial-gradient(50% 40% at 92% 6%, rgba(255, 255, 255, .045), transparent 60%),
+    radial-gradient(70% 50% at 50% 108%, rgba(255, 255, 255, .035), transparent 66%);
+}
+:root[data-theme="light"] body::before {
+  background:
+    radial-gradient(60% 45% at 16% -10%, rgba(255, 255, 255, .95), transparent 60%),
+    radial-gradient(52% 40% at 94% 4%, rgba(255, 255, 255, .70), transparent 58%),
+    radial-gradient(70% 50% at 50% 106%, rgba(255, 255, 255, .55), transparent 64%);
+}
+body::after {
+  content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  opacity: .55;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='matrix' values='0 0 0 0 .5 0 0 0 0 .5 0 0 0 0 .5 0 0 0 .045 0'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+:root[data-theme="light"] body::after { opacity: .35; }
