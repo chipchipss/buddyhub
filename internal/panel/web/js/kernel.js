@@ -76,6 +76,115 @@ export function effect(fn) {
   return e;
 }
 
+/* ── 弹簧动画 ───────────────────────────────────────────────────
+   用 Apple 的两个参数而不是物理三件套：
+     damping  阻尼比：1.0 = 临界阻尼（不过冲），< 1 有过冲
+     response 到达目标的快慢（秒）——不是"时长"，弹簧没有固定时长
+   关键能力：可随时改目标并保留当前速度（可中断、可反转、无速度断点）。
+   半隐式欧拉 + 固定子步长，保证不同帧率下行为一致。 */
+export function springValue({ from = 0, velocity = 0, damping = 1, response = 0.4, onUpdate, onDone }) {
+  let x = from, v = velocity, target = from, raf = 0, last = 0;
+  const omega = (2 * Math.PI) / Math.max(0.05, response);
+  const stiffness = omega * omega;
+  const dampCoef = 2 * damping * omega;
+
+  const step = now => {
+    const elapsed = last ? (now - last) / 1000 : 1 / 60;
+    last = now;
+    // NaN 防御：一旦状态被污染（外部传入坏速度等），立即落到目标并停表——
+    // 否则 NaN 让收敛判定永远为假，rAF 每帧空转烧 CPU。
+    if (!Number.isFinite(x) || !Number.isFinite(v)) {
+      x = target; v = 0;
+      onUpdate?.(x, v);
+      raf = 0;
+      onDone?.();
+      return;
+    }
+    let t = Math.min(0.064, Math.max(0, elapsed));   // 切后台回来时不做巨跳
+    const h = 1 / 240;
+    while (t > 0) {
+      const s = Math.min(h, t);
+      const a = -stiffness * (x - target) - dampCoef * v;
+      v += a * s;
+      x += v * s;
+      t -= s;
+    }
+    const settled = Math.abs(v) < 0.6 && Math.abs(x - target) < 0.4;
+    onUpdate?.(x, v);
+    if (settled) {
+      x = target; v = 0;
+      onUpdate?.(x, v);
+      raf = 0;
+      onDone?.();
+      return;
+    }
+    raf = requestAnimationFrame(step);
+  };
+
+  return {
+    get value() { return x; },
+    get velocity() { return v; },
+    /** 改目标（可带初速度）：飞行中改目标即为中断——速度不丢 */
+    to(next, nextVelocity) {
+      target = next;
+      if (nextVelocity != null) v = nextVelocity;
+      if (!raf) { last = 0; raf = requestAnimationFrame(step); }
+    },
+    /** 直接落到某值（不播动画）*/
+    jump(next) { target = next; x = next; v = 0; onUpdate?.(x, v); },
+    stop() { if (raf) cancelAnimationFrame(raf); raf = 0; },
+    get settled() { return !raf; },
+  };
+}
+
+/* 动量投影：由释放速度推出"它会滑到哪里"（Apple 的指数衰减式，不是 v²/2a）。
+   然后从投影落点里挑最近的目标，而不是从释放点挑——这样轻甩才有"抛出去"的感觉。 */
+export function projectMomentum(velocity, deceleration = 0.998) {
+  return (velocity / 1000) * deceleration / (1 - deceleration);
+}
+
+/* 边界阻尼：越界越拖不动（真东西是慢下来，不是撞墙停下）。 */
+export function rubberband(overshoot, dimension, constant = 0.55) {
+  return (overshoot * dimension * constant) / (dimension + constant * Math.abs(overshoot));
+}
+
+/** 把一组 {x, t} 采样点换算成速度（px/s）。取最近几帧，避免用整段拖动平均值。*/
+export function sampleVelocity(samples) {
+  if (!samples || samples.length < 2) return 0;
+  const a = samples[0], b = samples[samples.length - 1];
+  const dt = (b[1] - a[1]) / 1000;
+  if (!Number.isFinite(dt) || dt <= 0) return 0;
+  const v = (b[0] - a[0]) / dt;
+  return Number.isFinite(v) ? v : 0;
+}
+
+/** 材质化：玻璃表面进入/离开时让 模糊+缩放+透明度 一起动，
+    读起来像"一层真实材料到达"，而不是单纯的淡入。*/
+export function materialize(el, { open, onDone } = {}) {
+  if (el._mat) el._mat.stop();
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce) {                       // 减动效：只做短交叉淡入，不做位移/缩放
+    el.style.transform = 'none';
+    el.style.filter = 'none';
+    el.style.opacity = open ? '1' : '0';
+    onDone?.();
+    return;
+  }
+  const s = springValue({
+    from: open ? 0 : 1,
+    damping: 1,
+    response: open ? 0.34 : 0.24,     // 退出更快（非对称时长：系统响应要利落）
+    onUpdate: p => {
+      el.style.opacity = String(1 - p);
+      el.style.transform = `scale(${(1 - 0.04 * p).toFixed(4)})`;
+      el.style.filter = p > 0.02 ? `blur(${(6 * p).toFixed(2)}px)` : 'none';
+    },
+    onDone,
+  });
+  el._mat = s;
+  s.to(open ? 0 : 1);
+}
+
 /* ── DOM 构建 ─────────────────────────────────────────────────── */
 function append(el, kids) {
   for (const k of kids.flat(Infinity)) {
@@ -158,28 +267,84 @@ export async function apiUpload(path, form) {
 let onUnauthorized = null;
 export function setUnauthorizedHandler(fn) { onUnauthorized = fn; }
 
-/* ── Toast ────────────────────────────────────────────────────── */
+/* ── Toast ──────────────────────────────────────────────────────
+   用 transition 而非 keyframes：toast 会被连续快速触发，关键帧中断后从零重播，
+   过渡会平滑改道（Sonner 的结论）。离开比进入快——系统响应要利落。
+   标签页隐藏时暂停计时，避免切回来发现消息已经过期。 */
+const MAX_TOASTS = 4;
+const liveToasts = new Set();
+
+document.addEventListener('visibilitychange', () => {
+  for (const t of liveToasts) t.onVisibility(document.hidden);
+});
+
 export function toast(msg, kind) {
   const host = document.getElementById('toasts');
   if (!host) return;
+  while (host.childElementCount >= MAX_TOASTS) host.firstElementChild?.remove();
+
   const el = h('div', { class: 'toast' + (kind === 'fail' ? ' fail' : ''), text: msg });
   host.append(el);
-  setTimeout(() => {
-    el.style.transition = 'opacity .3s, transform .3s';
-    el.style.opacity = '0';
-    el.style.transform = 'translateY(6px)';
-    setTimeout(() => el.remove(), 320);
-  }, 3400);
+  requestAnimationFrame(() => el.classList.add('in'));
+
+  let remaining = 3400, startedAt = performance.now(), timer = 0;
+  const ctl = {
+    onVisibility(hidden) {
+      if (!el.isConnected) { liveToasts.delete(ctl); return; }
+      if (hidden) { clearTimeout(timer); remaining -= performance.now() - startedAt; }
+      else if (remaining > 0) run();
+    },
+  };
+  function run() {
+    startedAt = performance.now();
+    timer = setTimeout(() => {
+      liveToasts.delete(ctl);
+      el.classList.remove('in');
+      el.classList.add('out');
+      setTimeout(() => el.remove(), 220);
+    }, remaining);
+  }
+  liveToasts.add(ctl);
+  run();
 }
 
-/* ── 抽屉 ─────────────────────────────────────────────────────── */
-let drawerEl = null, scrimEl = null;
+/* ── 抽屉（玻璃滑层，可拖拽关闭）──────────────────────────────
+   实现 Apple 的流体交互四件事：
+     · 直接操作：拖动 1:1 跟手（尊重抓取偏移），不是等手势结束才动
+     · 可中断：飞行中抓住即从"当前屏幕值"继续，速度不丢
+     · 速度交接：松手时把指针速度交给弹簧，拖动与动画之间没有缝
+     · 动量投影：轻甩即可关闭——由速度投影落点决定去留，而非拖过半屏
+   方向判定在横纵之间二选一：横向占优才接管，否则放行给内容滚动。 */
+let drawerEl = null, scrimEl = null, drawerSpring = null;
+let drawerState = 'closed';   // open | closing | closed
+let dragState = null;
+
+const DRAWER_MAX_W = 520;
+const drawerWidth = () => Math.min(DRAWER_MAX_W, window.innerWidth || DRAWER_MAX_W);
+
+function paintDrawer(x) {
+  if (!drawerEl) return;
+  drawerEl.style.transform = `translate3d(${x.toFixed(2)}px, 0, 0)`;
+  const p = Math.max(0, Math.min(1, 1 - x / drawerWidth()));
+  if (scrimEl) {
+    scrimEl.style.opacity = String(p);
+    scrimEl.style.pointerEvents = p > 0.02 ? 'auto' : 'none';
+  }
+}
 
 export function ensureLayers() {
   if (scrimEl) return;
   scrimEl = h('div', { class: 'scrim', onclick: () => closeDrawer() });
   drawerEl = h('aside', { class: 'drawer', 'aria-hidden': 'true' });
+  drawerEl.addEventListener('pointerdown', onDragStart);
   document.body.append(scrimEl, drawerEl);
+  drawerSpring = springValue({
+    from: drawerWidth(),
+    damping: 0.82,          // Apple 的抽屉/面板档位：略有过冲，因为手势本身带速度
+    response: 0.32,
+    onUpdate: paintDrawer,
+  });
+  paintDrawer(drawerWidth());
 }
 
 /** openDrawer({ title, hint, body, footer }) —— body/footer 为 DOM 节点 */
@@ -188,44 +353,138 @@ export function openDrawer({ title, hint, body, footer }) {
   drawerEl.replaceChildren(
     h('header', null,
       h('div', { class: 'grow' }, h('h2', { text: title }), hint ? h('div', { class: 'hint', text: hint }) : null),
-      h('button', { class: 'btn icon ghost', title: '关闭', onclick: closeDrawer }, icon('close')),
+      h('button', { class: 'btn icon ghost', title: '关闭', onclick: () => closeDrawer() }, icon('close')),
     ),
     h('div', { class: 'body' }, body),
     footer ? h('footer', null, footer) : null,
   );
-  scrimEl.classList.add('on');
-  drawerEl.classList.add('on');
+  drawerState = 'open';
   drawerEl.setAttribute('aria-hidden', 'false');
+  scrimEl.style.display = 'block';
+  drawerSpring.to(0);          // 从中断处继续（若正在关闭则自然反转）
 }
 
-export function closeDrawer() {
-  if (!drawerEl) return;
-  scrimEl.classList.remove('on');
-  drawerEl.classList.remove('on');
-  drawerEl.setAttribute('aria-hidden', 'true');
-  setTimeout(() => { if (!drawerEl.classList.contains('on')) drawerEl.replaceChildren(); }, 360);
+export function closeDrawer(velocity = 0) {
+  if (!drawerEl || !drawerSpring) return;
+  if (drawerState === 'closed') return;
+  drawerState = 'closing';
+  drawerEl.setAttribute('aria-hidden', 'true');   // 对辅助技术而言它正在离开
+  drawerSpring.to(drawerWidth(), velocity);
+  // 落定且没有被重新打开/抓住时才清场（下次打开是全新的一棵）
+  const wait = () => {
+    if (!drawerSpring.settled) return setTimeout(wait, 90);
+    if (drawerState === 'closing') {
+      drawerState = 'closed';
+      drawerEl.replaceChildren();
+      if (scrimEl) scrimEl.style.display = 'none';
+    }
+  };
+  setTimeout(wait, 90);
 }
 
-/* ── 确认框（单色玻璃，替代原生 confirm）──────────────────────── */
+function onDragStart(e) {
+  if (!drawerEl || drawerState === 'closed') return;   // closing 时抓住 = 反转，必须放行
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  if (e.target.closest('input, textarea, select, button, a, label, .no-drag')) return;
+  const wasClosing = drawerState === 'closing';
+  if (wasClosing) {
+    // 抓住即反转意图：内容重新可交互；弹簧立即冻结——抽屉停在手指下，
+    // 而不是继续从指缝里飞走（响应必须连续，不止在松手后）。
+    drawerState = 'open';
+    drawerEl.setAttribute('aria-hidden', 'false');
+    drawerSpring.stop();
+    //  ↑ closeDrawer 的落定清理循环见到 open 就不会清场——否则内容被拆掉，
+    //    正在派发的指针事件失去冒泡路径，抽屉会冻在半路。
+  }
+  dragState = {
+    id: e.pointerId,
+    startX: e.clientX, startY: e.clientY,
+    startVal: drawerSpring.value,
+    samples: [[e.clientX, performance.now()]],
+    active: false,
+    wasClosing,
+  };
+  drawerEl.addEventListener('pointermove', onDragMove);
+  drawerEl.addEventListener('pointerup', onDragEnd);
+  drawerEl.addEventListener('pointercancel', onDragEnd);
+}
+
+function onDragMove(e) {
+  try {
+    if (!dragState || e.pointerId !== dragState.id) return;
+    const dx = e.clientX - dragState.startX;
+    const dy = e.clientY - dragState.startY;
+    if (!dragState.active) {
+      if (Math.abs(dx) < 10) return;                        // 迟滞：先确认意图
+      if (Math.abs(dx) < Math.abs(dy) * 1.2) { return stopDrag(); }  // 纵向占优 → 让给滚动
+      dragState.active = true;
+      drawerSpring.stop();
+      try { drawerEl.setPointerCapture(dragState.id); }     // 合成事件/无效指针会抛，捕获只是优化
+      catch { /* 忽略：事件仍会派发到元素上 */ }
+    }
+    let next = dragState.startVal + dx;
+    if (next < 0) next = -rubberband(-next, drawerWidth());  // 左拉越界：越拉越沉
+    drawerSpring.jump(next);                                 // 1:1 跟手（onUpdate 绘制）
+    dragState.samples.push([e.clientX, performance.now()]);
+    if (dragState.samples.length > 6) dragState.samples.shift();
+  } catch (err) { if (typeof window !== 'undefined') window.__dragErr = String(err && err.message || err); }
+}
+
+function onDragEnd(e) {
+  try {
+    if (!dragState || e.pointerId !== dragState.id) return;
+    const v = sampleVelocity(dragState.samples);             // px/s（向右为正）
+    const wasActive = dragState.active;
+    const wasClosing = dragState.wasClosing;
+    stopDrag();
+    if (!wasActive) {
+      // 只是点了一下没拖：恢复被打断的运动（点住暂停，松手继续）
+      if (wasClosing) closeDrawer();
+      return;
+    }
+    const w = drawerWidth();
+    const projected = drawerSpring.value + projectMomentum(v);
+    // 速度符号优先：轻快一甩就关，不必拖过半屏
+    if (v > 520 || projected > w * 0.45) closeDrawer(v);
+    else drawerSpring.to(0, v);                              // 否则带着速度弹回
+  } catch (err) { if (typeof window !== 'undefined') window.__dragErr = String(err && err.message || err); }
+}
+
+function stopDrag() {
+  if (!dragState) return;
+  drawerEl.removeEventListener('pointermove', onDragMove);
+  drawerEl.removeEventListener('pointerup', onDragEnd);
+  drawerEl.removeEventListener('pointercancel', onDragEnd);
+  dragState = null;
+}
+
+/* ── 确认框（单色玻璃，替代原生 confirm）────────────────────────
+   弹层保持 transform-origin: center（弹层不锚定触发源），
+   进出用材质化：模糊+缩放+透明度一起动。 */
 export function confirmDialog(message, { ok = '确认', cancel = '取消' } = {}) {
   return new Promise(resolve => {
-    const wrap = h('div', { class: 'sheet-wrap on' });
-    const done = val => { wrap.remove(); document.removeEventListener('keydown', onKey); resolve(val); };
-    const onKey = ev => { if (ev.key === 'Escape') done(false); };
-    document.addEventListener('keydown', onKey);
-    wrap.append(
-      h('div', { class: 'sheet' },
-        h('h2', { text: '请确认' }),
-        h('div', { class: 'hint', text: message }),
-        h('div', { class: 'row', style: { marginTop: '20px', justifyContent: 'flex-end' } },
-          h('button', { class: 'btn', text: cancel, onclick: () => done(false) }),
-          h('button', { class: 'btn primary', text: ok, onclick: () => done(true) }),
-        ),
+    const wrap = h('div', { class: 'sheet-wrap' });
+    const sheet = h('div', { class: 'sheet' },
+      h('h2', { text: '请确认' }),
+      h('div', { class: 'hint', text: message }),
+      h('div', { class: 'row', style: { marginTop: '20px', justifyContent: 'flex-end' } },
+        h('button', { class: 'btn', text: cancel, onclick: () => done(false) }),
+        h('button', { class: 'btn primary', text: ok, onclick: () => done(true) }),
       ),
     );
+    const onKey = ev => { if (ev.key === 'Escape') done(false); };
+    const done = val => {
+      document.removeEventListener('keydown', onKey);
+      materialize(sheet, { open: false, onDone: () => wrap.remove() });
+      resolve(val);
+    };
+    wrap.append(sheet);
     wrap.addEventListener('click', ev => { if (ev.target === wrap) done(false); });
     document.body.append(wrap);
-    wrap.querySelector('.btn.primary').focus();
+    wrap.classList.add('on');
+    document.addEventListener('keydown', onKey);
+    materialize(sheet, { open: true });
+    sheet.querySelector('.btn.primary').focus();
   });
 }
 

@@ -192,6 +192,12 @@ function mountView(id) {
   if (eff.node && eff.node.parentNode == null) host.replaceChild(eff.node, placeholder);
   else placeholder.remove();
   activeEffect = eff;
+  // 视图切换只做一次极短的透明度过渡（140ms）。
+  // 这里是导航——每天几十次的动作，动效要"大幅削减"而非放大；且位移类
+  // 动画在长列表页面上代价高。Apple 的空间一致性由侧栏选中态承担即可。
+  if (host.animate && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    host.animate([{ opacity: 0.55 }, { opacity: 1 }], { duration: 140, easing: 'ease-out' });
+  }
 }
 
 /* ── 命令面板（⌘K）────────────────────────────────────────────── */
@@ -223,12 +229,15 @@ function paletteCommands() {
   return cmds;
 }
 
+/* ── 命令面板（⌘K）──────────────────────────────────────────────
+   刻意不做进出动画：这是键盘触发的高频动作（每天上百次），
+   任何动效都会让它显得慢半拍。Raycast 的零动画正是最优解。 */
 export function openPalette() {
   if (!paletteEl) buildPalette();
   paletteEl.classList.add('on');
   paletteInput.value = '';
   renderPalette('');
-  setTimeout(() => paletteInput.focus(), 30);
+  setTimeout(() => paletteInput.focus(), 0);
 }
 
 export function closePalette() {

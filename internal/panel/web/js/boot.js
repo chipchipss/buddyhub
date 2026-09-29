@@ -3,7 +3,7 @@
    注册视图 → 密钥门 → 启动壳层。ES 模块入口（index.html 唯一 <script>）。
    ══════════════════════════════════════════════════════════════════ */
 
-import { h, icon, setKey, getKey, setUnauthorizedHandler, api, toast } from './kernel.js';
+import { h, icon, setKey, getKey, setUnauthorizedHandler, api, toast, materialize } from './kernel.js';
 import { startShell } from './shell.js';
 import { overview, refreshOverview } from './store.js';
 import { openAddAccount } from './drawers.js';
@@ -45,18 +45,19 @@ function openGate() {
     }
   };
 
-  gateEl = h('div', { class: 'sheet-wrap on' },
-    h('div', { class: 'sheet' },
-      h('div', { class: 'row' }, icon('lock', 18), h('h2', { text: '需要访问密钥' })),
-      h('div', { class: 'hint', text: '该网关已启用 api_key 鉴权，请输入 config.json 中的密钥。' }),
-      h('div', { style: { marginTop: '16px' } }, input),
-      errLine,
-      h('div', { class: 'row', style: { marginTop: '18px', justifyContent: 'flex-end' } },
-        h('button', { class: 'btn primary', text: '进入', onclick: submit }),
-      ),
+  const sheet = h('div', { class: 'sheet' },
+    h('div', { class: 'row' }, icon('lock', 18), h('h2', { text: '需要访问密钥' })),
+    h('div', { class: 'hint', text: '该网关已启用 api_key 鉴权，请输入 config.json 中的密钥。' }),
+    h('div', { style: { marginTop: '16px' } }, input),
+    errLine,
+    h('div', { class: 'row', style: { marginTop: '18px', justifyContent: 'flex-end' } },
+      h('button', { class: 'btn primary', text: '进入', onclick: submit }),
     ),
   );
+  gateEl = h('div', { class: 'sheet-wrap' }, sheet);
   document.body.append(gateEl);
+  gateEl.classList.add('on');
+  materialize(sheet, { open: true });   // 玻璃材质到达，而不是单纯淡入
   setTimeout(() => input.focus(), 50);
 }
 

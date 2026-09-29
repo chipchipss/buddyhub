@@ -9,6 +9,7 @@ import { overview, refreshOverview } from '../store.js';
 
 const dir = signal(null);
 const recent = signal(null);
+let recentFp = '';   // 最近动态指纹：内容未变则不写信号（避免无谓重渲染）
 
 async function loadDir(quiet = true) {
   try { dir.set(await api('accounts/dir')); }
@@ -17,8 +18,13 @@ async function loadDir(quiet = true) {
 
 async function loadRecent(quiet = true) {
   try {
-    const d = await api('logs');
-    recent.set((d.entries || []).slice(-14).reverse());
+    // 只取尾部若干条：总览展示 8 行，无需每轮拉满环形缓冲
+    const d = await api('logs?tail=16');
+    const next = (d.entries || []).slice(-14).reverse();
+    const fp = next.map(e => e.ts + e.text).join('|');
+    if (fp === recentFp) return;      // 内容未变 → 不触发重渲染
+    recentFp = fp;
+    recent.set(next);
   } catch (e) { if (!quiet) toast(e.message, 'fail'); }
 }
 

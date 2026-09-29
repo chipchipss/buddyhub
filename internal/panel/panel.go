@@ -264,8 +264,14 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 }
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
+// logsHandler 返回日志环形缓冲快照。
+// 可选 ?tail=N 只取最近 N 条：总览页只需十几行，没必要每轮拉满 500 条。
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot()})
+	snap := p.logs.Snapshot()
+	if n, err := strconv.Atoi(r.URL.Query().Get("tail")); err == nil && n > 0 && n < len(snap) {
+		snap = snap[len(snap)-n:]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": snap})
 }
 
 // models 实时查询上游模型列表与 reasoning 实际档位（直连上游，不读路由层 1h 缓存）：

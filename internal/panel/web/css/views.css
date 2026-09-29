@@ -17,7 +17,9 @@
   box-shadow: var(--shadow-sm), inset 0 1px 0 var(--hi);
   transition: transform var(--t), border-color var(--t), box-shadow var(--t);
 }
-.acct:hover { transform: translateY(-2px); border-color: var(--edge-2); box-shadow: var(--shadow), inset 0 1px 0 var(--hi); }
+@media (hover: hover) and (pointer: fine) {
+  .acct:hover { transform: translateY(-2px); border-color: var(--edge-2); box-shadow: var(--shadow), inset 0 1px 0 var(--hi); }
+}
 .acct.off { opacity: .55; }
 .acct .top { display: flex; align-items: flex-start; gap: 10px; }
 .acct .who { min-width: 0; flex: 1; }

@@ -53,16 +53,33 @@
   --r-xs: 8px;
   --pill: 999px;
 
-  /* 动效 */
-  --ease: cubic-bezier(.32, .72, .28, 1);
-  --t: 220ms var(--ease);
-  --t-slow: 480ms var(--ease);
+  /* 动效：曲线用强自定义版本（内置 ease/ease-in 太弱且起步慢，界面会显迟钝）。
+     进入用 ease-out（立刻动起来），屏上位移用 ease-in-out，抽屉用 iOS 曲线。 */
+  --ease-out: cubic-bezier(.23, 1, .32, 1);
+  --ease-in-out: cubic-bezier(.77, 0, .175, 1);
+  --ease-drawer: cubic-bezier(.32, .72, 0, 1);
+  --ease: cubic-bezier(.32, .72, .28, 1);   /* 通用（向后兼容） */
+  /* 时长：UI 动效一律 <300ms；按下反馈最快，退出比进入快 */
+  --dur-press: 140ms;
+  --dur-fast: 180ms;
+  --dur-med: 240ms;
+  --t: var(--dur-fast) var(--ease-out);
+  --t-slow: 420ms var(--ease-out);
 
   /* 字体 */
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
           "Segoe UI Variable Text", "Segoe UI", "PingFang SC",
           "HarmonyOS Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+
+  /* 字号阶梯：字距随字号变化（大字号收紧、正文接近 0），行高与字号反向。
+     固定 letter-spacing 必然在某些字号上是错的——这是 Apple 排版的核心纪律。 */
+  --fs-display: 26px;  --ls-display: -.028em;  --lh-display: 1.1;
+  --fs-title: 19px;    --ls-title: -.018em;    --lh-title: 1.25;
+  --fs-sub: 14px;      --ls-sub: -.008em;      --lh-sub: 1.4;
+  --fs-body: 13.5px;   --ls-body: -.002em;     --lh-body: 1.55;
+  --fs-label: 11.5px;  --ls-label: .01em;      --lh-label: 1.35;
+  --fs-micro: 10.5px;  --ls-micro: .06em;      --lh-micro: 1.3;
 
   --blur: blur(20px) saturate(1.35);
   --blur-strong: blur(30px) saturate(1.5);
@@ -120,8 +137,58 @@ body {
 :focus-visible { outline: 1.5px solid var(--edge-2); outline-offset: 2px; border-radius: 6px; }
 button, input, select, textarea { font: inherit; color: inherit; }
 
+/* ── 可访问性：三个独立信号 ─────────────────────────────────────
+   减动效 ≠ 零反馈：位移/缩放/弹簧去掉，改为短交叉淡入——信息仍然传达，
+   但不引起前庭不适。透明度与颜色变化保留（它们帮助理解）。
+   减透明度：玻璃变实，去掉 blur。加对比度：近实底 + 明确描边。 */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation: none !important; transition: none !important; }
+  *,
+  *::before,
+  *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 160ms !important;   /* 保留极短淡入，而非一刀切 */
+  }
+  .btn:active,
+  .acct:hover,
+  .tile:hover { transform: none !important; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --glass: rgba(255, 255, 255, .04);
+    --glass-2: rgba(255, 255, 255, .07);
+    --glass-3: rgba(255, 255, 255, .10);
+  }
+  :root[data-theme="light"] {
+    --glass: rgba(255, 255, 255, .96);
+    --glass-2: #ffffff;
+    --glass-3: #ffffff;
+  }
+  * { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+  .nav-inner, .topbar, .card, .tile, .stat, .drawer, .sheet, .palette, .statusbar, .toast {
+    background: var(--canvas-2) !important;
+  }
+  :root[data-theme="light"] .nav-inner,
+  :root[data-theme="light"] .topbar,
+  :root[data-theme="light"] .card,
+  :root[data-theme="light"] .tile,
+  :root[data-theme="light"] .drawer,
+  :root[data-theme="light"] .sheet,
+  :root[data-theme="light"] .palette { background: #ffffff !important; }
+}
+@media (prefers-contrast: more) {
+  :root {
+    --edge: rgba(255, 255, 255, .30);
+    --edge-2: rgba(255, 255, 255, .55);
+    --fg-2: rgba(244, 242, 238, .82);
+    --fg-3: rgba(244, 242, 238, .62);
+  }
+  :root[data-theme="light"] {
+    --edge: rgba(20, 18, 16, .32);
+    --edge-2: rgba(20, 18, 16, .58);
+    --fg-2: rgba(23, 22, 20, .82);
+    --fg-3: rgba(23, 22, 20, .60);
+  }
 }
 
 /* 滚动条：细、融进玻璃 */
