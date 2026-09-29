@@ -148,23 +148,25 @@ body {
 *::-webkit-scrollbar-thumb { background: var(--edge-strong); border-radius: 8px; }
 *::-webkit-scrollbar-track { background: transparent; }
 
-/* ── 极光画布（body::before 固定层，玻璃在它上面取糊）────────────── */
-body::before {
-  content: "";
-  position: fixed; inset: -20%;
-  z-index: -1;
-  background:
-    radial-gradient(42% 42% at 18% 12%, color-mix(in srgb, var(--aurora-a) 36%, transparent), transparent 70%),
-    radial-gradient(38% 38% at 84% 18%, color-mix(in srgb, var(--aurora-b) 30%, transparent), transparent 70%),
-    radial-gradient(46% 46% at 62% 88%, color-mix(in srgb, var(--aurora-c) 26%, transparent), transparent 72%),
-    radial-gradient(30% 30% at 32% 72%, color-mix(in srgb, var(--aurora-b) 16%, transparent), transparent 70%);
-  filter: blur(38px);
-  animation: drift 26s ease-in-out infinite alternate;
+/* ── 极光画布（五色分离 blob，玻璃在它上面取糊）────────────────────
+   仿 OD 参考：独立 blob 各自带漂移动画（交错时长），比单层 radial 背景更有
+   纵深感。blob 是 aria-hidden 装饰层，z-index:-1 不挡交互。 */
+.aurora { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
+.blob {
+  position: absolute; border-radius: 50%;
+  filter: blur(72px);
+  opacity: .42;
+  will-change: transform;
+  animation: drift var(--dur, 40s) ease-in-out infinite alternate;
 }
+.blob.b1 { width: 44vw; height: 44vw; top: -12%; left: -8%;  background: var(--aurora-a); --dur: 38s; }
+.blob.b2 { width: 36vw; height: 36vw; top: 6%;   right: -10%; background: var(--aurora-b); --dur: 46s; }
+.blob.b3 { width: 40vw; height: 40vw; bottom: -14%; left: 28%; background: var(--aurora-c); --dur: 42s; }
+.blob.b4 { width: 26vw; height: 26vw; top: 38%;  left: 46%;  background: color-mix(in srgb, var(--aurora-b) 55%, #ff6482); --dur: 52s; }
+.blob.b5 { width: 22vw; height: 22vw; bottom: 8%; right: 14%; background: color-mix(in srgb, var(--aurora-a) 60%, #64d2ff); --dur: 34s; }
 @keyframes drift {
-  0%   { transform: translate3d(0, 0, 0) scale(1); }
-  50%  { transform: translate3d(2.2%, -1.6%, 0) scale(1.05); }
-  100% { transform: translate3d(-1.8%, 2%, 0) scale(1.02); }
+  from { transform: translate3d(0, 0, 0) scale(1) rotate(0deg); }
+  to   { transform: translate3d(4vw, 3vh, 0) scale(1.14) rotate(6deg); }
 }
 /* 玻璃上的细噪点：抑制 backdrop-filter 的色带（banding），加"材质"实感 */
 body::after {

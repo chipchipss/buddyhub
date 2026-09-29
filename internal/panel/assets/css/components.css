@@ -206,7 +206,10 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .cred .n { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; white-space: nowrap; }
 .cred .n .of { color: var(--ink-3); font-size: 11px; }
 .bar { height: 4px; background: var(--mute-bg); border-radius: 3px; margin-top: 6px; overflow: hidden; max-width: 88px; }
-.bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #fff)); border-radius: 3px; }
+.bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+/* 积分语义：低于 25% 变警示，低于 10% 变危险（JS 按剩余比例挂类） */
+.bar.warn i { background: var(--warn); }
+.bar.bad i  { background: var(--bad); }
 
 /* ── 标签 ───────────────────────────────────────────────────────── */
 .tag {
@@ -214,6 +217,11 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
   border-radius: var(--r-pill); font-size: 11.5px; font-weight: 600; white-space: nowrap;
   letter-spacing: .01em; border: 1px solid transparent;
 }
+.tag::before {
+  content: ""; width: 5px; height: 5px; border-radius: 50%;
+  background: currentColor; flex: none; opacity: .85;
+}
+.tag.no-dot::before { display: none; }
 .tag.ok   { background: var(--ok-soft);   color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 22%, transparent); }
 .tag.warn { background: var(--warn-soft); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 22%, transparent); }
 .tag.bad  { background: var(--bad-soft);  color: var(--bad);  border-color: color-mix(in srgb, var(--bad) 22%, transparent); }

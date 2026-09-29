@@ -74,18 +74,18 @@ async function loadModels() {
     function rowOf(m) {
       const eff = (m.supported_efforts || []).slice();
       if (m.can_disable_thinking && eff.length && !eff.includes('off')) eff.push('off（可关）');
-      const effs = eff.length ? eff.map(e => '<span class="tag info">' + esc(e) + '</span>').join(' ')
+      const effs = eff.length ? eff.map(e => '<span class="tag info no-dot">' + esc(e) + '</span>').join(' ')
         : '<span style="color:var(--ink-3);font-size:12.5px">' + (m.supports_reasoning ? '固定档 · 默认 ' + esc(m.default_effort || '?') : '不支持思考') + '</span>';
       const caps = [];
-      if (m.is_default) caps.push('<span class="tag ok">默认</span>');
-      if (m.supports_tool_call) caps.push('<span class="tag info">工具</span>');
-      if (m.supports_images) caps.push('<span class="tag info">视觉</span>');
-      if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag mute">思考常开</span>');
+      if (m.is_default) caps.push('<span class="tag ok no-dot">默认</span>');
+      if (m.supports_tool_call) caps.push('<span class="tag info no-dot">工具</span>');
+      if (m.supports_images) caps.push('<span class="tag info no-dot">视觉</span>');
+      if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag mute no-dot">思考常开</span>');
       const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
       const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
       return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
         '<td class="num">' + rateCell(m) + '</td>' +
-        '<td>' + (m.default_effort ? '<span class="tag ok">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
+        '<td>' + (m.default_effort ? '<span class="tag ok no-dot">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
         '<td class="efs" style="white-space:normal">' + effs + '</td>' +
         '<td class="num">' + (m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—') + '</td>' +
         outCell(m, probeOf(m.id)) + '</tr>';
