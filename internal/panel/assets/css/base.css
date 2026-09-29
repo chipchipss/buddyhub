@@ -1,0 +1,318 @@
+/* ═══════════════════════════════════════════════════════════════════
+   BuddyHub Console · base.css
+   Apple 液态玻璃设计系统：设计令牌 / 全局底座 / 壳层 / 导航 / 顶栏
+
+   视觉语言：
+   - 极光画布：深色（默认）为墨蓝夜空 + 三色弥散光斑；浅色为暖白晨雾。
+     玻璃面板的 backdrop-filter 需要"背后有东西可糊"，画布即光源。
+   - 玻璃面板：半透明 + blur + 饱和度提升 + 发丝边框（上亮下暗模拟玻璃厚度）。
+   - 单一强调色（Apple 蓝），语义色只给状态。数字一律 tabular-nums 等宽。
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── 设计令牌（暗色默认）────────────────────────────────────────── */
+:root {
+  color-scheme: dark;
+
+  /* 画布与玻璃 */
+  --aurora-a: #3b5bff;          /* 光斑·蓝 */
+  --aurora-b: #8a4fd8;          /* 光斑·紫 */
+  --aurora-c: #0ea5a4;          /* 光斑·青 */
+  --canvas: #0a0c12;            /* 最深底色 */
+  --glass: rgba(22, 26, 38, .58);          /* 面板玻璃体 */
+  --glass-strong: rgba(26, 30, 44, .74);   /* 弹窗 / 更实的面板 */
+  --glass-soft: rgba(28, 32, 46, .38);     /* 更透的一层（侧栏悬浮卡） */
+  --glass-nav: rgba(16, 18, 28, .55);
+  --edge: rgba(255, 255, 255, .085);       /* 发丝边框 */
+  --edge-strong: rgba(255, 255, 255, .14);
+  --edge-hi: rgba(255, 255, 255, .16);     /* 玻璃上缘高光 */
+
+  /* 文字 */
+  --ink: #eef1f8;
+  --ink-2: #a8b0c4;
+  --ink-3: #667089;
+
+  /* 强调与语义 */
+  --accent: #3f8cff;
+  --accent-deep: #2f6fe0;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(63, 140, 255, .16);
+  --ok: #34d399;  --ok-soft: rgba(52, 211, 153, .14);
+  --warn: #fbbf24; --warn-soft: rgba(251, 191, 36, .14);
+  --bad: #f87171; --bad-soft: rgba(248, 113, 113, .14);
+  --mute-bg: rgba(148, 163, 184, .14);
+  --mute-fg: #94a3b8;
+
+  /* 几何与投影 */
+  --r-lg: 20px;   /* 卡片 */
+  --r-md: 14px;   /* 内嵌块 */
+  --r-sm: 10px;   /* 控件 */
+  --r-pill: 999px;
+  --shadow-lg: 0 24px 60px -24px rgba(0, 0, 0, .55), 0 4px 16px -8px rgba(0, 0, 0, .4);
+  --shadow-md: 0 10px 32px -14px rgba(0, 0, 0, .45);
+  --shadow-sm: 0 2px 8px -2px rgba(0, 0, 0, .35);
+
+  /* 字体 */
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+          "Segoe UI Variable Display", "Segoe UI", "PingFang SC",
+          "HarmonyOS Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+
+  /* 玻璃通用效果（子模块引用） */
+  --blur: saturate(1.7) blur(22px);
+  --blur-strong: saturate(1.8) blur(30px);
+}
+
+/* ── 浅色令牌（三入口均可切：auto 跟随系统 / 显式 light / 显式 dark）── */
+:root:not([data-theme="dark"]) {
+  color-scheme: light;
+  --aurora-a: #9db8ff;
+  --aurora-b: #d3b8ff;
+  --aurora-c: #9fe8e0;
+  --canvas: #f2f4fa;
+  --glass: rgba(255, 255, 255, .60);
+  --glass-strong: rgba(255, 255, 255, .78);
+  --glass-soft: rgba(255, 255, 255, .44);
+  --glass-nav: rgba(255, 255, 255, .58);
+  --edge: rgba(15, 23, 42, .075);
+  --edge-strong: rgba(15, 23, 42, .13);
+  --edge-hi: rgba(255, 255, 255, .85);
+  --ink: #171b26;
+  --ink-2: #4b5468;
+  --ink-3: #8a93a8;
+  --accent: #0071e3;
+  --accent-deep: #0058b8;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(0, 113, 227, .11);
+  --ok: #0f9d6a;  --ok-soft: rgba(15, 157, 106, .11);
+  --warn: #c77c04; --warn-soft: rgba(199, 124, 4, .11);
+  --bad: #dc4c4c; --bad-soft: rgba(220, 76, 76, .10);
+  --mute-bg: rgba(100, 116, 139, .10);
+  --mute-fg: #64748b;
+  --shadow-lg: 0 24px 60px -26px rgba(51, 65, 92, .28), 0 4px 18px -10px rgba(51, 65, 92, .16);
+  --shadow-md: 0 10px 32px -16px rgba(51, 65, 92, .22);
+  --shadow-sm: 0 2px 10px -3px rgba(51, 65, 92, .16);
+}
+
+/* 显式 dark 覆盖（theme=dark 时即使系统是浅色也保持暗色）——
+   等同默认值，此处重复声明是为了让 :root:not([data-theme="dark"]) 的
+   浅色块在 data-theme="dark" 下不生效，无需 JS 干预。 */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --aurora-a: #3b5bff; --aurora-b: #8a4fd8; --aurora-c: #0ea5a4;
+  --canvas: #0a0c12;
+  --glass: rgba(22, 26, 38, .58);
+  --glass-strong: rgba(26, 30, 44, .74);
+  --glass-soft: rgba(28, 32, 46, .38);
+  --glass-nav: rgba(16, 18, 28, .55);
+  --edge: rgba(255, 255, 255, .085);
+  --edge-strong: rgba(255, 255, 255, .14);
+  --edge-hi: rgba(255, 255, 255, .16);
+  --ink: #eef1f8;
+  --ink-2: #a8b0c4;
+  --ink-3: #667089;
+  --accent: #3f8cff;
+  --accent-deep: #2f6fe0;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(63, 140, 255, .16);
+  --ok: #34d399;  --ok-soft: rgba(52, 211, 153, .14);
+  --warn: #fbbf24; --warn-soft: rgba(251, 191, 36, .14);
+  --bad: #f87171; --bad-soft: rgba(248, 113, 113, .14);
+  --mute-bg: rgba(148, 163, 184, .14);
+  --mute-fg: #94a3b8;
+  --shadow-lg: 0 24px 60px -24px rgba(0, 0, 0, .55), 0 4px 16px -8px rgba(0, 0, 0, .4);
+  --shadow-md: 0 10px 32px -14px rgba(0, 0, 0, .45);
+  --shadow-sm: 0 2px 8px -2px rgba(0, 0, 0, .35);
+}
+
+/* ── 全局底座 ───────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+[hidden] { display: none !important; }
+html { height: 100%; }
+body {
+  min-height: 100vh;
+  background: var(--canvas);
+  color: var(--ink);
+  font: 14px/1.6 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+::selection { background: var(--accent-soft); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+/* 滚动条融入玻璃 */
+* { scrollbar-width: thin; scrollbar-color: var(--edge-strong) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: var(--edge-strong); border-radius: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* ── 极光画布（body::before 固定层，玻璃在它上面取糊）────────────── */
+body::before {
+  content: "";
+  position: fixed; inset: -20%;
+  z-index: -1;
+  background:
+    radial-gradient(42% 42% at 18% 12%, color-mix(in srgb, var(--aurora-a) 36%, transparent), transparent 70%),
+    radial-gradient(38% 38% at 84% 18%, color-mix(in srgb, var(--aurora-b) 30%, transparent), transparent 70%),
+    radial-gradient(46% 46% at 62% 88%, color-mix(in srgb, var(--aurora-c) 26%, transparent), transparent 72%),
+    radial-gradient(30% 30% at 32% 72%, color-mix(in srgb, var(--aurora-b) 16%, transparent), transparent 70%);
+  filter: blur(38px);
+  animation: drift 26s ease-in-out infinite alternate;
+}
+@keyframes drift {
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  50%  { transform: translate3d(2.2%, -1.6%, 0) scale(1.05); }
+  100% { transform: translate3d(-1.8%, 2%, 0) scale(1.02); }
+}
+/* 玻璃上的细噪点：抑制 backdrop-filter 的色带（banding），加"材质"实感 */
+body::after {
+  content: "";
+  position: fixed; inset: 0;
+  z-index: -1; pointer-events: none;
+  opacity: .5;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='matrix' values='0 0 0 0 .5 0 0 0 0 .5 0 0 0 0 .55 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ── 壳层 ───────────────────────────────────────────────────────── */
+.shell {
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+  min-height: 100vh;
+  max-width: 1560px;
+  margin: 0 auto;
+}
+
+/* ── 侧栏（玻璃悬浮岛）──────────────────────────────────────────── */
+.nav {
+  position: sticky; top: 0; height: 100vh;
+  display: flex; flex-direction: column;
+  padding: 14px 12px 14px 16px;
+}
+.nav-card {
+  flex: 1;
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--glass-nav);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-md), inset 0 1px 0 var(--edge-hi);
+  overflow: hidden;
+}
+.brand {
+  display: flex; align-items: center; gap: 10px;
+  padding: 18px 18px 14px;
+}
+.brand-mark {
+  width: 30px; height: 30px; flex: none;
+  border-radius: 9px;
+  background: linear-gradient(135deg, var(--aurora-a), var(--aurora-b) 55%, var(--aurora-c));
+  box-shadow: 0 4px 14px -4px color-mix(in srgb, var(--aurora-a) 60%, transparent),
+              inset 0 1px 0 rgba(255, 255, 255, .35);
+  position: relative;
+}
+.brand-mark::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit;
+  background: radial-gradient(120% 120% at 22% 18%, rgba(255,255,255,.5), transparent 42%);
+}
+.brand .name { font-weight: 700; font-size: 15px; letter-spacing: -.02em; }
+.brand .sub {
+  color: var(--ink-3); font-size: 10.5px; font-family: var(--mono);
+  letter-spacing: .04em; margin-top: 1px;
+}
+.nav ul { list-style: none; padding: 4px 10px 10px; flex: 1; overflow-y: auto; }
+.nav .group-label {
+  padding: 15px 11px 5px;
+  font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--ink-3); user-select: none;
+}
+.nav .group-label.tog {
+  display: flex; align-items: center; justify-content: space-between;
+  cursor: pointer; border-radius: var(--r-pill);
+}
+.nav .group-label.tog:hover { color: var(--ink-2); background: var(--accent-soft); }
+.nav .group-label .chev { width: 12px; height: 12px; transition: transform .18s ease; opacity: .65; }
+.nav .group-label.tog.open .chev { transform: rotate(180deg); }
+.nav li.sub { display: none; }
+.nav li.sub.show { display: block; }
+.nav li.sub a { padding-left: 34px; font-size: 13px; }
+.nav a {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 13px; margin: 1px 0;
+  color: var(--ink-2); text-decoration: none;
+  border-radius: var(--r-pill); font-size: 13.5px; font-weight: 500;
+  transition: background .16s ease, color .16s ease, box-shadow .16s ease;
+  position: relative;
+}
+.nav a:hover { background: var(--accent-soft); color: var(--ink); }
+.nav a.on {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+  box-shadow: 0 4px 14px -4px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.nav a svg { width: 15px; height: 15px; flex: none; opacity: .9; }
+.nav .sig {
+  padding: 13px 16px;
+  border-top: 1px solid var(--edge);
+  font-size: 11.5px; color: var(--ink-3);
+  display: grid; gap: 5px;
+  background: var(--glass-soft);
+}
+.nav .sig .row { display: flex; align-items: center; gap: 7px; }
+
+/* ── 顶栏（悬浮玻璃条）──────────────────────────────────────────── */
+.main { min-width: 0; display: flex; flex-direction: column; padding: 14px 18px 14px 6px; }
+.topbar {
+  display: flex; align-items: center; gap: 14px;
+  padding: 13px 20px;
+  background: var(--glass-nav);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+  border: 1px solid var(--edge);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-md), inset 0 1px 0 var(--edge-hi);
+  position: sticky; top: 14px; z-index: 30;
+  margin-bottom: 18px;
+}
+.topbar h2 { font-size: 17px; font-weight: 700; letter-spacing: -.02em; }
+.topbar .sep { color: var(--edge-strong); }
+.topbar .meta { color: var(--ink-3); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.topbar .grow { flex: 1; }
+.view {
+  padding: 2px 8px 56px;
+  max-width: 1220px; width: 100%;
+}
+.view[hidden] { display: none; }
+
+/* ── 状态脉冲点 ─────────────────────────────────────────────────── */
+.pulse {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--ok); flex: none;
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent);
+  animation: breathe 2.6s ease-in-out infinite;
+}
+.pulse.warn { background: var(--warn); box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn) 55%, transparent); }
+.pulse.bad  { background: var(--bad);  box-shadow: 0 0 0 0 color-mix(in srgb, var(--bad) 55%, transparent); animation: none; }
+@keyframes breathe {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 0%, transparent); }
+  50% { box-shadow: 0 0 0 5px transparent; }
+}
+
+/* ── 响应式：窄屏侧栏转顶栏 ─────────────────────────────────────── */
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; }
+  .nav { position: static; height: auto; padding: 10px 10px 0; }
+  .nav-card { flex-direction: row; align-items: center; min-height: 0; }
+  .brand { padding: 10px 8px 10px 14px; }
+  .brand .sub { display: none; }
+  .nav ul { display: flex; overflow-x: auto; padding: 6px; }
+  .nav .group-label { display: none; }
+  .nav li.sub { display: none !important; }
+  .nav a { white-space: nowrap; padding: 7px 12px; }
+  .nav .sig { display: none; }
+  .main { padding: 10px 10px 10px; }
+  .topbar { top: 10px; flex-wrap: wrap; }
+}

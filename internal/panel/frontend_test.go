@@ -10,22 +10,28 @@ import (
 	"testing"
 )
 
-// TestAppJSSyntax app.js 必须能通过 JS 解析器语法校验。
+// TestAppJSSyntax 拼接后的 app.js 必须能通过 JS 解析器语法校验。
 //
 // 为什么需要：app.js 是 go:embed 进二进制的静态资源，Go 编译器不检查其内容——
 // 一次对象字面量键名未加引号（Model_chat_GLM5.2 被解析成属性访问 + 数字字面量）
 // 就让整个面板白屏，而所有 Go 测试依然全绿。此测试把语法校验前移到 CI。
-// 无 node 环境时跳过（不阻塞无 Node 的构建机）。
+// 校验对象是「按 jsOrder 拼接后的产物」（与运行时同一顺序），而非单文件——
+// 模块顺序错误（用了未定义的全局）同样能在此暴露。无 node 环境时跳过。
 func TestAppJSSyntax(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not available; skipping JS syntax check")
 	}
-	path, err := filepath.Abs("app.js")
-	if err != nil {
-		t.Fatal(err)
+	joined := string(concatDir("assets/js/", jsOrder))
+	if len(joined) == 0 {
+		t.Fatal("concatenated app.js is empty — check jsOrder against assets/js/")
 	}
-	out, err := exec.Command(node, "--check", path).CombinedOutput()
+	// Windows 的 node --check 不支持 stdin（"-"），统一写临时文件校验
+	tmp := filepath.Join(t.TempDir(), "app.js")
+	if werr := os.WriteFile(tmp, []byte(joined), 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+	out, err := exec.Command(node, "--check", tmp).CombinedOutput()
 	if err != nil {
 		t.Fatalf("app.js syntax error:\n%s", out)
 	}
@@ -59,15 +65,38 @@ func TestIndexHTMLNoInlineScript(t *testing.T) {
 	}
 }
 
+// TestAppCSSServed 拼接样式入口必须可取且内容非空（防 cssOrder 与文件名漂移）。
+func TestAppCSSServed(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/app.css", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/css") {
+		t.Errorf("Content-Type=%q want text/css", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "--glass") {
+		t.Error("app.css missing design tokens (--glass) — cssOrder or asset files drifted")
+	}
+}
+
 // TestAppJSTopLevelSmoke app.js 顶层求值冒烟（v1.11.3/1.11.4 两连炸后补的运行时闸门）：
-// node + DOM 桩执行 app.js（含按 hash 落到各视图的 go() 顶层调用），抓 TDZ/
-// ReferenceError 类运行时错误——Go 侧 frontend_test 不执行 JS，语法层检查对此全盲。
-// 无 node 的环境跳过（CI/精简机不受影响）；harness 与 app.js 同判（app.js 顶层
-// start() 的 setInterval 会让 node 事件循环不退出，故成功路径显式 exit(0)）。
+// node + DOM 桩执行「按 jsOrder 拼接后的产物」（与 /panel/app.js 返回体逐字节一致，
+// 经 HTTP handler 取得，杜绝测试与运行时顺序漂移），抓 TDZ/ReferenceError 类运行时
+// 错误——Go 侧不执行 JS，语法层检查对此全盲。无 node 的环境跳过。
 func TestAppJSTopLevelSmoke(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not installed; JS smoke skipped")
+	}
+	// 经真实 handler 拿产物：测试的就是线上这一份字节。
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/app.js", nil))
+	joined := rec.Body.String()
+	if len(joined) == 0 {
+		t.Fatal("/panel/app.js returned empty body")
 	}
 	harness := `const fs = require('fs');
 const vm = require('vm');
@@ -110,8 +139,17 @@ try {
 		t.Fatal(err)
 	}
 	hf.Close()
+	// Windows 下 node 脚本不支持 "-" 读 stdin，产物写临时文件传入
+	jf, err := os.CreateTemp(t.TempDir(), "joined-*.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jf.WriteString(joined); err != nil {
+		t.Fatal(err)
+	}
+	jf.Close()
 	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages"} {
-		cmd := exec.Command(node, hf.Name(), "app.js")
+		cmd := exec.Command(node, hf.Name(), jf.Name())
 		cmd.Dir = "." // 测试工作目录 = internal/panel
 		cmd.Env = append(os.Environ(), "SMOKE_HASH="+hash)
 		out, err := cmd.CombinedOutput()
