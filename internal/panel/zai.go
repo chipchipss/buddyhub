@@ -6,6 +6,7 @@ package panel
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -129,6 +130,40 @@ func (p *Panel) zaiAccountRotate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已换发设备指纹"})
 }
 
+// zaiAccountQuota POST /panel/api/zai/accounts/{id}/quota —— 刷新单账号额度。
+//
+// 顺带做状态联动：额度归零 → exhausted；额度恢复 → 回 active。
+// 上游 WAF 对 billing 族连续查询敏感，面板侧不做自动轮询（后台循环负责）。
+func (p *Panel) zaiAccountQuota(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Zai == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "Z.AI 账号池未启用"})
+		return
+	}
+	id := r.PathValue("id")
+	res := p.cfg.Zai.FetchQuota(r.Context(), id)
+	if res.Error != "" {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": res.Error})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": res})
+}
+
+// zaiQuotaAll POST /panel/api/zai/quota_all —— 刷新全部 JWT 账号额度。
+func (p *Panel) zaiQuotaAll(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Zai == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "Z.AI 账号池未启用"})
+		return
+	}
+	var ids []string
+	for _, a := range p.cfg.Zai.Snapshots() {
+		if a.Mode == zai.ModeJWT && a.Enabled {
+			ids = append(ids, a.ID)
+		}
+	}
+	ok, fail := p.cfg.Zai.RefreshQuotas(r.Context(), ids)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "success": ok, "failed": fail})
+}
+
 // zaiStore 取账号池存储与路径参数 id；未启用时写出 501 并返回 nil。
 func (p *Panel) zaiStore(w http.ResponseWriter, r *http.Request) (*zai.Store, string) {
 	if p.cfg.Zai == nil {
@@ -136,4 +171,46 @@ func (p *Panel) zaiStore(w http.ResponseWriter, r *http.Request) (*zai.Store, st
 		return nil, ""
 	}
 	return p.cfg.Zai.Store(), r.PathValue("id")
+}
+
+// zaiPlans GET /panel/api/zai/accounts/{id}/plans —— 预览可领取套餐。
+func (p *Panel) zaiPlans(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Zai == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "Z.AI 账号池未启用"})
+		return
+	}
+	plans, err := p.cfg.Zai.PreviewPlans(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "plans": plans})
+}
+
+// zaiClaimAll POST /panel/api/zai/accounts/{id}/claim —— 领取全部可领套餐。
+//
+// 领取需验证码（服务端求解）；未配置求解器时返回明确提示。
+// 上游 WAF 对 billing 族敏感，面板侧不做自动重试，失败文案直接回给用户。
+func (p *Panel) zaiClaimAll(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Zai == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "Z.AI 账号池未启用"})
+		return
+	}
+	id := r.PathValue("id")
+	outcomes, err := p.cfg.Zai.ClaimAll(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	okN := 0
+	for _, o := range outcomes {
+		if o.OK {
+			okN++
+		}
+	}
+	msg := "没有可领取的套餐"
+	if len(outcomes) > 0 {
+		msg = fmt.Sprintf("领取完成：成功 %d / 共 %d", okN, len(outcomes))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "success": okN, "outcomes": outcomes, "message": msg})
 }

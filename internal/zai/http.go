@@ -78,3 +78,13 @@ func SetEndpoints(planMessages, fallbackMessages, bigModelMessages, billingBase 
 		BillingBase = billingBase
 	}
 }
+
+// SetOrigins 替换 OAuth / 兑换链的 origin（测试注入 mock 上游用）。
+func SetOrigins(planOrigin, fallbackOrigin string) {
+	if planOrigin != "" {
+		PlanOrigin = planOrigin
+	}
+	if fallbackOrigin != "" {
+		FallbackOrigin = fallbackOrigin
+	}
+}

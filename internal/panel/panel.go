@@ -202,6 +202,13 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/zai/accounts/{id}/remove", p.withAuth(p.zaiAccountRemove))
 	p.mux.HandleFunc("POST /panel/api/zai/accounts/{id}/toggle", p.withAuth(p.zaiAccountToggle))
 	p.mux.HandleFunc("POST /panel/api/zai/accounts/{id}/rotate", p.withAuth(p.zaiAccountRotate))
+	p.mux.HandleFunc("POST /panel/api/zai/accounts/{id}/quota", p.withAuth(p.zaiAccountQuota))
+	p.mux.HandleFunc("GET /panel/api/zai/accounts/{id}/plans", p.withAuth(p.zaiPlans))
+	p.mux.HandleFunc("POST /panel/api/zai/accounts/{id}/claim", p.withAuth(p.zaiClaimAll))
+	p.mux.HandleFunc("POST /panel/api/zai/quota_all", p.withAuth(p.zaiQuotaAll))
+	// Z.AI OAuth 免密登录（授权链接 + 轮询；完成后自动兑换回退 Key 并入池）
+	p.mux.HandleFunc("POST /panel/api/zai/oauth/start", p.withAuth(p.zaiOAuthStart))
+	p.mux.HandleFunc("GET /panel/api/zai/oauth/poll", p.withAuth(p.zaiOAuthPoll))
 	p.mux.HandleFunc("GET /panel/api/apikeys", p.withAuth(p.getAPIKeys))
 	p.mux.HandleFunc("POST /panel/api/apikeys", p.withAuth(p.postAPIKeys))
 	p.mux.HandleFunc("POST /panel/api/apikeys/delete", p.withAuth(p.deleteAPIKeys))

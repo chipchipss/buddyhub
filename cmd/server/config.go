@@ -105,6 +105,15 @@ type Config struct {
 			// SystemFile Plan 通道要求的身份块 JSON（官方客户端会前置这段 system，
 			// 缺失会被上游拒为 3012）。本仓库不内嵌该内容，需自行从官方客户端提取。
 			SystemFile string `json:"system_file,omitempty"`
+
+			// ClaimRoundMinutes 后台套餐领取轮间隔（分钟；缺省 10，0 = 关闭）。
+			// 每轮对全部可打 billing 的 JWT 账号执行「激活上报 → preview → 逐个领取」，
+			// 1005（名额用完）按上游 next_at 退避。
+			ClaimRoundMinutes int `json:"claim_round_minutes,omitempty"`
+
+			// QuotaRefreshMinutes 后台额度刷新间隔（分钟；缺省 5，0 = 关闭）。
+			// ⚠️ 上游 WAF 对 billing 族连续查询敏感，别设太密。
+			QuotaRefreshMinutes int `json:"quota_refresh_minutes,omitempty"`
 		} `json:"zai"`
 
 		// 余额后台周期刷新：两次签到时点之间 credits 也能保持新鲜（面板/状态观测用）。

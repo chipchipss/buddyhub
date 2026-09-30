@@ -75,8 +75,30 @@ func buildZaiStack(cfg *Config) (*zai.Client, *zai.CaptchaManager) {
 
 	client := zai.NewClient(pool, captcha, blocks)
 
-	log.Printf("[zai] 账号池就绪：%d 个账号（%s）· 单账号并发 %d · 验证码求解器 %s",
-		len(accounts), accountsPath, maxConc, enabledWord(captcha.Enabled()))
+	// 后台额度轮询（错峰）：只刷 JWT 账号，默认 5 分钟一轮；0 = 关闭。
+	// 上游 WAF 对 billing 族连续查询敏感，间隔别设太密。
+	interval := zc.QuotaRefreshMinutes
+	if interval == 0 {
+		interval = 5
+	}
+	if interval > 0 {
+		stopQuota := client.StartQuotaLoop(time.Duration(interval) * time.Minute)
+		_ = stopQuota // 进程退出即结束，无需显式停止
+	}
+
+	// 后台套餐领取轮：每轮 激活上报 → preview → 逐个领取全部可领套餐。
+	// 1005 名额用完按上游 next_at 退避；默认 10 分钟一轮，0 = 关闭。
+	claimMin := zc.ClaimRoundMinutes
+	if claimMin == 0 {
+		claimMin = 10
+	}
+	if claimMin > 0 {
+		stopClaim := client.StartClaimLoop(time.Duration(claimMin) * time.Minute)
+		_ = stopClaim
+	}
+
+	log.Printf("[zai] 账号池就绪：%d 个账号（%s）· 单账号并发 %d · 验证码求解器 %s · 额度轮询 %d 分钟 · 领取轮 %d 分钟",
+		len(accounts), accountsPath, maxConc, enabledWord(captcha.Enabled()), interval, claimMin)
 	return client, captcha
 }
 

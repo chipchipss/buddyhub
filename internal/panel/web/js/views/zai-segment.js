@@ -3,7 +3,7 @@
    Z.AI 账号池：Plan（JWT，需验证码）与 API Key 回退通道的统一管理面。
    ══════════════════════════════════════════════════════════════════ */
 
-import { h, icon, signal, api, toast, confirmDialog } from '../kernel.js';
+import { h, icon, signal, api, toast, confirmDialog, copyText } from '../kernel.js';
 
 const zai = signal(null);
 const zaiErr = signal('');
@@ -11,6 +11,40 @@ const addOpen = signal(false);
 const addName = signal('');
 const addSecret = signal('');
 const addProvider = signal('zai');
+const oauth = signal(null);   // { url, flowId, status }
+let oauthTimer = null;
+
+function stopOAuthPoll() { if (oauthTimer) { clearInterval(oauthTimer); oauthTimer = null; } }
+
+/** 发起 OAuth 免密登录：拿授权链接 → 轮询 → 完成后自动兑换回退 Key 并入池。 */
+async function startOAuth() {
+  stopOAuthPoll();
+  oauth.set({ status: '正在获取授权链接…' });
+  try {
+    const r = await api('zai/oauth/start', {
+      method: 'POST', body: JSON.stringify({ name: addName.peek().trim() }),
+    });
+    oauth.set({ url: r.authorize_url, flowId: r.flow_id, status: '在浏览器完成登录，此处自动检测' });
+    oauthTimer = setInterval(async () => {
+      const cur = oauth.peek();
+      if (!cur || !cur.flowId) return;
+      try {
+        const p = await api('zai/oauth/poll?flow_id=' + encodeURIComponent(cur.flowId));
+        if (!p.done) return;
+        stopOAuthPoll();
+        oauth.set(null);
+        addOpen.set(false);
+        toast(p.message || '账号已入池');
+        await loadZai();
+      } catch (e) {
+        stopOAuthPoll();
+        oauth.set({ status: '授权失败：' + e.message });
+      }
+    }, 3000);
+  } catch (e) {
+    oauth.set({ status: '发起失败：' + e.message });
+  }
+}
 
 const STATUS_LABEL = {
   active: ['可用', 'strong'],
@@ -42,6 +76,15 @@ async function act(id, action, body, okMsg) {
     toast(e.message, 'fail');
     return null;
   }
+}
+
+/** 额度数字缩写（1.2m / 340k）。 */
+function fmtNum(n) {
+  n = Number(n || 0);
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+  return String(n);
 }
 
 function statusChip(a) {
@@ -76,10 +119,26 @@ function accountCard(a) {
     ),
 
     quota.length
-      ? h('div', { class: 'row wrap', style: { gap: '5px', marginTop: '10px' } },
-        ...quota.map(([model, q]) => h('span', { class: 'chip', title: '已用 / 总量' },
-          `${model} ${q.remaining ?? '—'}`)))
-      : null,
+      ? h('div', { class: 'stack', style: { gap: '6px', marginTop: '10px' } },
+        ...quota.map(([model, q]) => {
+          const total = Number(q.total || 0), remain = Number(q.remaining || 0);
+          const pct = total > 0 ? Math.min(100, Math.round(remain / total * 100)) : 0;
+          const exp = q.expires_at ? new Date(q.expires_at) : null;
+          const expSoon = exp && exp.getTime() - Date.now() < 3 * 86400000;
+          return h('div', null,
+            h('div', { class: 'row', style: { justifyContent: 'space-between', fontSize: '11.5px' } },
+              h('span', { text: model }),
+              h('span', { class: 'muted' },
+                `${fmtNum(remain)} / ${fmtNum(total)}`,
+                exp ? h('span', { style: { marginLeft: '6px', color: expSoon ? 'var(--fg)' : 'var(--fg-3)' },
+                  text: expSoon ? '即将到期' : String(q.expires_at).slice(0, 10) }) : null),
+            ),
+            h('div', { class: 'meter thin', style: { marginTop: '3px' } },
+              h('i', { style: { width: pct + '%' } })),
+          );
+        }))
+      : h('div', { class: 'muted', style: { fontSize: '11.5px', marginTop: '10px' },
+        text: a.mode === 'jwt' ? '尚未查询额度' : 'API Key 通道无额度窗口' }),
 
     h('div', { class: 'row wrap', style: { gap: '5px', marginTop: '10px' } },
       h('span', { class: 'chip faint', title: 'X-Platform / X-Os-Version / X-Device-Mid' },
@@ -93,6 +152,33 @@ function accountCard(a) {
       : null,
 
     h('div', { class: 'acts' },
+      a.mode === 'jwt'
+        ? h('button', {
+          class: 'btn', title: '查询 Coding Plan 额度（billing 族）',
+          onclick: () => act(a.id, 'quota', null, r => {
+            const q = r.result && r.result.balance ? '已刷新额度' : '额度已更新';
+            return q;
+          }),
+        }, '额度')
+        : null,
+      a.mode === 'jwt'
+        ? h('button', {
+          class: 'btn primary', title: '领取活动套餐（需验证码求解器；上游 WAF 敏感，勿频繁点）',
+          onclick: async ev => {
+            ev.currentTarget.disabled = true;
+            ev.currentTarget.textContent = '领取中…';
+            try {
+              const r = await api('zai/accounts/' + encodeURIComponent(a.id) + '/claim', { method: 'POST' });
+              toast(r.message || '领取完成');
+              for (const o of (r.outcomes || [])) {
+                if (!o.ok && o.message) toast((o.plan_name || o.plan_id) + '：' + o.message, 'fail');
+              }
+              await loadZai();
+            } catch (e) { toast(e.message, 'fail'); }
+            finally { ev.currentTarget.disabled = false; ev.currentTarget.textContent = '领取套餐'; }
+          },
+        }, '领取套餐')
+        : null,
       h('button', {
         class: 'btn', onclick: () => act(a.id, 'toggle', null, r => r.enabled ? '已启用' : '已停用'),
       }, a.enabled ? '停用' : '启用'),
@@ -116,6 +202,7 @@ function addPanel() {
       h('button', { class: 'btn primary', onclick: () => addOpen.set(true) }, icon('plus'), '添加 Z.AI 账号'),
     );
   }
+  const flow = oauth();
   return h('div', { class: 'glass-flat', style: { padding: '14px' } },
     h('div', { class: 'row wrap', style: { gap: '8px' } },
       h('select', {
@@ -130,11 +217,45 @@ function addPanel() {
         oninput: ev => addName.set(ev.target.value),
       }),
     ),
-    h('div', { class: 'stack', style: { marginTop: '10px' } },
+
+    // OAuth 免密登录（仅 Z.AI）：授权链接 + 自动轮询，完成后兑换回退 Key 一并入池
+    addProvider.peek() === 'zai'
+      ? h('div', { class: 'stack', style: { marginTop: '12px' } },
+        flow
+          ? h('div', { class: 'stack', style: { gap: '8px' } },
+            flow.url
+              ? h('div', { class: 'url-box', text: flow.url })
+              : null,
+            h('div', { class: 'row wrap', style: { gap: '8px' } },
+              flow.url
+                ? h('button', {
+                  class: 'btn sm', onclick: async () => {
+                    try { await copyText(flow.url); toast('链接已复制'); } catch { toast('复制失败', 'fail'); }
+                  },
+                }, icon('copy'), '复制链接')
+                : null,
+              flow.url
+                ? h('button', { class: 'btn sm primary', onclick: () => window.open(flow.url, '_blank') }, '在浏览器打开')
+                : null,
+              h('button', {
+                class: 'btn sm ghost', onclick: () => { stopOAuthPoll(); oauth.set(null); },
+              }, '取消'),
+            ),
+            h('div', { class: flow.url ? 'busy' : 'muted', style: { fontSize: '12px' }, text: flow.status }),
+          )
+          : h('div', { class: 'row wrap', style: { gap: '8px' } },
+            h('button', { class: 'btn primary', onclick: () => startOAuth() }, icon('plus'), 'OAuth 免密登录'),
+            h('span', { class: 'muted', style: { fontSize: '11.5px', alignSelf: 'center' },
+              text: '浏览器登录 → 自动入池（同时兑换回退 Key）' }),
+          ),
+      )
+      : null,
+
+    h('div', { class: 'stack', style: { marginTop: '12px' } },
       h('input', {
         class: 'input', placeholder: addProvider.peek() === 'bigmodel'
           ? '智谱开放平台 API Key'
-          : 'Coding Plan JWT（三段点分）或 Z.AI API Key',
+          : '或手动粘贴：Coding Plan JWT（三段点分）/ Z.AI API Key',
         style: { fontFamily: 'var(--mono)', fontSize: '12px' },
         oninput: ev => addSecret.set(ev.target.value),
       }),
@@ -185,6 +306,18 @@ export function zaiSegment() {
         h('h2', { text: 'Z.AI / ZCode 账号池' }),
         h('span', { class: 'grow' }),
         h('span', { class: 'hint', text: d.configured ? `${(d.accounts || []).length} 个账号` : '' }),
+        h('button', {
+          class: 'btn sm ghost', title: '刷新全部 JWT 账号额度（billing 族，注意上游 WAF 限流）',
+          onclick: async ev => {
+            ev.currentTarget.disabled = true;
+            try {
+              const r = await api('zai/quota_all', { method: 'POST' });
+              toast(`额度刷新完成：成功 ${r.success} · 失败 ${r.failed}`);
+              await loadZai();
+            } catch (e) { toast(e.message, 'fail'); }
+            finally { ev.currentTarget.disabled = false; }
+          },
+        }, icon('wallet'), '刷新额度'),
         h('button', { class: 'btn sm ghost', onclick: () => loadZai(false) }, icon('refresh'), '刷新'),
       ),
       h('div', { class: 'body stack' },
