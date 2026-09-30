@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
 	"github.com/chipchipss/buddyhub/internal/extprovider/copilot"
 	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
 	"github.com/chipchipss/buddyhub/internal/livecfg"
@@ -249,13 +250,20 @@ func main() {
 	// 未配置账号时返回 nil，zai: 通道保持禁用。
 	zaiClient, zaiCaptcha := buildZaiStack(cfg)
 
-	// GitHub Copilot 通道的专用代理（github.com 在部分网络下直连不通）。
-	// 只作用于本通道，其它上游保持直连。
+	// 按通道的专用代理：只影响该通道，其它上游保持直连。
+	// （把整条网关的出口绑到一个代理进程上，代理一挂就全站不可用。）
 	if proxy := cfg.Schedule.Copilot.Proxy; strings.TrimSpace(proxy) != "" {
 		if err := copilot.SetProxy(proxy); err != nil {
 			log.Printf("[copilot] 代理配置无效，本通道将直连：%v", err)
 		} else {
 			log.Printf("[copilot] 本通道走代理 %s", proxy)
+		}
+	}
+	if proxy := cfg.Schedule.Cline.Proxy; strings.TrimSpace(proxy) != "" {
+		if err := cline.SetProxy(proxy); err != nil {
+			log.Printf("[cline] 代理配置无效，本通道将直连：%v", err)
+		} else {
+			log.Printf("[cline] 本通道走代理 %s", proxy)
 		}
 	}
 

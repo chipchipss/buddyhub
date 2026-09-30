@@ -130,6 +130,16 @@ type Config struct {
 			Proxy string `json:"proxy,omitempty"`
 		} `json:"copilot"`
 
+		// Cline Cline（cline.bot）通道（cline: 前缀模型路由目标）。
+		//
+		// 实测 api.cline.bot 与 api.workos.com 在国内可直连，一般无需代理；
+		// 出口受限的网络可单独放行本通道，同样不必把整条网关绑到代理上。
+		Cline struct {
+			// Proxy 本通道专用 HTTP 代理（如 http://127.0.0.1:2080）。
+			// 空 = 跟随环境变量 HTTPS_PROXY，再不行直连。
+			Proxy string `json:"proxy,omitempty"`
+		} `json:"cline"`
+
 		// 余额后台周期刷新：两次签到时点之间 credits 也能保持新鲜（面板/状态观测用）。
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。
 		BalanceRefreshEnabled bool `json:"balance_refresh_enabled"` // 缺省 true；false = 关闭

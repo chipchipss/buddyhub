@@ -8,6 +8,7 @@ package panel
 //	小浣熊（raccoon）  微信扫码   生成 code → 面板出二维码 → 轮询扫码结果
 //	Qoder（qoder）     设备授权   PKCE 授权 URL → 浏览器完成 → 轮询取 token
 //	Copilot            设备码     申请设备码 → GitHub 输入 → 轮询兑换 token
+//	Cline              设备码     WorkOS 设备码 → 浏览器确认 → 轮询（再登记换令牌）
 //
 // 都是两段式交互，无法在一次 HTTP 往返里完成，故用内存会话：
 //
@@ -26,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
 	"github.com/chipchipss/buddyhub/internal/extprovider/copilot"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
 	"github.com/chipchipss/buddyhub/internal/extprovider/raccoon"
@@ -59,6 +61,8 @@ type extLoginSession struct {
 	device *qoder.DeviceSession
 	// copilot
 	flow *copilot.DeviceFlow
+	// cline
+	clineFlow *cline.DeviceFlow
 }
 
 var (
@@ -180,6 +184,27 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 			"hint":             "在 GitHub 页面输入设备码并授权",
 		})
 
+	case extstore.PCline:
+		flow, err := cline.StartDeviceFlow(ctx)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		id := putExtLoginSession(&extLoginSession{
+			provider: provider, createdAt: time.Now(), clineFlow: flow,
+		})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":               true,
+			"mode":             "code",
+			"session":          id,
+			"user_code":        flow.UserCode,
+			"verification_uri": flow.VerificationURI,
+			"complete_uri":     flow.CompleteURI,
+			"interval":         flow.Interval,
+			"expires_in":       flow.ExpiresIn,
+			"hint":             "在浏览器打开链接、输入设备码并确认",
+		})
+
 	default:
 		writeErr(w, http.StatusBadRequest, "该平台暂不支持登录入池："+provider)
 	}
@@ -217,6 +242,8 @@ func (p *Panel) extLoginPoll(w http.ResponseWriter, r *http.Request) {
 		cred, done, note = pollQoderDevice(ctx, sess)
 	case extstore.PCopilot:
 		cred, done, note = pollCopilotCode(ctx, sess)
+	case extstore.PCline:
+		cred, done, note = pollClineCode(ctx, sess)
 	default:
 		writeErr(w, http.StatusBadRequest, "该平台暂不支持登录入池："+provider)
 		return
@@ -364,4 +391,49 @@ func pollCopilotCode(ctx context.Context, sess *extLoginSession) (cred *extLogin
 		label += "（" + c.Plan + "）"
 	}
 	return &extLoginCred{id: id, label: label, note: "GitHub Copilot " + c.Plan, cred: *c}, true, ""
+}
+
+// pollClineCode 轮询一次 Cline 的 WorkOS 设备码授权。
+//
+// 授权成功后上游还会做一次「登记」把 WorkOS 令牌换成 Cline 会话令牌
+// （协议层 Poll 内完成）——省掉它拿到的凭据发请求会被拒。
+func pollClineCode(ctx context.Context, sess *extLoginSession) (cred *extLoginCred, done bool, note string) {
+	res, err := sess.clineFlow.Poll(ctx)
+	if err != nil {
+		n := sess.bumpErrStreak()
+		log.Printf("panel: cline 设备码轮询出错（第 %d 次）: %v", n, err)
+		if n >= maxLoginErrStreak {
+			return nil, true, "Cline 设备码轮询连续失败：" + err.Error()
+		}
+		return nil, false, "轮询出错，重试中…（" + err.Error() + "）"
+	}
+	sess.resetErrStreak()
+	if res.Error != "" {
+		return nil, true, res.Error
+	}
+	if !res.Done {
+		return nil, false, "pending"
+	}
+	c := res.Cred
+	// 账号 ID 优先用邮箱（稳定且可读），其次上游 userId
+	id := firstNonEmptyStr(c.Email, c.AccountID)
+	if id == "" {
+		id = "cline-" + head(newSessionID(), 8)
+	}
+	label := "Cline"
+	if c.Email != "" {
+		label = "Cline " + c.Email
+	} else if c.Name != "" {
+		label = "Cline " + c.Name
+	}
+	return &extLoginCred{id: id, label: label, note: "Cline 设备授权", cred: *c}, true, ""
+}
+
+func firstNonEmptyStr(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

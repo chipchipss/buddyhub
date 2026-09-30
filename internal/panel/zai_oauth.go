@@ -16,9 +16,9 @@ import (
 // 与腾讯 OAuth 的 logins 同构：面板常驻进程，流程 15 分钟未完成即回收，
 // 防止"点了登录就走开"的会话无限滞留。
 type zaiOAuthFlow struct {
-	flow     *zai.OAuthFlow
-	created  time.Time
-	name     string
+	flow      *zai.OAuthFlow
+	created   time.Time
+	name      string
 	exchanged bool
 }
 
@@ -132,10 +132,10 @@ func (p *Panel) zaiOAuthPoll(w http.ResponseWriter, r *http.Request) {
 	zaiOAuthMu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"done":      true,
-		"id":        acc.ID,
-		"name":      acc.Name,
-		"has_key":   apiKey != "",
-		"message":   "账号已入池（Plan 通道）" + keyNote,
+		"done":    true,
+		"id":      acc.ID,
+		"name":    acc.Name,
+		"has_key": apiKey != "",
+		"message": "账号已入池（Plan 通道）" + keyNote,
 	})
 }

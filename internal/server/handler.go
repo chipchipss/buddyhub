@@ -131,6 +131,13 @@ type Handler struct {
 	lastLoomyErr   string
 	lastZaiErr     string
 	lastCopilotErr string
+	lastClineErr   string
+
+	// clineRefreshMu/clineRefreshFlight Cline 续期单飞表。
+	// Cline 的 refresh_token 是一次性轮换语义：并发续期会互相作废并把人踢下线，
+	// 故同一账号同一时刻只允许一次续期在飞，其余请求复用同一次结果。
+	clineRefreshMu     sync.Mutex
+	clineRefreshFlight map[string]*clineFlight
 }
 
 // NewHandler 构建 handler。
@@ -147,7 +154,10 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{
+		cfg: cfg, mux: http.NewServeMux(),
+		clineRefreshFlight: map[string]*clineFlight{},
+	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responsesRoundTrip))
 	h.mux.HandleFunc("POST /responses", h.withAuth(h.responsesRoundTrip))
@@ -522,6 +532,23 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		out = append(out, entry)
 	}
+	// Cline 模型名单（cline: 前缀）：免鉴权的公开目录，有账号时实时拉取
+	// （10 分钟缓存）。按计费池分组透出，池前缀原样保留在 id 里。
+	for _, m := range h.clineCatalog() {
+		if m.ID == "" {
+			continue
+		}
+		entry := map[string]any{
+			"id":       clineModelPrefix + m.ID,
+			"object":   "model",
+			"created":  1753600000,
+			"owned_by": "cline/" + m.PoolName,
+		}
+		if m.Name != "" && m.Name != m.ID {
+			entry["description"] = m.Name
+		}
+		out = append(out, entry)
+	}
 	// Loomy 模型名单（loomy: 前缀）：有可用凭据时实时拉上游目录透出
 	// （原样无别名；上游对未知模型静默回落 deepseek，故客户端应读响应 model 字段）。
 	if mods := h.loomyCatalog(); len(mods) > 0 {
@@ -769,6 +796,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			detail += "；最近失败原因: " + h.lastCopilotErr
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_copilot_account", detail)
+		return
+	}
+
+	// Cline 直连通道（cline: 前缀模型）：独立于腾讯池，走 extstore 里的 Cline
+	// 账号（WorkOS 设备授权）。前缀后面**保留**上游的计费池前缀
+	// （cline-free/ / cline-pass/ / cline-cloud/）——那是上游的计费通道选择器。
+	if isClineModel(bareModel) {
+		cm := strings.TrimPrefix(bareModel, clineModelPrefix)
+		bodyCM := body
+		if cm != bareModel {
+			bodyCM = rewriteModel(body, cm)
+		}
+		if h.clineChatStream(w, r, bodyCM, cm) {
+			return
+		}
+		detail := "没有可用的 Cline 账号（面板-添加账号-外部平台-Cline 授权后重试）"
+		if h.lastClineErr != "" {
+			detail += "；最近失败原因: " + h.lastClineErr
+		}
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_cline_account", detail)
 		return
 	}
 

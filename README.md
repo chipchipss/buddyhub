@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>多平台 Buddy 账号统一积分与网关中心 · OpenAI / Anthropic / Responses API 兼容</b><br>
-  Web 面板 · 账号池轮转 · 工具调用自愈 · Responses API · 定时签到 / 活跃 / 旅行 / 保活 · 成长任务一键完成 · <b>讯飞 Loomy + LobsterAI + 小浣熊 + Qoder + 华为云 积分自动领取 · Z.AI / ZCode · GitHub Copilot</b>
+  Web 面板 · 账号池轮转 · 工具调用自愈 · Responses API · 定时签到 / 活跃 / 旅行 / 保活 · 成长任务一键完成 · <b>讯飞 Loomy + LobsterAI + 小浣熊 + Qoder + 华为云 积分自动领取 · Z.AI / ZCode · GitHub Copilot · Cline（免费池）</b>
 </p>
 
 <p align="center">
@@ -133,6 +133,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 |---|---|---|---|---|
 | **小浣熊**（商汤） | `raccoon` | 🟢 **微信扫码登录** | `access_token` · `refresh_token`（**到期自动续期并回写**） | 登录奖励 |
 | **Qoder**（阿里） | `qoder` | 🟢 **设备授权登录** | `access_token` · `machine_id` · `refresh_token` · `security_oauth_token` | 双通道领取（campaigns → activity claim） |
+| **Cline** | `cline` | 🟢 **设备码授权** | `access_token`（含 `workos:` 前缀）+ `refresh_token`（**单飞续期**） | 无（网关直连通道，**含免费池**） |
 | **GitHub Copilot** | `copilot` | 🟢 **设备码授权** | `github_token` + `copilot_token`（自动续期） | 无（网关直连通道） |
 | **LobsterAI**（有道） | `lobsterai` | ⚪ 手工填写 | `access_token`* · `uuid`* · `refresh_token` · `first_key_from` | 每日签到 |
 | **CodeArts**（华为云） | `codearts` | ⚪ 手工填写 | `access_key_id`* · `secret_access_key`* · `security_token`（仅临时凭据需要） | 每日签到 |
@@ -148,6 +149,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | **小浣熊** | 点「微信扫码登录」→ 面板出二维码 → 手机微信扫一扫并确认 → 自动入池 |
 | **Qoder** | 点「浏览器授权登录」→ 打开 PKCE 授权链接完成登录 → 面板轮询取 token → 自动入池 |
 | **GitHub Copilot** | 点「开始授权」→ 拿到形如 `ABCD-1234` 的设备码 → 在 `github.com/login/device` 输入 → 自动入池 |
+| **Cline** | 点「开始授权」→ 设备码 → 在 `authkit.cline.bot/device` 输入 → 自动入池（**免费池无需订阅**） |
 
 统一接口（面板 Bearer 鉴权，可脚本化调用）：
 
@@ -274,6 +276,63 @@ COPILOT_LIVE=1 go test ./internal/extprovider/copilot/ -run Live -v
 ### 与签到型平台的差异
 
 Copilot **不是积分平台**：没有每日签到、没有余额。它在外部账号列表里按「订阅状态 + token 有效期」呈现，卡片上不提供「签到」按钮。
+
+## ⚡ Cline 通道（带免费池）
+
+Cline（cline.bot）接进同一个 OpenAI 兼容接口——模型名带 `cline:` 前缀即可。**免费池不需要订阅**，登录就能用。
+
+### 计费池：前缀就是选择器
+
+Cline 上游按模型名前缀分池，`cline:` 之后**保留**上游的池前缀：
+
+| 模型名 | 池 | 说明 |
+|---|---|---|
+| `cline:cline-free/deepseek-v4.1-flash` | 免费池 | 无需订阅 |
+| `cline:cline-pass/glm-5.3` | ClinePass 订阅池 | 需订阅 |
+| `cline:cline-cloud/kimi-k3` | 云端池 | — |
+
+所以出站时**只剥 `cline:`**，池前缀原样带给上游——它正是用来选池的（与其它通道「剥掉前缀」的惯例相反，别想当然）。
+
+### 四步登录，第三步不能省
+
+| 步骤 | 端点 |
+|---|---|
+| 1. 设备码 | `POST api.workos.com/user_management/authorize/device` |
+| 2. 轮询 | `POST api.workos.com/user_management/authenticate` |
+| 3. **登记** | `POST api.cline.bot/api/v1/auth/register` —— WorkOS 令牌换 Cline 会话令牌 |
+| 4. 对话 | `POST api.cline.bot/api/v1/chat/completions` |
+
+第 3 步省掉的凭据**看起来正常但发请求会被拒**——这是本通道最容易踩空的地方，网关在协议层内完成了它。
+
+面板「添加账号 → 外部平台 → Cline」→ 点「开始授权」→ 拿到设备码 → 在 `authkit.cline.bot/device` 输入确认 → 自动入池。
+
+### 三个「踩空后表现很像没权限」的口径
+
+- **token 必须带 `workos:` 前缀**：续期接口返回的是裸 JWT，网关统一补齐
+- **必须带 `X-CLIENT-TYPE: cline-sdk`**：不带时**免费池模型一律 403**（`only available via Cline product surfaces`），看起来像没订阅
+- **续期用 `grantType`（camelCase）**，不是 OAuth 标准的 `grant_type`
+
+### 续期单飞
+
+Cline 的 `refresh_token` 是**一次性轮换**语义：并发请求同时发现临期时若各自去打一次续期，后到的那次会拿着已作废的 token → 401 → **用户被踢下线**。网关对同一账号的续期做了单飞，并发请求复用同一次结果。
+
+### 网络
+
+实测 `api.cline.bot`（~4s）与 `api.workos.com`（~0.8s）在国内**可直连**，一般不需要代理。出口受限时可用 `schedule.cline.proxy` 单独放行，不必把整条网关绑到代理上。
+
+## 📚 参考项目（调研记录）
+
+写这个项目时系统看过三个同类网关，记下它们的做法与我们的取舍：
+
+| 项目 | 值得看的地方 | 我们做了什么 |
+|---|---|---|
+| **[aimod-cc/agent2api](https://github.com/aimod-cc/agent2api)** | 支持的通道最多（WorkBuddy / 小浣熊 / CatPaw / AutoClaw / Qoder / Cline / Accio / CodeArts / Trae）；每家一个 adapter，协议事实写得极细（含「踩空后表现很像没权限」这类口径） | 按它的公开协议**核对并实测**后接入了 **Cline**（含免费池）；续期单飞的做法也来自它的 `refresh_flight` |
+| **[wicm84266964/Buddy2api](https://github.com/wicm84266964/Buddy2api)** | QClaw / 千问办公 / TraeWork 三个通道；模型容量发现（`context_window` / `max_output_tokens` + `capacity_source` 标记来源是目录还是兜底）；聚合响应的完整性校验（缺完成标记不当作正常 stop） | 容量发现我们已有（四级查找链 + 探测上限）；`capacity_source` 式「标注数据来源」的思路值得后续补 |
+| **[wangliangdong/loomy2api](https://github.com/wangliangdong/loomy2api)** | Loomy **Web 版**（非桌面客户端）；**额度获取与路由解耦**——定时刷新写缓存，选号只读缓存，绝不在请求路径上打上游额度接口；多客户端会话头的兼容顺序 | 额度刷新与选号本就是分离的；会话键提取的兼容顺序我们已有（`conversation_id` + 内容回退） |
+
+**没做的**（有意）：QClaw / 千问办公 / TraeWork / CatPaw / AutoClaw / Accio / Trae 这些通道需要各自的桌面客户端登录态或 DPAPI 解密，本机无从验证；盲目照搬会交付不能用的代码。上表第二列记着入口，将来有环境时可以按 Cline 的方式（读公开协议 → 本机实测核对 → 写实现 + 测试）逐个补。
+
+> 各项目的许可证不同（agent2api 是 MIT + 附加使用声明，loomy2api 声明「仅供个人学习自用」）。这里**只取协议事实**（端点、头、字段名——事实不受版权保护）与设计思路，实现全部为本仓库自写。
 
 ## 🆚 与上游的差异
 
@@ -802,6 +861,7 @@ web/
 | `loomy:` | 讯飞 Loomy 模型网关 | 客户端 session / `loomy-cli` 账号 | — |
 | `zai:` | Z.AI / 智谱 GLM（Plan JWT + API Key 双通道） | `data/zai-accounts.json` | [Z.AI 账号池](#-zai--zcode-账号池) |
 | `copilot:` | GitHub Copilot | `data/ext-accounts.json`（provider `copilot`） | [GitHub Copilot 通道](#-github-copilot-通道) |
+| `cline:` | Cline（**带免费池**，池前缀保留在模型名里） | `data/ext-accounts.json`（provider `cline`） | [Cline 通道](#-cline-通道带免费池) |
 | `qoder:` | Qoder（阿里） | `data/ext-accounts.json`（provider `qoder`） | — |
 | `codex:` | Codex 订阅池 | 本机 `~/.codex*` 凭据 | — |
 | `free:` | 免费 key 池（`free:<provider>/<model>`） | 配置的免费 Key | — |

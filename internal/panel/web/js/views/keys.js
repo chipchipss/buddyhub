@@ -10,8 +10,8 @@ const keys = signal(null);
 const err = signal('');
 const picked = signal(new Set(['*']));
 
-const PLAT_NAMES = { workbuddy: '腾讯', loomy: 'Loomy', qoder: 'Qoder', zai: 'Z.AI', codex: 'Codex', free: '免费池', copilot: 'Copilot' };
-const ALL_PLATS = ['workbuddy', 'loomy', 'qoder', 'zai', 'codex', 'free', 'copilot'];
+const PLAT_NAMES = { workbuddy: '腾讯', loomy: 'Loomy', qoder: 'Qoder', zai: 'Z.AI', codex: 'Codex', free: '免费池', copilot: 'Copilot', cline: 'Cline' };
+const ALL_PLATS = ['workbuddy', 'loomy', 'qoder', 'zai', 'codex', 'free', 'copilot', 'cline'];
 
 async function load(quiet = true) {
   err.set('');
@@ -137,7 +137,7 @@ export default defineView({
         h('div', { class: 'body', style: { fontSize: '12.5px', color: 'var(--fg-2)', lineHeight: '1.9' } },
           h('div', null, '地址统一 ', h('code', { style: { fontFamily: 'var(--mono)' }, text: 'http://主机:7863/v1' }), '，模型名前缀决定平台：'),
           h('div', { class: 'row wrap', style: { marginTop: '8px', gap: '6px' } },
-            ...[['cn:', '腾讯'], ['loomy:', '讯飞'], ['zai:', '智谱'], ['copilot:', 'Copilot'], ['qoder:', 'Qoder'], ['codex:', '订阅池'], ['free:', '免费池']]
+            ...[['cn:', '腾讯'], ['loomy:', '讯飞'], ['zai:', '智谱'], ['copilot:', 'Copilot'], ['cline:', 'Cline'], ['qoder:', 'Qoder'], ['codex:', '订阅池'], ['free:', '免费池']]
               .map(([p, n]) => h('span', { class: 'chip' }, h('code', { style: { fontFamily: 'var(--mono)' }, text: p }), n)),
           ),
           h('div', { class: 'muted', style: { marginTop: '8px' } }, '未授权对应平台的 Key 调用该平台模型返回 403；主 api_key（配置页）始终全平台。'),

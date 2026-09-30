@@ -260,10 +260,10 @@ function loomySeg() {
 }
 
 /* ── 外部平台 ─────────────────────────────────────────────────── */
-const EXT_NAMES = { lobsterai: 'LobsterAI', raccoon: '小浣熊', qoder: 'Qoder', codearts: '华为云', copilot: 'GitHub Copilot' };
+const EXT_NAMES = { lobsterai: 'LobsterAI', raccoon: '小浣熊', qoder: 'Qoder', codearts: '华为云', copilot: 'GitHub Copilot', cline: 'Cline' };
 
 // Copilot 是网关直连通道（无积分、无签到），卡片按「订阅状态」而非「余额」呈现。
-const EXT_NO_CHECKIN = { copilot: true };
+const EXT_NO_CHECKIN = { copilot: true, cline: true };
 
 async function loadExt(quiet = true) {
   try { ext.set(await api('ext/accounts')); extMsg.set(''); }
@@ -322,10 +322,10 @@ function extSeg() {
             ),
             h('div', { class: 'credits' },
               h('div', { class: 'line' },
-                a.provider === 'copilot'
+                EXT_NO_CHECKIN[a.provider]
                   ? h('span', { class: 'of', style: { fontSize: '12px' }, text: a.note || '订阅状态未知' })
                   : h('span', { class: 'n', text: a.balance_ok ? String(a.balance ?? 0) : '—' }),
-                a.provider === 'copilot' ? null
+                EXT_NO_CHECKIN[a.provider] ? null
                   : h('span', { class: 'of', text: a.balance_ok ? '分' : (a.note || '') }),
               ),
             ),

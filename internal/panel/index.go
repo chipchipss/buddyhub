@@ -77,7 +77,7 @@ func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 // 路径经 path.Clean 归一后仅允许 web/ 下的白名单扩展名，杜绝目录穿越。
 func (p *Panel) asset(w http.ResponseWriter, r *http.Request) {
 	rel := strings.TrimPrefix(r.URL.Path, "/panel/")
-	clean := path.Clean("/" + rel)          // 归一：吃掉 ../ 与重复斜杠
+	clean := path.Clean("/" + rel) // 归一：吃掉 ../ 与重复斜杠
 	if clean == "/" || strings.Contains(clean, "..") {
 		http.NotFound(w, r)
 		return

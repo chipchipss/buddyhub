@@ -227,6 +227,7 @@ const WANT = {
   qoder: { fields: 4, login: '浏览器授权登录' },
   codearts: { fields: 3, login: null },
   copilot: { fields: 0, login: '开始授权' },
+  cline: { fields: 0, login: '开始授权' },
 };
 const problems = [];
 for (const [provider, want] of Object.entries(WANT)) {

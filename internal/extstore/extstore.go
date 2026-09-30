@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
 	"github.com/chipchipss/buddyhub/internal/extprovider/codearts"
 	"github.com/chipchipss/buddyhub/internal/extprovider/copilot"
 	"github.com/chipchipss/buddyhub/internal/extprovider/lobsterai"
@@ -34,6 +35,8 @@ const (
 	PLoomyCLI = "loomy-cli"
 	// PCopilot GitHub Copilot（设备流登录；凭据为 GitHub token + 短期 Copilot token）。
 	PCopilot = "copilot"
+	// PCline Cline（cline.bot，WorkOS 设备授权；免费池无需订阅）。
+	PCline = "cline"
 )
 
 // ExtAccount 一个外部平台账号。
@@ -300,6 +303,9 @@ func (m *Manager) CheckinOne(ctx context.Context, a *ExtAccount) *CheckinResult 
 	case PCopilot:
 		// Copilot 不是积分平台，没有每日签到；凭据有效性由余额视图（ViewOne）验证。
 		res.Kind, res.Message = "inactive", "Copilot 无需签到（网关直连通道）"
+	case PCline:
+		// Cline 同样没有每日签到；凭据有效性由 ViewOne 续期验证。
+		res.Kind, res.Message = "inactive", "Cline 无需签到（网关直连通道）"
 	default:
 		res.Kind, res.Message = "failed", "未知平台: "+a.Provider
 	}
@@ -371,6 +377,33 @@ func (m *Manager) ViewOne(ctx context.Context, a *ExtAccount) *ExtAccountView {
 			} else {
 				v.Note = err.Error()
 			}
+		}
+	case PCline:
+		// Cline 视图：续期一次验证凭据有效性，并展示 credit 余额。
+		var cred cline.Credential
+		if json.Unmarshal(a.Cred, &cred) != nil {
+			v.Note = "凭据解析失败"
+			return v
+		}
+		if cred.NeedsRefresh() {
+			if fresh, err := cline.Refresh(ctx, &cred); err == nil {
+				if raw, merr := json.Marshal(fresh); merr == nil {
+					m.replaceCred(a.Provider, a.ID, raw)
+				}
+				cred = *fresh
+			} else {
+				v.Note = err.Error()
+				return v
+			}
+		}
+		if bal, err := cline.FetchBalance(ctx, &cred); err == nil {
+			v.Balance, v.BalanceOK = bal.Credits, true
+			v.Note = "Cline credit"
+			if bal.PlanName != "" {
+				v.Note = "Cline " + bal.PlanName
+			}
+		} else {
+			v.Note = err.Error()
 		}
 	case PCopilot:
 		// Copilot 没有积分余额；视图展示订阅类型 + token 是否仍可续期，

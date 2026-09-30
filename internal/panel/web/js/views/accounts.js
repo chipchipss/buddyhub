@@ -132,7 +132,7 @@ function poolView() {
 const PLAT_NAMES = {
   workbuddy: '腾讯 WorkBuddy', loomy: 'Loomy（讯飞）', qoder: 'Qoder',
   lobsterai: 'LobsterAI', raccoon: '小浣熊', codearts: 'CodeArts',
-  copilot: 'GitHub Copilot',
+  copilot: 'GitHub Copilot', cline: 'Cline',
   zai: 'Z.AI 智谱', codex: 'Codex', free: '免费池',
 };
 

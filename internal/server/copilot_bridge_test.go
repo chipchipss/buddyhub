@@ -105,6 +105,13 @@ func (f *fakeExtMgr) ReplaceCred(provider, id string, cred json.RawMessage) {
 	f.last[provider+"/"+id] = cred
 }
 
+// getRaw 取回写的原始凭据（各通道自解各家的 Credential 形状）。
+func (f *fakeExtMgr) getRaw(provider, id string) json.RawMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.last[provider+"/"+id]
+}
+
 func (f *fakeExtMgr) get(provider, id string) *copilot.Credential {
 	f.mu.Lock()
 	defer f.mu.Unlock()

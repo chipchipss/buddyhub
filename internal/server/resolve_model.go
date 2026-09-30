@@ -35,6 +35,7 @@ func PlatformOf(bare string) string {
 	for _, p := range []struct{ prefix, name string }{
 		{qoderModelPrefix, "qoder"},
 		{copilotModelPrefix, "copilot"},
+		{clineModelPrefix, "cline"},
 		{codexModelPrefix, "codex"},
 		{freeModelPrefix, "free"},
 		{loomyModelPrefix, "loomy"},

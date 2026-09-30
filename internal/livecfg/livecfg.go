@@ -23,7 +23,7 @@ type Snapshot struct {
 }
 
 // APIKeyEntry 一把可下发的网关 Key。Platforms 空/含 "*" = 全平台；
-// 否则仅列出的前缀平台可用（"cn"/"global"/"loomy"/"qoder"/"codex"/"free"/"zai"/"copilot"）。
+// 否则仅列出的前缀平台可用（"cn"/"global"/"loomy"/"qoder"/"codex"/"free"/"zai"/"copilot"/"cline"）。
 type APIKeyEntry struct {
 	Key       string    `json:"key"`
 	Name      string    `json:"name"`

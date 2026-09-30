@@ -83,6 +83,12 @@ const PROVIDERS = {
     ],
     tip: '华为云 AK/SK：永久密钥留空 Security Token 即可；临时 STS 凭据才需要填（几小时就过期，不建议入池）。',
   },
+  cline: {
+    name: 'Cline',
+    // 设备码授权（WorkOS）：免订阅的免费池也能用
+    login: { kind: 'code', button: '开始授权', hint: '在浏览器打开链接、输入设备码并确认' },
+    tip: 'Cline 免费池无需订阅即可用；模型名带池前缀（cline:cline-free/… · cline:cline-pass/… · cline:cline-cloud/…）。',
+  },
   copilot: {
     name: 'GitHub Copilot',
     // 设备码授权：无需手填凭据
