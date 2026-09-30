@@ -71,6 +71,8 @@ var platforms = []Platform{
 		Note: "手机号登录（国内版）"},
 	{ID: "qoder", Name: "Qoder（阿里）", Group: GroupGateway, Prefix: "qoder:", Login: LoginDevice,
 		Checkin: true, Note: "设备授权登录"},
+	{ID: "qclaw", Name: "QClaw（腾讯）", Group: GroupGateway, Prefix: "qclaw:", Login: LoginQR,
+		Note: "微信扫码登录"},
 
 	// ── 积分 / 签到平台（无对话 API）──
 	{ID: "raccoon", Name: "小浣熊（商汤）", Group: GroupPoints, Login: LoginQR,

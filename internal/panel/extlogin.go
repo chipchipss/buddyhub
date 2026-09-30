@@ -9,6 +9,7 @@ package panel
 //	Qoder（qoder）     设备授权   PKCE 授权 URL → 浏览器完成 → 轮询取 token
 //	Copilot            设备码     申请设备码 → GitHub 输入 → 轮询兑换 token
 //	Cline              设备码     WorkOS 设备码 → 浏览器确认 → 轮询（再登记换令牌）
+//	QClaw              扫码回填   面板出微信二维码 → 扫码授权 → 用户把回调里的 code 贴回来
 //
 // 都是两段式交互，无法在一次 HTTP 往返里完成，故用内存会话：
 //
@@ -29,6 +30,7 @@ import (
 
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
 	"github.com/chipchipss/buddyhub/internal/extprovider/copilot"
+	"github.com/chipchipss/buddyhub/internal/extprovider/qclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
 	"github.com/chipchipss/buddyhub/internal/extprovider/raccoon"
 	"github.com/chipchipss/buddyhub/internal/extstore"
@@ -63,6 +65,8 @@ type extLoginSession struct {
 	flow *copilot.DeviceFlow
 	// cline
 	clineFlow *cline.DeviceFlow
+	// qclaw
+	qclawFlow *qclaw.LoginFlow
 }
 
 var (
@@ -205,6 +209,24 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 			"hint":             "在浏览器打开链接、输入设备码并确认",
 		})
 
+	case extstore.PQClaw:
+		flow, err := qclaw.StartLogin(ctx, "")
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		id := putExtLoginSession(&extLoginSession{
+			provider: provider, createdAt: time.Now(), qclawFlow: flow,
+		})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":         true,
+			"mode":       "paste",
+			"session":    id,
+			"auth_url":   flow.URL,
+			"expires_in": int(extLoginTTL.Seconds()),
+			"hint":       "用微信扫码授权，然后把跳转后页面地址里的 code 贴回来",
+		})
+
 	default:
 		writeErr(w, http.StatusBadRequest, "该平台暂不支持登录入池："+provider)
 	}
@@ -216,11 +238,15 @@ func (p *Panel) extLoginPoll(w http.ResponseWriter, r *http.Request) {
 	provider := r.PathValue("provider")
 	var body struct {
 		Session string `json:"session"`
+		// Code QClaw 专用：用户在微信授权页拿到的 code（或整条回调 URL）。
+		// 微信把 code 回给腾讯自己的域名，网关截不到，只能让用户贴回来。
+		Code string `json:"code"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request json")
 		return
 	}
+	code := body.Code
 	sess := getExtLoginSession(body.Session)
 	if sess == nil || sess.provider != provider {
 		writeErr(w, http.StatusNotFound, "登录会话不存在或已过期，请重新发起")
@@ -244,6 +270,8 @@ func (p *Panel) extLoginPoll(w http.ResponseWriter, r *http.Request) {
 		cred, done, note = pollCopilotCode(ctx, sess)
 	case extstore.PCline:
 		cred, done, note = pollClineCode(ctx, sess)
+	case extstore.PQClaw:
+		cred, done, note = completeQClaw(ctx, sess, code)
 	default:
 		writeErr(w, http.StatusBadRequest, "该平台暂不支持登录入池："+provider)
 		return
@@ -436,4 +464,32 @@ func firstNonEmptyStr(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// completeQClaw 用用户贴回来的 code 完成微信登录。
+//
+// 微信把授权码回给腾讯自己的回调域名（security.guanjia.qq.com），网关截不到，
+// 所以这一步只能由用户把 code（或整条回调 URL）贴回来——ParseCallback 两种都认。
+func completeQClaw(ctx context.Context, sess *extLoginSession, raw string) (cred *extLoginCred, done bool, note string) {
+	code, state := qclaw.ParseCallback(raw)
+	if code == "" {
+		return nil, false, "等待贴回微信授权 code"
+	}
+	// 回调里的 state 与本次会话不一致说明贴错了（或贴的是上一次的）
+	if state != "" && sess.qclawFlow.State != "" && state != sess.qclawFlow.State {
+		return nil, true, "code 与本次登录不匹配（可能是上一次的），请重新扫码"
+	}
+	c, err := qclaw.CompleteLogin(ctx, sess.qclawFlow.GUID, code, sess.qclawFlow.State)
+	if err != nil {
+		return nil, true, "微信登录失败：" + err.Error()
+	}
+	id := c.UID
+	if id == "" {
+		id = "qclaw-" + head(newSessionID(), 8)
+	}
+	label := "QClaw"
+	if c.Nickname != "" {
+		label = "QClaw " + c.Nickname
+	}
+	return &extLoginCred{id: id, label: label, note: "微信扫码登录", cred: *c}, true, ""
 }

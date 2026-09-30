@@ -94,6 +94,7 @@ function loginSpecFor(p) {
     case 'device': return { kind: 'device', button: '浏览器授权登录', hint: '在浏览器打开链接并完成登录授权' };
     case 'code':   return { kind: 'code', button: '开始授权', hint: '在浏览器打开链接、输入设备码并确认' };
     case 'sms':    return { kind: 'sms', button: '手机号登录', hint: '支持手机短信登录' };
+    case 'paste':  return { kind: 'paste', button: '微信扫码登录', hint: '扫码后把回调地址里的 code 贴回来' };
     default:       return null; // manual：只出字段表单
   }
 }
@@ -221,7 +222,9 @@ export function extAddPanel(onAdded, opts = {}) {
         const d = await api(`ext/${provider}/login/start`, { method: 'POST' });
         activeLogin = { provider, d, status: '等待完成授权…' };
         paintActiveLogin(spec);
-        startPolling(spec, d);
+        // paste 型（微信回调落在上游域名上，网关截不到）不轮询，
+        // 等用户把 code 贴回来再提交——见 renderChallenge 的 paste 分支。
+        if (spec.kind !== 'paste') startPolling(spec, d);
       } catch (e) {
         activeLogin = null;
         setLoginStatus(e.message);
@@ -331,6 +334,46 @@ export function extAddPanel(onAdded, opts = {}) {
         h('div', { style: { font: '600 26px var(--mono)', letterSpacing: '3px', userSelect: 'all' }, text: d.user_code || '' }),
         h('a', { class: 'link', href: d.verification_uri || 'https://github.com/login/device',
           target: '_blank', rel: 'noreferrer', text: d.verification_uri || 'https://github.com/login/device' }),
+      );
+      return;
+    }
+    if (spec.kind === 'paste') {
+      // 微信把 code 回给腾讯自己的域名，网关截不到 —— 出二维码让用户扫，
+      // 扫完把跳转后地址里的 code 贴回来。
+      let svg = null;
+      try { svg = qrSVG(qrMatrix(d.auth_url), 180); } catch { svg = null; }
+      const codeInput = h('input', {
+        class: 'input', placeholder: '粘贴回调地址，或只贴 code',
+        style: { fontFamily: 'var(--mono)', fontSize: '12px', flex: '1', minWidth: '200px' },
+      });
+      const goBtn = h('button', { class: 'btn primary' }, '完成登录');
+      goBtn.onclick = async () => {
+        const raw = codeInput.value.trim();
+        if (!raw) { toast('请先扫码，再把 code 贴回来', 'fail'); codeInput.focus(); return; }
+        goBtn.disabled = true;
+        try {
+          const r = await api(`ext/${provider}/login/poll`, {
+            method: 'POST', body: JSON.stringify({ session: d.session, code: raw }),
+          });
+          if (!r.done) { toast('还没完成，请确认已在微信里确认授权', 'fail'); return; }
+          stopExtAddTimers();
+          host.replaceChildren();
+          setLoginStatus(`已入池：${(r.account || {}).label || (r.account || {}).id || ''}`);
+          toast(`${spec.name} 账号已入池`);
+          await onAdded?.();
+        } catch (e) { toast(e.message, 'fail'); }
+        finally { goBtn.disabled = false; }
+      };
+      const parts = [];
+      if (svg) parts.push(h('div', { class: 'qr', style: { alignSelf: 'flex-start' } }, svg));
+      host.replaceChildren(
+        ...parts,
+        h('div', { class: 'row wrap', style: { gap: '8px' } },
+          h('button', { class: 'btn sm', onclick: () => window.open(d.auth_url, '_blank') }, '在浏览器打开授权页'),
+        ),
+        h('div', { class: 'muted', style: { fontSize: '11.5px' },
+          text: '用微信扫码 → 手机上确认 → 浏览器会跳到一个带 code 的地址，把整条地址或 code 复制到这里。' }),
+        h('div', { class: 'row wrap', style: { gap: '8px' } }, codeInput, goBtn),
       );
       return;
     }

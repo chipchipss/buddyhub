@@ -72,13 +72,13 @@ type Account struct {
 	PlanName   string                `json:"plan_name,omitempty"`
 	PlanExpire time.Time             `json:"plan_expire,omitempty"`
 
-	UseCount     int64     `json:"use_count"`
-	FailCount    int64     `json:"fail_count"`
-	RiskStrikes  int       `json:"risk_strikes"` // 累计风控封禁次数；成功即清零
-	LastUsedAt   time.Time `json:"last_used_at,omitempty"`
-	LastOKAt     time.Time `json:"last_ok_at,omitempty"`
-	LastProbeAt  time.Time `json:"last_probe_at,omitempty"` // 额度再探时刻（EXHAUSTED 恢复判定）
-	LastErrAt    time.Time `json:"last_err_at,omitempty"`
+	UseCount    int64     `json:"use_count"`
+	FailCount   int64     `json:"fail_count"`
+	RiskStrikes int       `json:"risk_strikes"` // 累计风控封禁次数；成功即清零
+	LastUsedAt  time.Time `json:"last_used_at,omitempty"`
+	LastOKAt    time.Time `json:"last_ok_at,omitempty"`
+	LastProbeAt time.Time `json:"last_probe_at,omitempty"` // 额度再探时刻（EXHAUSTED 恢复判定）
+	LastErrAt   time.Time `json:"last_err_at,omitempty"`
 
 	// Fingerprint 每账号独立桌面设备档案（platform/arch/os/language/timezone/device_mid）。
 	// 一号一台：多账号共用同一设备形态是上游关联信号。

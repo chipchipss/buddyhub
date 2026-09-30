@@ -17,10 +17,10 @@ import (
 //
 // 链路：
 //
-//	1. 激活上报（app_launch / app_daily_active）—— 官方客户端当日的活跃信号，
-//	   疑似活动套餐的投放资格依据；失败不阻断领取
-//	2. GET  /billing/preview?app_version=&platform=  → 可领取套餐（按优先级降序）
-//	3. POST /billing/claim {"plan_id": ...}          → 需验证码
+//  1. 激活上报（app_launch / app_daily_active）—— 官方客户端当日的活跃信号，
+//     疑似活动套餐的投放资格依据；失败不阻断领取
+//  2. GET  /billing/preview?app_version=&platform=  → 可领取套餐（按优先级降序）
+//  3. POST /billing/claim {"plan_id": ...}          → 需验证码
 //
 // 上游业务码：1001 套餐不存在 / 1002 活动结束 / 1003 已领取过 / 1004 不符合条件 /
 // 1005 今日名额用完（带名额恢复时间）/ 3001 参数错误 / 3007 验证码失败（换码重试一次）。
@@ -292,22 +292,22 @@ func (c *Client) ReportActivation(ctx context.Context, id string) error {
 // activationEventBody 激活事件体（字段集与官方 sendReport 一致，共 16 个）。
 func activationEventBody(element string, p *Profile, userID string) map[string]any {
 	return map[string]any{
-		"event_id":            UUID(),
-		"client_timezone":     p.Timezone,
-		"client_language":     p.Language,
-		"element_name":        element,
-		"event_region":        "app",
-		"event_type":          "view",
-		"event_text":          "",
-		"event_extra_detail":  map[string]any{},
-		"user_id":             userID,
-		"screen_resolution":   p.Screen,
-		"app_version":         ClientAppVersion,
-		"device_os_category":  p.OSCategory(),
-		"device_os_version":   p.OSVersion,
-		"device_mid":          p.DeviceMid,
-		"mac_id":              "",
-		"marketing_params":    "{}",
+		"event_id":           UUID(),
+		"client_timezone":    p.Timezone,
+		"client_language":    p.Language,
+		"element_name":       element,
+		"event_region":       "app",
+		"event_type":         "view",
+		"event_text":         "",
+		"event_extra_detail": map[string]any{},
+		"user_id":            userID,
+		"screen_resolution":  p.Screen,
+		"app_version":        ClientAppVersion,
+		"device_os_category": p.OSCategory(),
+		"device_os_version":  p.OSVersion,
+		"device_mid":         p.DeviceMid,
+		"mac_id":             "",
+		"marketing_params":   "{}",
 	}
 }
 

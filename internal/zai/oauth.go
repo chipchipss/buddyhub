@@ -15,11 +15,11 @@ import (
 //
 // 三段式：
 //
-//	1) init   POST {zcode.z.ai}/api/v1/oauth/cli/init   Bearer <poll_token>
-//	          → flow_id + authorize_url（服务端可能下发自己的 poll_token，须改用）
-//	2) 用户在浏览器完成登录
-//	3) poll   GET  {zcode.z.ai}/api/v1/oauth/cli/poll/{flow_id}  Bearer <poll_token>
-//	          → access_token（即 Plan 通道的 JWT）
+//  1. init   POST {zcode.z.ai}/api/v1/oauth/cli/init   Bearer <poll_token>
+//     → flow_id + authorize_url（服务端可能下发自己的 poll_token，须改用）
+//  2. 用户在浏览器完成登录
+//  3. poll   GET  {zcode.z.ai}/api/v1/oauth/cli/poll/{flow_id}  Bearer <poll_token>
+//     → access_token（即 Plan 通道的 JWT）
 //
 // 随后可选地把 access_token 兑换成 API Key（回退通道）：
 //
@@ -40,7 +40,7 @@ const (
 )
 
 // oauthAPIBase / exchangeOrigin 由端点变量派生（测试可注入 mock 上游）。
-func oauthAPIBase() string  { return PlanOrigin + "/api/v1" }
+func oauthAPIBase() string   { return PlanOrigin + "/api/v1" }
 func exchangeOrigin() string { return FallbackOrigin }
 
 // OAuthFlow 一次进行中的授权流程。

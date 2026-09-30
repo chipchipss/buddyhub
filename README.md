@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>多平台 Buddy 账号统一积分与网关中心 · OpenAI / Anthropic / Responses API 兼容</b><br>
-  Web 面板 · 账号池轮转 · 工具调用自愈 · Responses API · 定时签到 / 活跃 / 旅行 / 保活 · 成长任务一键完成 · <b>讯飞 Loomy + LobsterAI + 小浣熊 + Qoder + 华为云 积分自动领取 · Z.AI / ZCode · GitHub Copilot · Cline（免费池）· AutoClaw（智谱）</b>
+  Web 面板 · 账号池轮转 · 工具调用自愈 · Responses API · 定时签到 / 活跃 / 旅行 / 保活 · 成长任务一键完成 · <b>讯飞 Loomy + LobsterAI + 小浣熊 + Qoder + 华为云 积分自动领取 · Z.AI / ZCode · GitHub Copilot · Cline（免费池）· AutoClaw（智谱）· QClaw（腾讯）</b>
 </p>
 
 <p align="center">
@@ -133,6 +133,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 |---|---|---|---|---|
 | **小浣熊**（商汤） | `raccoon` | 🟢 **微信扫码登录** | `access_token` · `refresh_token`（**到期自动续期并回写**） | 登录奖励 |
 | **Qoder**（阿里） | `qoder` | 🟢 **设备授权登录** | `access_token` · `machine_id` · `refresh_token` · `security_oauth_token` | 双通道领取（campaigns → activity claim） |
+| **QClaw**（腾讯） | `qclaw` | 🟢 **微信扫码登录** | `access_token`（sk key，对话用）+ `refresh_token`（JWT）+ `guid` | 无（网关直连通道） |
 | **AutoClaw**（智谱） | `autoclaw` | 🟢 **手机号短信登录**（国内版） | `token` + `refresh_token`（**单飞续期**）+ `region` | 无（网关直连通道） |
 | **Cline** | `cline` | 🟢 **设备码授权** | `access_token`（含 `workos:` 前缀）+ `refresh_token`（**单飞续期**） | 无（网关直连通道，**含免费池**） |
 | **GitHub Copilot** | `copilot` | 🟢 **设备码授权** | `github_token` + `copilot_token`（自动续期） | 无（网关直连通道） |
@@ -152,6 +153,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | **GitHub Copilot** | 点「开始授权」→ 拿到形如 `ABCD-1234` 的设备码 → 在 `github.com/login/device` 输入 → 自动入池 |
 | **Cline** | 点「开始授权」→ 设备码 → 在 `authkit.cline.bot/device` 输入 → 自动入池（**免费池无需订阅**） |
 | **AutoClaw** | 填手机号 → 发验证码 → 填 6 位码 → 自动入池（国内版；国际版上游已关短信入口） |
+| **QClaw** | 点「微信扫码登录」→ 扫码确认 → 把回调地址里的 code 贴回来 → 自动入池 |
 
 统一接口（面板 Bearer 鉴权，可脚本化调用）：
 
@@ -329,6 +331,7 @@ Cline 的 `refresh_token` 是**一次性轮换**语义：并发请求同时发�
 | 项目 | 值得看的地方 | 我们做了什么 |
 |---|---|---|
 | **[aimod-cc/agent2api](https://github.com/aimod-cc/agent2api)** | 支持的通道最多（WorkBuddy / 小浣熊 / CatPaw / AutoClaw / Qoder / Cline / Accio / CodeArts / Trae）；每家一个 adapter，协议事实写得极细（含「踩空后表现很像没权限」这类口径） | 按它的公开协议**核对并实测**后接入了 **Cline**（含免费池）与 **AutoClaw**（智谱，手机号登录）；续期单飞的做法也来自它的 `refresh_flight` |
+| **[wicm84266964/Buddy2api](https://github.com/wicm84266964/Buddy2api)** | 按它的公开协议接入 **QClaw**（腾讯，微信扫码登录）|
 | **[wicm84266964/Buddy2api](https://github.com/wicm84266964/Buddy2api)** | QClaw / 千问办公 / TraeWork 三个通道；模型容量发现（`context_window` / `max_output_tokens` + `capacity_source` 标记来源是目录还是兜底）；聚合响应的完整性校验（缺完成标记不当作正常 stop） | 容量发现我们已有（四级查找链 + 探测上限）；`capacity_source` 式「标注数据来源」的思路值得后续补 |
 | **[wangliangdong/loomy2api](https://github.com/wangliangdong/loomy2api)** | Loomy **Web 版**（非桌面客户端）；**额度获取与路由解耦**——定时刷新写缓存，选号只读缓存，绝不在请求路径上打上游额度接口；多客户端会话头的兼容顺序 | 额度刷新与选号本就是分离的；会话键提取的兼容顺序我们已有（`conversation_id` + 内容回退） |
 
@@ -375,6 +378,59 @@ appId/appKey 是**客户端指纹**而非我们的密钥（内嵌在官方客户
 ### 续期单飞
 
 与 Cline 同源的问题：AutoClaw 服务端每次刷新会**轮换 `refresh_token`**，并发刷新会互相作废并把人踢下线。两条通道现在共用同一份单飞实现（`internal/server/singleflight.go`）。
+
+## 🐧 QClaw 通道（腾讯）⚠️ 上游已宣布停运
+
+> **⚠️ 这条通道正在失效，接之前先看这里。**
+>
+> 腾讯 2026-09-24 公告：QClaw **即日起停止新用户注册，2026-12-24 00:00 正式停止运营**。
+> 实测**扫码登录接口现在返回 `21004 鉴权不通过，请升级最新版本`** —— 新登录入口已被上游关闭
+> （存量账号在停运前是否还能用，取决于上游是否保留既有会话）。
+>
+> 代码按公开协议完整实现并测过（协议层 16 个用例 + 桥接 10 个），但**登录这一步目前打不通**。
+> 保留它是为了：① 存量账号可能仍可用；② 协议实现可作为同类腾讯系通道（JPRX 信封 + 微信扫码）的参考。
+> 如果你没有存量 QClaw 账号，**这条通道可以忽略**。
+
+QClaw（腾讯的桌面 Agent）接进同一个 OpenAI 兼容接口——模型名带 `qclaw:` 前缀。
+
+### 两条链路，两个域
+
+| | 端点 | 用途 |
+|---|---|---|
+| **JPRX 业务域** | `jprx.m.qq.com/data/{cmd}/forward` | 登录 / 建 key / 模型列表 |
+| **AIZone 对话域** | `mmgrcalltoken.3g.qq.com/aizone/v1/chat/completions` | OpenAI 兼容对话 |
+
+### 微信扫码登录
+
+面板「添加账号 → 外部平台 → QClaw」→ 点「微信扫码登录」→ 面板出二维码 → 微信扫码确认 → **把跳转后地址里的 code 贴回来** → 入池。
+
+```
+4050 wx_login_state  {guid}               → {state}
+   浏览器打开 open.weixin.qq.com/connect/qrconnect?appid=…&state=…
+4026 wx_login        {guid, code, state}  → {token(JWT), user_info, …}
+4055 create_api_key  {}                   → {key: "sk-…"}
+```
+
+**对话用的是建出来的 sk key（Bearer），不是 JWT** —— 这是本通道最容易搞错的一处。
+
+> 微信把授权码回给腾讯自己的回调域名，网关截不到，所以最后一步必须由用户把 code（或整条回调 URL）贴回来。网关两种都认。
+
+### 四处「踩空后表现很像没权限」的口径
+
+- **`JPrx-Ctx` 是 MD5 拼接**：`rnd=<32位a-z0-9>; date=<秒>; gid=<gid>; sg=md5(body+KEY+rnd+date+gid)`。注意**先拼 body**、且时间戳是**秒**
+- **对话必须带 `X-Conversation-Request-ID`**：不带时上游直接 400
+- **响应要解两层信封**：`{ret, data:{resp:{common:{code}, data:{…}}}}`，`ret` 与 `common.code` 任一非 0 都是失败
+- **`X-New-Token` 响应头会轮换 JWT**：拿到了必须回写
+
+### 顺带把二维码编码器扩到 v10
+
+QClaw 的微信授权链接有 **221 字节**，超出原先编码器的上限（v5 / 106 字节）。既然以后还会有更长的授权链接，把 `web/js/qr.js` 从 v1–5 扩到了 **v1–10**（上限 271 字节），并用 python `qrcode` 库对 **v1–v10 逐版本做了逐像素交叉验证（10/10 一致）**。
+
+扩展时踩到三个只有高版本才会暴露的坑，都写在代码注释里了：
+
+- **v6+ 是多纠错块**，码字必须交织（v1–5 单块才免交织）
+- **v7+ 有版本信息**（18 位），左下那份的位序与右上**互为转置**
+- **v10+ 的字节模式计数指示符是 16 位**（v1–9 是 8 位）——写死 8 位时前几个码字看着还对，后面全错
 
 ## 🆚 与上游的差异
 
@@ -905,6 +961,7 @@ web/
 | `copilot:` | GitHub Copilot | `data/ext-accounts.json`（provider `copilot`） | [GitHub Copilot 通道](#-github-copilot-通道) |
 | `cline:` | Cline（**带免费池**，池前缀保留在模型名里） | `data/ext-accounts.json`（provider `cline`） | [Cline 通道](#-cline-通道带免费池) |
 | `autoclaw:` | AutoClaw（智谱，国内 / 国际两地区） | `data/ext-accounts.json`（provider `autoclaw`） | [AutoClaw 通道](#-autoclaw-通道智谱-autoglm) |
+| `qclaw:` | QClaw（腾讯） | `data/ext-accounts.json`（provider `qclaw`） | [QClaw 通道](#-qclaw-通道腾讯) |
 | `qoder:` | Qoder（阿里） | `data/ext-accounts.json`（provider `qoder`） | — |
 | `codex:` | Codex 订阅池 | 本机 `~/.codex*` 凭据 | — |
 | `free:` | 免费 key 池（`free:<provider>/<model>`） | 配置的免费 Key | — |

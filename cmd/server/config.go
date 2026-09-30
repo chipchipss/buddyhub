@@ -146,6 +146,12 @@ type Config struct {
 			Proxy string `json:"proxy,omitempty"`
 		} `json:"autoclaw"`
 
+		// QClaw QClaw（腾讯）通道（qclaw: 前缀模型路由目标）。
+		QClaw struct {
+			// Proxy 本通道专用 HTTP 代理。空 = 跟随环境变量，再不行直连。
+			Proxy string `json:"proxy,omitempty"`
+		} `json:"qclaw"`
+
 		// 余额后台周期刷新：两次签到时点之间 credits 也能保持新鲜（面板/状态观测用）。
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。
 		BalanceRefreshEnabled bool `json:"balance_refresh_enabled"` // 缺省 true；false = 关闭

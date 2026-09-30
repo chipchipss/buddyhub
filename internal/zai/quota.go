@@ -3,10 +3,10 @@ package zai
 import (
 	"context"
 	"encoding/json"
-	"strconv"
-	"strings"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -38,19 +38,19 @@ func billingHeaders(a *Account) map[string]string {
 	a.EnsureProfile()
 	p := a.Fingerprint
 	h := map[string]string{
-		"Content-Type":          "application/json",
-		"User-Agent":            "ZCode/" + ClientAppVersion,
-		"HTTP-Referer":          PlanOrigin,
-		"X-Title":               "Z Code@electron",
-		"X-ZCode-App-Version":   ClientAppVersion,
-		"X-Platform":            p.PlatformFull(),
-		"X-Release-Channel":     "stable",
-		"X-Client-Language":     p.Language,
-		"X-Client-Timezone":     p.Timezone,
-		"X-Os-Category":         p.OSCategory(),
-		"X-Os-Version":          p.OSVersion,
-		"X-Device-Mid":          p.DeviceMid,
-		"x-request-id":          UUID(),
+		"Content-Type":        "application/json",
+		"User-Agent":          "ZCode/" + ClientAppVersion,
+		"HTTP-Referer":        PlanOrigin,
+		"X-Title":             "Z Code@electron",
+		"X-ZCode-App-Version": ClientAppVersion,
+		"X-Platform":          p.PlatformFull(),
+		"X-Release-Channel":   "stable",
+		"X-Client-Language":   p.Language,
+		"X-Client-Timezone":   p.Timezone,
+		"X-Os-Category":       p.OSCategory(),
+		"X-Os-Version":        p.OSVersion,
+		"X-Device-Mid":        p.DeviceMid,
+		"x-request-id":        UUID(),
 	}
 	if a.HasJWTPath() {
 		h["Authorization"] = "Bearer " + a.JWT

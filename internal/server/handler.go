@@ -17,6 +17,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extprovider/autoclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
 	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
+	"github.com/chipchipss/buddyhub/internal/extprovider/qclaw"
 	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/httpauth"
 	"github.com/chipchipss/buddyhub/internal/livecfg"
@@ -135,12 +136,14 @@ type Handler struct {
 	lastCopilotErr  string
 	lastClineErr    string
 	lastAutoClawErr string
+	lastQClawErr    string
 
 	// clineFlights / autoclawFlights 续期单飞表。
 	// 两家的 refresh_token 都是一次性轮换语义：并发续期会互相作废并把人踢下线，
 	// 故同一账号同一时刻只允许一次续期在飞，其余请求复用同一次结果。
 	clineFlights    flightGroup[*cline.Credential]
 	autoclawFlights flightGroup[*autoclaw.Credential]
+	qclawFlights    flightGroup[*qclaw.Credential]
 }
 
 // NewHandler 构建 handler。
@@ -566,6 +569,25 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		out = append(out, entry)
 	}
+	// QClaw 模型名单（qclaw: 前缀）：有账号时实时拉（10 分钟缓存），
+	// 拿不到目录时回落到上游观测到的静态名单。
+	for _, m := range h.qclawCatalog() {
+		if m.ID == "" {
+			continue
+		}
+		entry := map[string]any{
+			"id":       qclawModelPrefix + m.ID,
+			"object":   "model",
+			"created":  1753600000,
+			"owned_by": "qclaw",
+		}
+		if m.Description != "" {
+			entry["description"] = m.Description
+		} else if m.Name != "" && m.Name != m.ID {
+			entry["description"] = m.Name
+		}
+		out = append(out, entry)
+	}
 	// Loomy 模型名单（loomy: 前缀）：有可用凭据时实时拉上游目录透出
 	// （原样无别名；上游对未知模型静默回落 deepseek，故客户端应读响应 model 字段）。
 	if mods := h.loomyCatalog(); len(mods) > 0 {
@@ -852,6 +874,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			detail += "；最近失败原因: " + h.lastAutoClawErr
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_autoclaw_account", detail)
+		return
+	}
+
+	// QClaw 直连通道（qclaw: 前缀模型）：走 extstore 里的 QClaw 账号
+	// （微信扫码登录；对话用建出来的 sk key）。
+	if isQClawModel(bareModel) {
+		qm := strings.TrimPrefix(bareModel, qclawModelPrefix)
+		bodyQM := body
+		if qm != bareModel {
+			bodyQM = rewriteModel(body, qm)
+		}
+		if h.qclawChatStream(w, r, bodyQM, qm) {
+			return
+		}
+		detail := "没有可用的 QClaw 账号（面板-添加账号-外部平台-QClaw 微信扫码后重试）"
+		if h.lastQClawErr != "" {
+			detail += "；最近失败原因: " + h.lastQClawErr
+		}
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_qclaw_account", detail)
 		return
 	}
 

@@ -172,7 +172,7 @@ func TestAddPanelsRender(t *testing.T) {
   prepend(...cs) { this.children.unshift(...cs); }
   before() {} after() {} remove() { this.isConnected = false; }
   insertBefore(c) { return this.appendChild(c); }
-  replaceChildren(...cs) { this.children = cs; for (const c of cs) c.parentNode = this; }
+  replaceChildren(...cs) { this.children = cs.filter(c => c != null); for (const c of this.children) c.parentNode = this; }
   focus() {}
   get firstChild() { return this.children[0] ?? null; }
   get lastChild() { return this.children[this.children.length - 1] ?? null; }
@@ -225,6 +225,7 @@ const PLATFORMS = [
   { id: 'copilot', name: 'GitHub Copilot', group: 'gateway', prefix: 'copilot:', login: 'code' },
   { id: 'cline', name: 'Cline', group: 'gateway', prefix: 'cline:', login: 'code' },
   { id: 'autoclaw', name: 'AutoClaw（智谱）', group: 'gateway', prefix: 'autoclaw:', login: 'sms' },
+  { id: 'qclaw', name: 'QClaw（腾讯）', group: 'gateway', prefix: 'qclaw:', login: 'paste' },
 ];
 
 // fetch 桩必须**先**装好再拉注册表，否则会挂在前面那个永不 resolve 的空桩上
@@ -252,6 +253,8 @@ const WANT = {
   // 短信登录没有「发起」按钮，直接出表单（发码 → 校验两段同步调用），
   // 输入框是「手机号 + 验证码」两个，不走「标识框 + N 个字段」那套。
   autoclaw: { fields: 0, login: '发送验证码', inputs: 2 },
+  // 扫码回填：点「微信扫码登录」才出二维码与回填框（发起前只有一个按钮）
+  qclaw: { fields: 0, login: '微信扫码登录' },
 };
 const problems = [];
 for (const [provider, want] of Object.entries(WANT)) {

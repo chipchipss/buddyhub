@@ -21,6 +21,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extprovider/codearts"
 	"github.com/chipchipss/buddyhub/internal/extprovider/copilot"
 	"github.com/chipchipss/buddyhub/internal/extprovider/lobsterai"
+	"github.com/chipchipss/buddyhub/internal/extprovider/qclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
 	"github.com/chipchipss/buddyhub/internal/extprovider/raccoon"
 )
@@ -40,6 +41,8 @@ const (
 	PCline = "cline"
 	// PAutoClaw AutoClaw（智谱 autoglm；国内版支持手机短信登录）。
 	PAutoClaw = "autoclaw"
+	// PQClaw QClaw（腾讯；微信扫码登录）。
+	PQClaw = "qclaw"
 )
 
 // ExtAccount 一个外部平台账号。
@@ -313,6 +316,8 @@ func (m *Manager) CheckinOne(ctx context.Context, a *ExtAccount) *CheckinResult 
 		// AutoClaw 有每日签到（源实现在 userapi 域），但需额外的活动接口；
 		// 此处先只做凭据有效性验证，避免打未验证的端点。
 		res.Kind, res.Message = "inactive", "AutoClaw 无需签到（网关直连通道）"
+	case PQClaw:
+		res.Kind, res.Message = "inactive", "QClaw 无需签到（网关直连通道）"
 	default:
 		res.Kind, res.Message = "failed", "未知平台: "+a.Provider
 	}
@@ -384,6 +389,22 @@ func (m *Manager) ViewOne(ctx context.Context, a *ExtAccount) *ExtAccountView {
 			} else {
 				v.Note = err.Error()
 			}
+		}
+	case PQClaw:
+		// QClaw 视图：对话用的 sk key 是长期凭据，能列模型即视为可用。
+		var cred qclaw.Credential
+		if json.Unmarshal(a.Cred, &cred) != nil {
+			v.Note = "凭据解析失败"
+			return v
+		}
+		if cred.APIKey == "" {
+			v.Note = "缺少对话用的 sk key，请重新扫码登录"
+			return v
+		}
+		v.BalanceOK = true
+		v.Note = "QClaw"
+		if cred.Nickname != "" {
+			v.Note = "QClaw " + cred.Nickname
 		}
 	case PAutoClaw:
 		// AutoClaw 视图：续期一次验证凭据有效性（服务端会轮换 refresh_token）。

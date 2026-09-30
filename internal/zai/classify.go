@@ -13,14 +13,14 @@ import (
 type FailureKind int
 
 const (
-	FailNone         FailureKind = iota
-	FailCaptcha                  // 验证码挑战：换一枚 token 重试同一账号，账号本身无罪
-	FailRiskControl              // 真风控（3012/405 unusual activity）：禁用保护
-	FailExhausted                // 额度用完（402 / quota 关键词）
-	FailRateLimited              // 429：按 Retry-After 等待重试，不冷却账号
-	FailInvalid                  // 401/403（非验证码）：凭证失效
-	FailServerError              // 5xx：重试耗尽后冷却
-	FailOther                    // 其它：计入失败，不改变状态
+	FailNone        FailureKind = iota
+	FailCaptcha                 // 验证码挑战：换一枚 token 重试同一账号，账号本身无罪
+	FailRiskControl             // 真风控（3012/405 unusual activity）：禁用保护
+	FailExhausted               // 额度用完（402 / quota 关键词）
+	FailRateLimited             // 429：按 Retry-After 等待重试，不冷却账号
+	FailInvalid                 // 401/403（非验证码）：凭证失效
+	FailServerError             // 5xx：重试耗尽后冷却
+	FailOther                   // 其它：计入失败，不改变状态
 )
 
 func (k FailureKind) String() string {

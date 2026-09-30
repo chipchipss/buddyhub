@@ -214,10 +214,11 @@ func TestRaccoonLoginUpstreamFlakyStaysPending(t *testing.T) {
 }
 
 func TestRaccoonQrUrlFitsQrEncoder(t *testing.T) {
-	// 面板的 QR 编码器（web/js/qr.js）只做到版本 5 / ECC L，byte 模式上限 106 字节。
+	// 面板的 QR 编码器（web/js/qr.js）做到版本 10 / ECC L，byte 模式上限 271 字节
+	// （274 数据码字 − 3 字节头；v10+ 的计数指示符是 16 位，所以头是 3 字节不是 2）。
 	// 超了 qrMatrix 会抛错，前端只能退化成显示一串 URL——扫码登录直接废掉。
 	// 这条断言把「URL 格式变化」与「二维码静默失效」隔开：改 URL 必须同时改编码器。
-	const qrMaxBytes = 106
+	const qrMaxBytes = 271
 	url := raccoon.BuildQrImageUrl(raccoon.GenerateQrCode())
 	if n := len([]byte(url)); n > qrMaxBytes {
 		t.Fatalf("扫码 URL %d 字节，超过 QR 编码器上限 %d：%s", n, qrMaxBytes, url)

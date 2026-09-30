@@ -37,6 +37,7 @@ func PlatformOf(bare string) string {
 		{copilotModelPrefix, "copilot"},
 		{clineModelPrefix, "cline"},
 		{autoclawModelPrefix, "autoclaw"},
+		{qclawModelPrefix, "qclaw"},
 		{codexModelPrefix, "codex"},
 		{freeModelPrefix, "free"},
 		{loomyModelPrefix, "loomy"},
