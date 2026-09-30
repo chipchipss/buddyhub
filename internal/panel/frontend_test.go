@@ -205,46 +205,113 @@ globalThis.fetch = () => new Promise(() => {});
 globalThis.requestAnimationFrame = () => 0;
 globalThis.isSecureContext = false;
 
-// 递归收集 input 数量与按钮（含 hidden 标志），用于断言
-function walk(el, out = { inputs: 0, hiddenInputs: 0, buttons: [] }) {
+// 递归收集 input 数量与按钮文案，用于断言
+function walk(el, out = { inputs: 0, buttons: [] }) {
   if (!el || typeof el !== 'object') return out;
   const tag = (el.tagName || '').toLowerCase();
-  if (tag === 'input') { out.inputs++; if (el.hidden) out.hiddenInputs++; }
-  if (tag === 'button') out.buttons.push({ text: el.textContent.trim(), hidden: !!el.hidden });
+  if (tag === 'input') out.inputs++;
+  if (tag === 'button') out.buttons.push(el.textContent.trim());
   for (const c of el.children || []) walk(c, out);
   return out;
 }
-const has = (btns, kw, hidden) => btns.some(b => b.text.includes(kw) && b.hidden === hidden);
+const has = (btns, kw) => btns.some(b => b.includes(kw));
 
 const { extAddPanel } = await import('./views/ext-add.js');
 const { zaiAddForm } = await import('./views/zai-segment.js');
 
-// 每个平台的凭据字段数（账号标识输入框另计；Copilot 走设备流，不填凭据）
-const WANT = { lobsterai: 4, raccoon: 2, qoder: 4, codearts: 3, copilot: 0 };
+// 每个平台的凭据字段数（账号标识输入框另计）。
+// 有登录方式的平台把凭据表单收进折叠区，字段仍然要渲染出来（手工兜底路径）。
+const WANT = {
+  lobsterai: { fields: 4, login: null },
+  raccoon: { fields: 2, login: '微信扫码登录' },
+  qoder: { fields: 4, login: '浏览器授权登录' },
+  codearts: { fields: 3, login: null },
+  copilot: { fields: 0, login: '开始授权' },
+};
 const problems = [];
-for (const [provider, fields] of Object.entries(WANT)) {
+for (const [provider, want] of Object.entries(WANT)) {
   const panel = extAddPanel(() => {}, { flat: true });
   const sel = panel.children[0].children[0].children[0];
   if (!sel || (sel.tagName || '').toLowerCase() !== 'select') { problems.push(provider + ': 未找到平台选择器'); continue; }
   sel.value = provider;
   for (const f of sel.listeners.change || []) f({ target: sel });
   const got = walk(panel);
-  if (got.inputs !== fields + 1) problems.push(provider + ': 输入框 ' + got.inputs + ' 个，期望 ' + (fields + 1));
-  if (provider === 'copilot') {
-    // 设备流：凭据表单整行隐藏（[hidden] 规则在 tokens.css），改出「开始授权」
-    if (got.hiddenInputs !== 1) problems.push('copilot: 标识输入框应隐藏，实际隐藏 ' + got.hiddenInputs + ' 个');
-    if (!has(got.buttons, '开始授权', false)) problems.push('copilot: 缺「开始授权」按钮');
-    if (!has(got.buttons, '添加', true)) problems.push('copilot: 「添加」按钮应隐藏');
-  } else {
-    if (got.hiddenInputs !== 0) problems.push(provider + ': 不该有隐藏输入框');
-    if (!has(got.buttons, '添加', false)) problems.push(provider + ': 缺「添加」按钮');
+
+  // Copilot 没有可手填的凭据字段，不该出现空表单
+  const wantInputs = want.fields === 0 ? 0 : want.fields + 1;
+  if (got.inputs !== wantInputs) problems.push(provider + ': 输入框 ' + got.inputs + ' 个，期望 ' + wantInputs);
+
+  if (want.login) {
+    if (!has(got.buttons, want.login)) problems.push(provider + ': 缺「' + want.login + '」按钮');
   }
+  // 有凭据字段就必须有手工添加入口；没有字段就不该有
+  if (want.fields > 0 && !has(got.buttons, '添加')) problems.push(provider + ': 缺手工「添加」按钮');
+  if (want.fields === 0 && has(got.buttons, '添加')) problems.push(provider + ': 无凭据字段却出现「添加」按钮');
 }
 
 const zai = walk(zaiAddForm(() => {}));
 if (zai.inputs !== 2) problems.push('zai: 输入框 ' + zai.inputs + ' 个，期望 2');
-if (!has(zai.buttons, '入池', false)) problems.push('zai: 缺「入池」按钮');
-if (!has(zai.buttons, 'OAuth', false)) problems.push('zai: 缺「OAuth 免密登录」按钮');
+if (!has(zai.buttons, '入池')) problems.push('zai: 缺「入池」按钮');
+if (!has(zai.buttons, 'OAuth')) problems.push('zai: 缺「OAuth 免密登录」按钮');
+
+/* ── 二维码必须是真的 SVG 元素，不是标记字符串 ──────────────────
+   h() 把字符串当文本节点，传标记进去会把 "<svg ...>" 原样显示出来。 */
+const { qrMatrix, qrSVG } = await import('./qr.js');
+const qrText = 'https://xiaohuanxiong.com/login/mp?code=abc';
+const qrM = qrMatrix(qrText);
+const svg = qrSVG(qrM, 160);
+if (typeof svg === 'string') problems.push('qrSVG 返回字符串——h() 会当成文本节点，二维码不显示');
+else {
+  if ((svg.tagName || '').toLowerCase() !== 'svg') problems.push('qrSVG 未返回 svg 元素');
+  const paths = (svg.children || []).filter(c => (c.tagName || '').toLowerCase() === 'path');
+  if (!paths.length) problems.push('qrSVG 没有深色模块 path');
+  else if (!paths[0].props.d || paths[0].props.d.length < 20) problems.push('qrSVG 的 path d 为空');
+  const wantVB = '0 0 ' + (qrM.length + 8) + ' ' + (qrM.length + 8);
+  if (svg.props['viewBox'] !== wantVB) problems.push('qrSVG viewBox = ' + svg.props['viewBox'] + '，期望 ' + wantVB);
+}
+
+/* ── 驱动一次真实登录：点按钮 → 挑战物必须渲染出来 ──────────────
+   登录面板是命令式的，只有走一遍点击才覆盖到 renderChallenge。 */
+function findButton(el, kw) {
+  if (!el || typeof el !== 'object') return null;
+  if ((el.tagName || '').toLowerCase() === 'button' && el.textContent.includes(kw)) return el;
+  for (const c of el.children || []) { const r = findButton(c, kw); if (r) return r; }
+  return null;
+}
+function findByClass(el, cls) {
+  if (!el || typeof el !== 'object') return null;
+  // applyProps 对普通元素写 className，对 SVG 走 setAttribute('class')
+  const c = el.className || (el.props && el.props.class) || '';
+  if (String(c).split(' ').includes(cls)) return el;
+  for (const c2 of el.children || []) { const r = findByClass(c2, cls); if (r) return r; }
+  return null;
+}
+globalThis.fetch = async () => ({
+  ok: true, status: 200,
+  json: async () => ({ ok: true, mode: 'qr', session: 's1',
+    qr_url: 'https://xiaohuanxiong.com/login/mp?code=abc&appname=x', expires_in: 600 }),
+});
+
+for (const [provider, btnText, wantCls] of [['raccoon', '微信扫码登录', 'qr']]) {
+  const panel = extAddPanel(() => {}, { flat: true });
+  const sel = panel.children[0].children[0].children[0];
+  sel.value = provider;
+  for (const f of sel.listeners.change || []) f({ target: sel });
+  const btn = findButton(panel, btnText);
+  if (!btn) { problems.push(provider + ': 找不到「' + btnText + '」按钮'); continue; }
+  // 两种绑定方式都要认：h(..., {onclick}) 走 addEventListener，btn.onclick= 是属性赋值
+  const click = btn.onclick || (btn.listeners.click || [])[0];
+  if (typeof click !== 'function') { problems.push(provider + ': 登录按钮没绑点击'); continue; }
+  await click({ currentTarget: btn });
+  const box = findByClass(panel, wantCls);
+  if (!box) { problems.push(provider + ': 点登录后没渲染出 .' + wantCls); continue; }
+  const inner = (box.children || [])[0];
+  if (!inner || (inner.tagName || '').toLowerCase() !== 'svg') {
+    problems.push(provider + ': .' + wantCls + ' 里不是 svg 元素');
+  }
+}
+const { stopExtAddTimers } = await import('./views/ext-add.js');
+stopExtAddTimers();
 
 if (problems.length) { console.error(problems.join('\n')); process.exit(1); }
 console.log('RENDER OK');

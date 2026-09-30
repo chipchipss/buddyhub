@@ -85,7 +85,15 @@ func signRequestHuawei(cred *Credential, method, urlStr, body string) (map[strin
 		"host":                 host,
 		"x-sdk-date":           dateStamp,
 		"x-sdk-content-sha256": payloadHash,
-		"x-security-token":     cred.SecurityToken,
+	}
+	// x-security-token 只在有值时参与签名与发送。
+	// 华为云永久 AK/SK 的请求**不带**该头；带上空值会让服务端算出的规范请求
+	// 与客户端不一致（401 verify ak sk signature fail）。临时 STS 凭据才需要它。
+	//
+	// 这对账号池很关键：STS security_token 几小时就过期，放进池里等于每几小时
+	// 重填一次；永久 AK/SK 才撑得起无人值守。
+	if cred.SecurityToken != "" {
+		headers["x-security-token"] = cred.SecurityToken
 	}
 	if method != http.MethodGet {
 		headers["content-type"] = "application/json"

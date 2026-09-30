@@ -47,7 +47,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
 | 🖥️ **Web 管理面板** | 内嵌单色玻璃面板（前端为原生 ES 模块，无构建步骤），总览 / 账号 / 用量与积分 / 自动化 / 模型档位 / API 密钥 / 配置（热生效）/ 运行日志，`⌘K` 命令面板，见 [Web 管理面板](#-web-管理面板) |
-| 🤖 **多平台账号池** | 腾讯 WorkBuddy（OAuth 设备授权 + 成长任务全自动）· 讯飞 Loomy（客户端检测 / 密码 / 短信 / Token）· 外部平台（LobsterAI · 小浣熊 · Qoder · 华为云 CodeArts 签到）· **Z.AI / ZCode**（Coding Plan JWT + API Key 双通道、额度、套餐领取）· **GitHub Copilot**（设备流登录 + token 自动续期 + OpenAI 原生透传），见 [Z.AI 账号池](#-zai--zcode-账号池) / [GitHub Copilot 通道](#-github-copilot-通道) |
+| 🤖 **多平台账号池** | 腾讯 WorkBuddy（OAuth 设备授权 + 成长任务全自动）· 讯飞 Loomy（客户端检测 / 密码 / 短信 / Token）· 外部平台（**小浣熊微信扫码 · Qoder 设备授权 · GitHub Copilot 设备码** 一键入池；LobsterAI / 华为云 CodeArts 手工填写）· **Z.AI / ZCode**（Coding Plan JWT + API Key 双通道、额度、套餐领取），见 [外部平台账号池](#-外部平台账号池) / [Z.AI 账号池](#-zai--zcode-账号池) / [GitHub Copilot 通道](#-github-copilot-通道) |
 | ➕ **统一入池入口** | 「添加账号」抽屉覆盖全部平台：腾讯 WorkBuddy · Loomy · Z.AI · 外部平台（含 Copilot 设备码授权）· 手动 JSON |
 
 ## 🎯 成长任务一键完成（17/18）
@@ -129,24 +129,44 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 腾讯池之外的积分型平台统一收在 `data/ext-accounts.json`，面板「自动化 → 外部平台」管理，每天 10:00 自动签到，也可一键全部签到。
 
-| 平台 | Provider | 凭据字段 | 签到 |
-|---|---|---|---|
-| **LobsterAI**（有道） | `lobsterai` | `access_token`* · `uuid`* · `refresh_token` · `first_key_from` | 每日签到 |
-| **小浣熊**（商汤） | `raccoon` | `access_token`* · `refresh_token`（**到期自动续期并回写**） | 登录奖励 |
-| **Qoder**（阿里） | `qoder` | `access_token`* · `machine_id`* · `refresh_token` · `security_oauth_token` | 双通道领取（campaigns → activity claim） |
-| **CodeArts**（华为云） | `codearts` | `access_key_id`* · `secret_access_key`* · `security_token`* | 每日签到 |
-| **GitHub Copilot** | `copilot` | 设备码授权（自动写入 `github_token` + `copilot_token`） | 无（网关直连通道） |
+| 平台 | Provider | 入池方式 | 凭据字段 | 签到 |
+|---|---|---|---|---|
+| **小浣熊**（商汤） | `raccoon` | 🟢 **微信扫码登录** | `access_token` · `refresh_token`（**到期自动续期并回写**） | 登录奖励 |
+| **Qoder**（阿里） | `qoder` | 🟢 **设备授权登录** | `access_token` · `machine_id` · `refresh_token` · `security_oauth_token` | 双通道领取（campaigns → activity claim） |
+| **GitHub Copilot** | `copilot` | 🟢 **设备码授权** | `github_token` + `copilot_token`（自动续期） | 无（网关直连通道） |
+| **LobsterAI**（有道） | `lobsterai` | ⚪ 手工填写 | `access_token`* · `uuid`* · `refresh_token` · `first_key_from` | 每日签到 |
+| **CodeArts**（华为云） | `codearts` | ⚪ 手工填写 | `access_key_id`* · `secret_access_key`* · `security_token`（仅临时凭据需要） | 每日签到 |
 
 \* 为必填项。
 
-### 添加账号
+### 登录入池（不用再去客户端里手抄 token）
 
-「添加账号」抽屉 → **外部平台** → 选平台 → **逐字段填写**（表单按该平台的凭据结构生成，必填项留空会被拦住，不用手写 JSON）。
+三个平台在**协议层**就实现了登录，面板把它们接上了——选到平台直接点按钮，浏览器/手机上完成一步，账号自动落库：
 
-- Copilot 例外：选到它时表单换成**设备码授权**——点「开始授权」拿到形如 `ABCD-1234` 的设备码，在 `github.com/login/device` 输入并确认，页面自动轮询完成入池
+| 平台 | 交互 |
+|---|---|
+| **小浣熊** | 点「微信扫码登录」→ 面板出二维码 → 手机微信扫一扫并确认 → 自动入池 |
+| **Qoder** | 点「浏览器授权登录」→ 打开 PKCE 授权链接完成登录 → 面板轮询取 token → 自动入池 |
+| **GitHub Copilot** | 点「开始授权」→ 拿到形如 `ABCD-1234` 的设备码 → 在 `github.com/login/device` 输入 → 自动入池 |
+
+统一接口（面板 Bearer 鉴权，可脚本化调用）：
+
+```
+POST /panel/api/ext/{provider}/login/start → {mode, session, qr_url|auth_url|user_code, ...}
+POST /panel/api/ext/{provider}/login/poll  → {done:false, status} | {done:true, account}
+```
+
+轮询期上游抖动只会保持 `pending` 继续轮询，不会把整个登录判死；会话用后即焚，重复 poll 返回 404。
+
+### 手工填写（无登录协议的平台）
+
+**LobsterAI / CodeArts** 没有可复用的登录协议，走逐字段表单（按该平台的凭据结构生成，必填项留空会被拦住，不用手写 JSON）：
+
 - 也支持在「自动化 → 外部平台」页内直接添加（同一套表单），或用底部的「高级：粘贴完整凭据 JSON」批量导入
+- **CodeArts 建议用永久 AK/SK**：`Security Token` 留空即可（网关会**省略** `x-security-token` 头，与华为云永久密钥的签名口径一致）。临时 STS 凭据几小时就过期，放进池里等于每隔几小时重填一次
+- **Qoder 的 `machine_id` 必填**——缺失会被上游直接拒绝
 
-> 💡 Qoder 的 `machine_id` 必填——缺失会被上游直接拒绝。各平台凭据都可从对应官方客户端的本地凭据文件里取。
+> 💡 LobsterAI 的登录是绑在 Electron 客户端里的本地 OAuth 回调流程，还需要 `uuid` / `first_key_from` 等客户端渠道字段，无法在网关侧复刻；CodeArts 的 AK/SK 本就是在华为云控制台创建的，没有可自动化的「登录」这一步。这两个平台保持手工填写是设计选择，不是没做完。
 
 ## 🤖 Z.AI / ZCode 账号池
 
@@ -721,7 +741,7 @@ web/
 | **配置** | 在线编辑 config.json：API 密钥、定时任务（四类任务时点与开关、余额刷新间隔）、账号池与流量治理参数、上游超时与 UA、提示词模式、脱敏 / 粘性开关 |
 | **运行日志** | 最近 500 行服务日志 + 请求表格日志；按「任务 / 对话 / 系统」频道筛选，自动滚动可开关 |
 
-**添加账号**（顶栏按钮）是右侧抽屉，**覆盖全部平台**——五个分段：腾讯 OAuth 设备授权（显示授权链接 + 自动轮询，凭证落盘后**热加载进池，免重启**）· Loomy（客户端自动检测 / 手机号密码 / 短信验证码 / 手动 Token）· Z.AI（OAuth 免密登录 / JWT / API Key）· 外部平台（LobsterAI · 小浣熊 · Qoder · 华为云 CodeArts 逐字段填写 + **GitHub Copilot 设备码授权**）· 手动 JSON 批量导入。账号卡上的「任务」同样以抽屉展开：全部任务的进度、奖励与状态，支持「全部接受」与**一键完成**（覆盖 17 个任务，推进进度 + 异步计分等待 + 自动领奖，幂等可重复点）。
+**添加账号**（顶栏按钮）是右侧抽屉，**覆盖全部平台**——五个分段：腾讯 OAuth 设备授权（显示授权链接 + 自动轮询，凭证落盘后**热加载进池，免重启**）· Loomy（客户端自动检测 / 手机号密码 / 短信验证码 / 手动 Token）· Z.AI（OAuth 免密登录 / JWT / API Key）· 外部平台（**小浣熊微信扫码 · Qoder 设备授权 · Copilot 设备码** 三种一键入池，LobsterAI / CodeArts 逐字段填写，有登录方式的平台保留「手动填写凭据」折叠区兜底）· 手动 JSON 批量导入。账号卡上的「任务」同样以抽屉展开：全部任务的进度、奖励与状态，支持「全部接受」与**一键完成**（覆盖 17 个任务，推进进度 + 异步计分等待 + 自动领奖，幂等可重复点）。
 
 **移动端**：窗口窄于 900px 时侧栏收成顶部横滑玻璃条；`100dvh` 与安全区（`env(safe-area-inset-*)`）避免地址栏 / 刘海裁切；触屏输入框字号 16px 防 iOS 聚焦缩放；悬停效果一律限定在精确指针设备上。
 

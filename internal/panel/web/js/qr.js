@@ -147,11 +147,33 @@ export function qrMatrix(text) {
   return M;
 }
 
-// 矩阵 → SVG（quiet zone 4 模块）
+// 矩阵 → SVG 元素（quiet zone 4 模块）。
+//
+// 返回**真实 SVG 元素**而不是标记字符串：h() 把字符串当文本节点处理，
+// 传标记进去只会把 "<svg ...>" 原样显示在页面上（二维码功能会静默失效）。
+//
+// 深色模块合成单条 <path>，而不是每格一个 <rect>——v5 有约 600 个深色模块，
+// 一个 path 既省 DOM 也省序列化体积。
 export function qrSVG(M, px) {
+  const NS = 'http://www.w3.org/2000/svg';
   const n = M.length, q = 4, total = n + q * 2;
-  let s = '<svg viewBox="0 0 ' + total + ' ' + total + '" width="' + px + '" height="' + px + '" shape-rendering="crispEdges" role="img" style="background:#fff">';
-  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++)
-    if (M[r][c]) s += '<rect x="' + (c + q) + '" y="' + (r + q) + '" width="1" height="1"/>';
-  return s + '</svg>';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 ' + total + ' ' + total);
+  svg.setAttribute('width', px);
+  svg.setAttribute('height', px);
+  svg.setAttribute('shape-rendering', 'crispEdges');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('style', 'background:#fff');
+
+  const d = [];
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      if (M[r][c]) d.push('M' + (c + q) + ' ' + (r + q) + 'h1v1h-1z');
+    }
+  }
+  const path = document.createElementNS(NS, 'path');
+  path.setAttribute('d', d.join(''));
+  path.setAttribute('fill', '#000');
+  svg.appendChild(path);
+  return svg;
 }

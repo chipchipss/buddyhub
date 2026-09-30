@@ -21,12 +21,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -64,7 +66,17 @@ type Client struct {
 
 // New 创建客户端。
 func New() *Client {
-	return &Client{HTTP: &http.Client{Timeout: RequestTimeout}}
+	return &Client{HTTP: httpClient}
+}
+
+// httpClient 共享 HTTP 客户端（SetHTTPClient 可替换，测试注入 mock 上游）。
+var httpClient = &http.Client{Timeout: RequestTimeout}
+
+// SetHTTPClient 替换包级 HTTP 客户端（nil = 忽略）。
+func SetHTTPClient(c *http.Client) {
+	if c != nil {
+		httpClient = c
+	}
 }
 
 // envelope 业务信封：code===0 成功；失败可能带 HTTP 400/401 也可能 HTTP 200 + 非 0 code。
@@ -152,6 +164,48 @@ func GenerateQrCode() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// DecodeJWTUserID 从 JWT 载荷里取稳定的用户标识（扫码登录回执不含用户信息，
+// 账号 ID 只能从 token 里拿）。
+//
+// 按常见 claim 名依次尝试——不同签发版本字段名不一，逐个探测比写死一个更稳。
+// 全部落空时返回空串，调用方自行兜底（例如用 token 摘要），**不要**用随机值：
+// 账号 ID 是 extstore 的幂等键，每次都变会让同一账号反复入池。
+func DecodeJWTUserID(jwt string) string {
+	parts := strings.Split(jwt, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims map[string]any
+	if json.Unmarshal(payload, &claims) != nil {
+		return ""
+	}
+	for _, k := range []string{"sub", "uid", "user_id", "userId", "userid", "id", "account_id", "accountId"} {
+		switch v := claims[k].(type) {
+		case string:
+			if v != "" {
+				return v
+			}
+		case float64:
+			// JSON 数字统一解成 float64；整数 id 不带小数点输出
+			if v == float64(int64(v)) {
+				return strconv.FormatInt(int64(v), 10)
+			}
+		}
+	}
+	return ""
+}
+
+// TokenDigest 凭据摘要（8 位十六进制），用于 JWT 里取不到用户标识时兜底当账号 ID。
+// 同一 token 稳定映射到同一 ID，因此重复登录同一账号仍幂等。
+func TokenDigest(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:4])
 }
 
 // BuildQrImageUrl 二维码承载的微信登录页 URL。

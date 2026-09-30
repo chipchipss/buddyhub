@@ -74,7 +74,17 @@ type Client struct {
 
 // New 创建客户端。
 func New() *Client {
-	return &Client{HTTP: &http.Client{Timeout: RequestTimeout}}
+	return &Client{HTTP: httpClient}
+}
+
+// httpClient 共享 HTTP 客户端（SetHTTPClient 可替换，测试注入 mock 上游）。
+var httpClient = &http.Client{Timeout: RequestTimeout}
+
+// SetHTTPClient 替换包级 HTTP 客户端（nil = 忽略）。
+func SetHTTPClient(c *http.Client) {
+	if c != nil {
+		httpClient = c
+	}
 }
 
 // MachineIdentity 设备身份（Cosy-MachineToken / Cosy-MachineType 成对）。
