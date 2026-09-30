@@ -2,6 +2,8 @@ package copilot
 
 import (
 	"context"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -53,4 +55,41 @@ func TestLiveDeviceFlow(t *testing.T) {
 		time.Sleep(time.Duration(f.Interval) * time.Second)
 	}
 	t.Fatal("连续 3 次轮询都未落到 pending")
+}
+
+// SetProxy 只改本通道的传输层，且必须拒绝坏地址（否则会静默直连，
+// 用户以为配了代理却还是连不上 github.com）。
+func TestSetProxy(t *testing.T) {
+	prev := httpClient
+	t.Cleanup(func() { httpClient = prev })
+
+	for _, bad := range []string{"://nope", "127.0.0.1:2080"} {
+		// 缺 scheme 的裸 host:port 也要拦住——url.Parse 会把它当 path，
+		// 代理实际不生效，用户会以为配了。
+		if err := SetProxy(bad); err == nil {
+			t.Errorf("%q 应被拒绝", bad)
+		}
+	}
+	if err := SetProxy("http://127.0.0.1:2080"); err != nil {
+		t.Fatalf("合法代理被拒: %v", err)
+	}
+	tr, ok := httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("传输层类型不对")
+	}
+	if tr.Proxy == nil {
+		t.Fatal("代理未生效")
+	}
+	u, err := tr.Proxy(&http.Request{URL: &url.URL{Scheme: "https", Host: "github.com"}})
+	if err != nil || u == nil || u.Host != "127.0.0.1:2080" {
+		t.Fatalf("代理地址不对: %v %v", u, err)
+	}
+
+	// 空串 = 回到跟随环境变量
+	if err := SetProxy(""); err != nil {
+		t.Fatalf("空代理应合法: %v", err)
+	}
+	if tr2 := httpClient.Transport.(*http.Transport); tr2.Proxy == nil {
+		t.Fatal("空串应回落到 ProxyFromEnvironment")
+	}
 }

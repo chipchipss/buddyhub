@@ -14,10 +14,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/extprovider/copilot"
 	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
 	"github.com/chipchipss/buddyhub/internal/livecfg"
 	"github.com/chipchipss/buddyhub/internal/panel"
@@ -247,6 +249,16 @@ func main() {
 	// 未配置账号时返回 nil，zai: 通道保持禁用。
 	zaiClient, zaiCaptcha := buildZaiStack(cfg)
 
+	// GitHub Copilot 通道的专用代理（github.com 在部分网络下直连不通）。
+	// 只作用于本通道，其它上游保持直连。
+	if proxy := cfg.Schedule.Copilot.Proxy; strings.TrimSpace(proxy) != "" {
+		if err := copilot.SetProxy(proxy); err != nil {
+			log.Printf("[copilot] 代理配置无效，本通道将直连：%v", err)
+		} else {
+			log.Printf("[copilot] 本通道走代理 %s", proxy)
+		}
+	}
+
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -263,8 +275,8 @@ func main() {
 		FreeKeysDesc: func() []struct{ Provider, Masked string } {
 			return server.KeyPoolDesc()
 		},
-		Version:     appVersion,
-		Live:        live,
+		Version: appVersion,
+		Live:    live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),

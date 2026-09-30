@@ -249,22 +249,27 @@ ACTIVE ──额度用完(402/quota)──▶ EXHAUSTED（定期再探，恢复�
 
 ### 网络要求（重要）
 
-设备流的两个端点都在 **`github.com`（网页域）** 上，而 `api.github.com` 是另一个域名。部分网络下前者不通、后者可直连——此时设备流会超时。
+设备流的两个端点都在 **`github.com`（网页域）** 上，而 `api.github.com` 是另一个域名。**实测国内多数网络下 `github.com` 直连 100% 超时，走本地代理 2–3 秒稳定成功**——不配代理，「开始授权」会卡在申请设备码这一步。
 
-网关的 HTTP 客户端遵循 Go 标准代理约定，**设置 `HTTPS_PROXY` 即可**（与 `git config http.proxy` 同一个代理）：
+在 config.json 里给本通道单独配代理：
 
-```bash
-HTTPS_PROXY=http://127.0.0.1:2080 ./buddyhub -config config.json
+```json
+{ "schedule": { "copilot": { "proxy": "http://127.0.0.1:2080" } } }
 ```
+
+**只作用于 Copilot 通道**——腾讯 / 讯飞 / 智谱 / 阿里等上游保持直连。刻意不做全局代理：把整条网关的出口绑到一个代理进程上，代理一挂就全站不可用。
+
+留空则跟随环境变量 `HTTPS_PROXY`，再不行直连。地址必须带 scheme（`http://`），写裸 `127.0.0.1:2080` 会被拒绝并提示——否则代理静默不生效，用户以为配了却还是连不上。
 
 想先验证连通性，跑一次真实冒烟（只申请设备码，不授权）：
 
 ```bash
-COPILOT_LIVE=1 HTTPS_PROXY=http://127.0.0.1:2080 \
-  go test ./internal/extprovider/copilot/ -run Live -v
+COPILOT_LIVE=1 go test ./internal/extprovider/copilot/ -run Live -v
 ```
 
 > 💡 实测细节：设备码刚下发的一小段窗口内，GitHub 可能回 `incorrect_device_code`（尚未生效），随后才转为 `authorization_pending`。网关把前 3 次当作「暂未生效」容忍，避免用户刚点授权就被判失败。
+>
+> 另外，拿到 GitHub token 却换不到 Copilot token（该账号没有 Copilot 订阅）是**终态**——网关会直接把原因报出来，不会一直转圈等一个不会发生的结果。
 
 ### 与签到型平台的差异
 
@@ -557,7 +562,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 `WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT` · `WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
 
-标准代理变量同样生效（Go 的 `ProxyFromEnvironment`，不走 `WB2A_` 前缀）：`HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`。**GitHub Copilot 通道通常需要它**——设备流的端点在 `github.com`（网页域），部分网络下不通而 `api.github.com` 可直连，详见 [GitHub Copilot 通道](#-github-copilot-通道)。
+标准代理变量同样生效（Go 的 `ProxyFromEnvironment`，不走 `WB2A_` 前缀）：`HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`。但**更推荐用 `schedule.copilot.proxy`** 给 Copilot 通道单独配——全局代理会把整条网关的可用性绑到代理进程上，详见 [GitHub Copilot 通道](#-github-copilot-通道)。
 
 ## 核心行为语义
 

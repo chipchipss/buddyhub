@@ -18,11 +18,26 @@
 import { h, icon, api, toast, copyText } from '../kernel.js';
 import { qrMatrix, qrSVG } from '../qr.js';
 
-// 登录轮询定时器（模块级：面板重绘/切换平台时统一清理，避免轮询泄漏）。
+// 登录轮询定时器 + 进行中的登录状态。
+//
+// 这几个是**模块级**的，不随面板实例生死：面板会被视图的 5 秒 tick 反复重建，
+// 状态挂在实例上就会丢（用户授权完却没人接着轮询——这正是「授权后没入池」的成因）。
 let loginTimer = null;
+let activeLogin = null; // { provider, d, status }
+let loginHost = null;   // 当前面板实例的展示位（重建时被新实例覆盖）
+let loginStatus = null;
+let lastLoginMsg = null; // { provider, text } 终态提示，面板重建后仍保留
 
-/** stopExtAddTimers() —— 停掉进行中的登录轮询（抽屉关闭 / 视图卸载时调用）。 */
+/** stopExtAddTimers() —— 放弃进行中的登录（抽屉关闭时调用）。
+ *  注意不要在面板重建时调用，那会把用户正在做的授权掐死。 */
 export function stopExtAddTimers() {
+  clearLoginTimer();
+  activeLogin = null;
+  lastLoginMsg = null;
+}
+
+// clearLoginTimer 只停定时器，不动登录状态（被新会话顶掉时用）。
+function clearLoginTimer() {
   if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
 }
 
@@ -78,12 +93,14 @@ const PROVIDERS = {
 };
 
 /** extAddPanel(onAdded, opts) —— 返回一个命令式的添加面板节点。
- *  opts.flat = true 时平铺（抽屉内嵌用），否则收进 <details>。 */
+ *  opts.flat = true 时平铺（抽屉内嵌用），否则收进 <details>。
+ *
+ *  注意：**不要**在构造时清掉轮询定时器。这个面板会被视图的 5 秒 tick
+ *  （loadExt → 重渲染）反复重建，一清就等于把用户正在进行的扫码/授权登录掐死——
+ *  实测小浣熊扫码快所以能成，Qoder / Copilot 要在浏览器里操作更久，必死。
+ *  定时器只在用户显式放弃（关闭抽屉 / 重新发起）时才停。 */
 export function extAddPanel(onAdded, opts = {}) {
   let provider = 'lobsterai';
-
-  // 面板重绘时先清掉上一个轮询，避免泄漏。
-  stopExtAddTimers();
 
   const bodyBox = h('div', { class: 'stack', style: { gap: '10px', marginTop: '10px' } });
   const tipEl = h('div', { class: 'muted', style: { fontSize: '11.5px' } });
@@ -145,46 +162,95 @@ export function extAddPanel(onAdded, opts = {}) {
 
   function loginPanel(spec) {
     const host = h('div', { class: 'stack', style: { gap: '10px' } });
-    const statusEl = h('div', { class: 'muted', style: { fontSize: '12px' }, text: spec.hint });
+    const statusEl = h('div', { class: 'muted', style: { fontSize: '12px' } });
     const startBtn = h('button', { class: 'btn primary' }, icon('key'), spec.button);
 
-    const stop = () => { stopExtAddTimers(); };
+    // 把本实例登记为「进行中登录的展示位」：面板被 tick 重建后，新实例接手继续显示。
+    loginHost = host;
+    loginStatus = statusEl;
+    paintActiveLogin(spec);
 
     startBtn.onclick = async () => {
       startBtn.disabled = true;
-      stop();
+      stopExtAddTimers(); // 重新发起 → 上一个会话的轮询作废
       try {
         const d = await api(`ext/${provider}/login/start`, { method: 'POST' });
-        renderChallenge(host, spec, d);
-        statusEl.textContent = spec.hint + '（本页会自动完成入池）';
-        const every = Math.max(2, d.interval || 2) * 1000;
-        const deadline = Date.now() + (d.expires_in || 600) * 1000;
-        loginTimer = setInterval(async () => {
-          if (Date.now() > deadline) { stop(); statusEl.textContent = '登录已超时，请重新发起。'; startBtn.disabled = false; return; }
-          let r;
-          try {
-            r = await api(`ext/${provider}/login/poll`, { method: 'POST', body: JSON.stringify({ session: d.session }) });
-          } catch (e) {
-            stop(); statusEl.textContent = e.message; startBtn.disabled = false; return;
-          }
-          if (!r.done) {
-            if (r.status && r.status !== 'pending') statusEl.textContent = STATUS_WORDS[r.status] || r.status;
-            return;
-          }
-          stop();
-          host.replaceChildren();
-          statusEl.textContent = `已入池：${(r.account || {}).label || (r.account || {}).id || ''}`;
-          toast(`${PROVIDERS[provider].name} 账号已入池`);
-          await onAdded?.();
-        }, every);
+        activeLogin = { provider, d, status: '等待完成授权…' };
+        paintActiveLogin(spec);
+        startPolling(spec, d);
       } catch (e) {
-        statusEl.textContent = e.message;
+        activeLogin = null;
+        setLoginStatus(e.message);
       } finally {
         startBtn.disabled = false;
       }
     };
 
     return h('div', { class: 'stack', style: { gap: '10px' } }, startBtn, host, statusEl);
+  }
+
+  // 轮询循环与面板实例解耦：面板被重建也不影响它跑完。
+  function startPolling(spec, d) {
+    const every = Math.max(2, d.interval || 2) * 1000;
+    const deadline = Date.now() + (d.expires_in || 600) * 1000;
+    let errStreak = 0;
+
+    loginTimer = setInterval(async () => {
+      // 已被别的登录顶掉 → 只停自己的定时器，别去动 activeLogin（那是新会话的）
+      if (!activeLogin || activeLogin.d.session !== d.session) { clearLoginTimer(); return; }
+      if (Date.now() > deadline) {
+        stopExtAddTimers();
+        paintActiveLogin(spec);
+        setLoginStatus('登录已超时，请重新发起。');
+        return;
+      }
+      let r;
+      try {
+        r = await api(`ext/${provider}/login/poll`, {
+          method: 'POST', body: JSON.stringify({ session: d.session }),
+        });
+      } catch (e) {
+        // 单次网络抖动不该判死整个登录；连续失败才放弃并把原因留给用户看。
+        errStreak++;
+        if (errStreak < 3) { setLoginStatus(`轮询异常（第 ${errStreak} 次）：${e.message}`); return; }
+        const msg = `轮询连续失败，已停止：${e.message}`;
+        stopExtAddTimers();
+        paintActiveLogin(spec);   // 会先把状态重置成默认提示
+        setLoginStatus(msg);      // 再把原因盖回去
+        return;
+      }
+      errStreak = 0;
+      if (!r.done) {
+        if (r.status && r.status !== 'pending') setLoginStatus(STATUS_WORDS[r.status] || r.status);
+        return;
+      }
+      stopExtAddTimers();
+      paintActiveLogin(spec);
+      setLoginStatus(`已入池：${(r.account || {}).label || (r.account || {}).id || ''}`);
+      toast(`${PROVIDERS[provider].name} 账号已入池`);
+      await onAdded?.();
+    }, every);
+  }
+
+  // 当前面板实例的展示位（模块级：面板重建时被新实例覆盖）
+  function setLoginStatus(t) {
+    if (activeLogin) activeLogin.status = t; // 记在状态里，面板重建后仍能看到最新进展
+    else lastLoginMsg = { provider, text: t }; // 终态消息也留着，别被 5 秒 tick 冲掉
+    if (loginStatus && loginStatus.isConnected) loginStatus.textContent = t;
+  }
+
+  // 按进行中的登录状态重绘展示区；无进行中的登录则清空。
+  function paintActiveLogin(spec) {
+    if (!loginHost || !loginHost.isConnected) return;
+    const st = activeLogin;
+    if (!st || st.provider !== provider) {
+      loginHost.replaceChildren();
+      const kept = lastLoginMsg && lastLoginMsg.provider === provider ? lastLoginMsg.text : '';
+      setLoginStatus(kept || spec.hint);
+      return;
+    }
+    renderChallenge(loginHost, spec, st.d);
+    setLoginStatus(st.status);
   }
 
   // 按登录方式渲染「待用户完成的那一步」
@@ -237,7 +303,6 @@ export function extAddPanel(onAdded, opts = {}) {
   /* ── 平台切换：重绘主体区 ───────────────────────────────────── */
 
   function paint() {
-    stopExtAddTimers();
     inputs.clear();
     const spec = PROVIDERS[provider];
     if (spec.login) {
@@ -251,6 +316,8 @@ export function extAddPanel(onAdded, opts = {}) {
       }
       bodyBox.replaceChildren(...parts);
     } else {
+      loginHost = null;
+      loginStatus = null;
       bodyBox.replaceChildren(credForm());
     }
     tipEl.textContent = spec.tip;

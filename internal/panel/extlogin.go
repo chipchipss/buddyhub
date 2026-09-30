@@ -35,6 +35,9 @@ import (
 // extLoginTTL 一次登录会话的有效期（扫码/授权超过即作废）。
 const extLoginTTL = 10 * time.Minute
 
+// maxLoginErrStreak 连续轮询失败多少次才判定登录失败（单次抖动不算）。
+const maxLoginErrStreak = 5
+
 // newSessionID 生成登录会话标识（16 字节随机 hex）。
 func newSessionID() string {
 	var b [16]byte
@@ -47,6 +50,9 @@ func newSessionID() string {
 type extLoginSession struct {
 	provider  string
 	createdAt time.Time
+	// errStreak 连续轮询失败次数：单次网络抖动继续轮询，连续失败才判定终态
+	// ——否则用户看到的是永远转圈，永远不知道错在哪。
+	errStreak int
 	// raccoon
 	qrCode string
 	// qoder
@@ -81,6 +87,21 @@ func getExtLoginSession(id string) *extLoginSession {
 		return nil
 	}
 	return s
+}
+
+// bumpErrStreak / resetErrStreak 在锁内改计数：轮询可能重叠（前端 2s 一次、
+// 单次请求最长 30s），直接在会话结构上自增是数据竞争。
+func (s *extLoginSession) bumpErrStreak() int {
+	extLoginMu.Lock()
+	defer extLoginMu.Unlock()
+	s.errStreak++
+	return s.errStreak
+}
+
+func (s *extLoginSession) resetErrStreak() {
+	extLoginMu.Lock()
+	defer extLoginMu.Unlock()
+	s.errStreak = 0
 }
 
 func dropExtLoginSession(id string) {
@@ -290,10 +311,14 @@ func pollRaccoonQr(ctx context.Context, sess *extLoginSession) (cred *extLoginCr
 func pollQoderDevice(ctx context.Context, sess *extLoginSession) (cred *extLoginCred, done bool, note string) {
 	got, err := qoder.New().Poll(ctx, sess.device)
 	if err != nil {
-		// 轮询期的偶发网络错误不该判死整个登录——保持 pending 继续轮询。
-		log.Printf("panel: qoder 设备轮询出错: %v", err)
-		return nil, false, "pending"
+		n := sess.bumpErrStreak()
+		log.Printf("panel: qoder 设备轮询出错（第 %d 次）: %v", n, err)
+		if n >= maxLoginErrStreak {
+			return nil, true, "Qoder 授权轮询连续失败：" + err.Error()
+		}
+		return nil, false, "轮询出错，重试中…（" + err.Error() + "）"
 	}
+	sess.resetErrStreak()
 	if got == nil {
 		return nil, false, "pending"
 	}
@@ -312,9 +337,14 @@ func pollQoderDevice(ctx context.Context, sess *extLoginSession) (cred *extLogin
 func pollCopilotCode(ctx context.Context, sess *extLoginSession) (cred *extLoginCred, done bool, note string) {
 	res, err := sess.flow.Poll(ctx)
 	if err != nil {
-		log.Printf("panel: copilot 设备码轮询出错: %v", err)
-		return nil, false, "pending"
+		n := sess.bumpErrStreak()
+		log.Printf("panel: copilot 设备码轮询出错（第 %d 次）: %v", n, err)
+		if n >= maxLoginErrStreak {
+			return nil, true, "GitHub 设备码轮询连续失败：" + err.Error()
+		}
+		return nil, false, "轮询出错，重试中…（" + err.Error() + "）"
 	}
+	sess.resetErrStreak()
 	if res.Error != "" {
 		return nil, true, res.Error
 	}

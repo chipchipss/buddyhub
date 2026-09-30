@@ -313,6 +313,36 @@ for (const [provider, btnText, wantCls] of [['raccoon', '微信扫码登录', 'q
 const { stopExtAddTimers } = await import('./views/ext-add.js');
 stopExtAddTimers();
 
+/* ── 面板被 tick 重建后，登录轮询必须继续 ──────────────────────
+   自动化视图每 5s 重渲染一次，会重建 extAddPanel。早先的实现在构造时清掉
+   轮询定时器，于是「授权完成却没人接着轮询」——用户看到的就是授权后没入池。
+   实测小浣熊扫码快能成，Qoder / Copilot 要在浏览器里操作更久，必死。 */
+let pollCount = 0, addedCount = 0;
+globalThis.fetch = async url => {
+  if (String(url).includes('/login/start')) {
+    return { ok: true, status: 200, json: async () => ({ ok: true, mode: 'device', session: 'sess-A',
+      auth_url: 'https://qoder.com/device/selectAccounts?x=1', expires_in: 600 }) };
+  }
+  pollCount++;
+  return { ok: true, status: 200, json: async () => ({ ok: true, done: true,
+    account: { id: 'q-1', label: 'Qoder q-1' } }) };
+};
+
+const p1 = extAddPanel(() => { addedCount++; }, { flat: true });
+const sel1 = p1.children[0].children[0].children[0];
+sel1.value = 'qoder';
+for (const f of sel1.listeners.change || []) f({ target: sel1 });
+const lbtn = findButton(p1, '浏览器授权登录');
+await (lbtn.onclick || (lbtn.listeners.click || [])[0])({ currentTarget: lbtn });
+
+// 模拟视图 tick：重建面板（旧实现会在这里把轮询掐死）
+extAddPanel(() => { addedCount++; }, { flat: true });
+
+await new Promise(r => setTimeout(r, 2600));
+stopExtAddTimers();
+if (pollCount === 0) problems.push('面板重建后轮询停了——登录永远不会完成（账号不会入池）');
+if (addedCount === 0) problems.push('轮询成功后没回调 onAdded，账号列表不会刷新');
+
 if (problems.length) { console.error(problems.join('\n')); process.exit(1); }
 console.log('RENDER OK');
 `

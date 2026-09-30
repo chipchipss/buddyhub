@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -53,16 +54,18 @@ const (
 	chatAPIVersion = "2025-04-01"
 )
 
-var httpClient = &http.Client{
-	Timeout: 0,
-	Transport: &http.Transport{
+var httpClient = &http.Client{Timeout: 0, Transport: newTransport()}
+
+// newTransport 本通道专用传输层（长连接池 + 宽松的响应头超时：Copilot 首字节可能较慢）。
+func newTransport() *http.Transport {
+	return &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		MaxIdleConns:          64,
 		MaxIdleConnsPerHost:   16,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 120 * time.Second,
-	},
+	}
 }
 
 // SetHTTPClient 允许宿主替换（测试注入 mock 上游）。
@@ -70,6 +73,28 @@ func SetHTTPClient(c *http.Client) {
 	if c != nil {
 		httpClient = c
 	}
+}
+
+// SetProxy 给本通道单独设置代理；空串 = 跟随环境变量 HTTPS_PROXY，再不行直连。
+//
+// 为什么是「本通道」而不是全局：github.com / api.githubcopilot.com 在部分网络下
+// 直连不通（实测国内多数网络 100% 超时，走本地代理 2-3s 稳定成功），但把整条网关
+// 的出口都绑到代理进程上太脆——代理一挂，腾讯/讯飞/智谱/阿里全部跟着不可用。
+// 只让 GitHub 的流量走代理，其它上游保持直连。
+func SetProxy(rawURL string) error {
+	tr := newTransport()
+	if strings.TrimSpace(rawURL) != "" {
+		u, err := url.Parse(rawURL)
+		if err != nil {
+			return fmt.Errorf("代理地址无效（%s）：%w", rawURL, err)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("代理地址缺少主机（%s）", rawURL)
+		}
+		tr.Proxy = http.ProxyURL(u)
+	}
+	httpClient = &http.Client{Timeout: 0, Transport: tr}
+	return nil
 }
 
 // Credential 落进 extstore 的凭据形态。
@@ -205,7 +230,10 @@ func (f *DeviceFlow) Poll(ctx context.Context) (*PollResult, error) {
 		}
 		cred, err := Exchange(ctx, doc.AccessToken)
 		if err != nil {
-			return nil, err
+			// 拿到了 GitHub token 却换不到 Copilot token（无订阅 / token 被撤销）——
+			// 这是**终态**，必须把原因告诉用户。当成底层错误返回会让调用方
+			// 误判为「还没授权」，用户看着它一直转圈直到超时。
+			return &PollResult{Error: err.Error()}, nil
 		}
 		return &PollResult{Done: true, Cred: cred}, nil
 	case "authorization_pending", "slow_down":

@@ -60,7 +60,7 @@ function tabsRow() {
   return h('div', { class: 'seg', style: { flexWrap: 'wrap' } },
     ...ADD_TABS.map(([v, n]) => h('button', {
       class: addTab.peek() === v ? 'on' : '', text: n,
-      onclick: () => { addTab.set(v); stopPoll(); stopExtAddTimers(); renderAdd(); },
+      onclick: () => { addTab.set(v); stopPoll(); renderAdd(); },
     })),
   );
 }

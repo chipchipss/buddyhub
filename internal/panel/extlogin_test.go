@@ -405,6 +405,67 @@ func TestCopilotLoginTerminalErrorSurfaced(t *testing.T) {
 	}
 }
 
+// 拿到 GitHub token 但换不到 Copilot token（无订阅）时必须**报出来**，
+// 不能当成「还没授权」继续转圈——用户会一直等一个永远不会发生的结果。
+func TestCopilotLoginNoSubscriptionIsTerminal(t *testing.T) {
+	copilot.SetHTTPClient(&http.Client{Transport: roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.Contains(r.URL.Path, "/login/device/code"):
+			return jsonResponse(200, `{"device_code":"d","user_code":"U",`+
+				`"verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}`), nil
+		case strings.Contains(r.URL.Path, "/login/oauth/access_token"):
+			return jsonResponse(200, `{"access_token":"gho_x"}`), nil
+		case strings.Contains(r.URL.Path, "copilot_internal/v2/token"):
+			return jsonResponse(403, `{"message":"no copilot subscription"}`), nil
+		}
+		return jsonResponse(404, `{}`), nil
+	})})
+	t.Cleanup(func() { copilot.SetHTTPClient(&http.Client{}) })
+
+	p := loginTestPanel(t)
+	_, start := loginPost(t, p, "copilot", "start", "")
+	rec, _ := loginPost(t, p, "copilot", "poll", `{"session":"`+start["session"].(string)+`"}`)
+
+	if rec.Code == 200 {
+		t.Fatalf("换不到 Copilot token 应报错而不是继续 pending，得到: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "未订阅") {
+		t.Fatalf("错误原因没透出: %s", rec.Body.String())
+	}
+}
+
+// 轮询期的单次网络抖动必须保持 pending；连续失败才判定终态。
+func TestCopilotLoginTransientErrorKeepsPending(t *testing.T) {
+	copilot.SetHTTPClient(&http.Client{Transport: roundTripFn(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Path, "/login/device/code") {
+			return jsonResponse(200, `{"device_code":"d","user_code":"U",`+
+				`"verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}`), nil
+		}
+		return nil, io.ErrUnexpectedEOF
+	})})
+	t.Cleanup(func() { copilot.SetHTTPClient(&http.Client{}) })
+
+	p := loginTestPanel(t)
+	_, start := loginPost(t, p, "copilot", "start", "")
+	session := start["session"].(string)
+
+	// 前 maxLoginErrStreak-1 次仍应是 pending
+	for i := 1; i < maxLoginErrStreak; i++ {
+		rec, doc := loginPost(t, p, "copilot", "poll", `{"session":"`+session+`"}`)
+		if rec.Code != 200 || doc["done"] != false {
+			t.Fatalf("第 %d 次抖动不该判死: code=%d doc=%v", i, rec.Code, doc)
+		}
+		if s, _ := doc["status"].(string); !strings.Contains(s, "重试中") {
+			t.Fatalf("第 %d 次应提示重试中，得到 %q", i, s)
+		}
+	}
+	// 第 maxLoginErrStreak 次判终态，把原因带给用户
+	rec, _ := loginPost(t, p, "copilot", "poll", `{"session":"`+session+`"}`)
+	if rec.Code == 200 {
+		t.Fatalf("连续失败 %d 次后应报错，得到: %s", maxLoginErrStreak, rec.Body.String())
+	}
+}
+
 /* ── 通用行为 ────────────────────────────────────────────────── */
 
 func TestExtLoginUnsupportedProvider(t *testing.T) {

@@ -116,6 +116,20 @@ type Config struct {
 			QuotaRefreshMinutes int `json:"quota_refresh_minutes,omitempty"`
 		} `json:"zai"`
 
+		// Copilot GitHub Copilot 通道（copilot: 前缀模型路由目标）。
+		//
+		// 设备流与对话都打 github.com / api.githubcopilot.com。这两个域名在部分
+		// 网络下直连不通（实测国内多数网络 100% 超时，走本地代理 2–3s 稳定成功），
+		// 此时必须配代理，否则「开始授权」会卡在申请设备码。
+		Copilot struct {
+			// Proxy 本通道专用 HTTP 代理（如 http://127.0.0.1:2080）。
+			// 空 = 跟随环境变量 HTTPS_PROXY，再不行直连。
+			//
+			// 只作用于本通道：其它上游（腾讯 / 讯飞 / 智谱 / 阿里）保持直连——
+			// 把整条网关的出口都绑到一个代理进程上，代理一挂就全站不可用。
+			Proxy string `json:"proxy,omitempty"`
+		} `json:"copilot"`
+
 		// 余额后台周期刷新：两次签到时点之间 credits 也能保持新鲜（面板/状态观测用）。
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。
 		BalanceRefreshEnabled bool `json:"balance_refresh_enabled"` // 缺省 true；false = 关闭

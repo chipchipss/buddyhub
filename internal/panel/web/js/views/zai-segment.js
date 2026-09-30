@@ -288,13 +288,15 @@ export function zaiAddForm(onAdded) {
       ? '智谱开放平台（open.bigmodel.cn）的 API Key，走 Anthropic 兼容端点。'
       : 'JWT 走 Plan 通道（消耗订阅额度，需配置验证码求解器）；API Key 走回退通道（免验证码）。';
   };
-
   return h('div', { class: 'glass-flat', style: { padding: '14px' } },
     h('div', { class: 'row wrap', style: { gap: '8px' } }, providerSel, nameInput),
     h('div', { class: 'stack', style: { marginTop: '12px' } },
       h('div', { class: 'row wrap', style: { gap: '8px' } }, oauthBtn,
         h('span', { class: 'muted', style: { fontSize: '11.5px', alignSelf: 'center' },
           text: '浏览器登录 → 自动入池（同时兑换回退 Key）' })),
+      h('div', { class: 'muted', style: { fontSize: '11.5px' },
+        text: '登录在智谱自己的页面上完成。若该页面收不到短信验证码，' +
+          '可直接用下方的 Coding Plan JWT 或 API Key 入池——功能完全一样。' }),
       flowBox,
       secretInput,
       hintEl,
