@@ -47,3 +47,9 @@ server.exe
 
 # 本地临时产物（截图 / 验证二进制）
 tmp/
+
+# 运行时产物：测试若用空 StateFile 会把账号表落在包目录里（见 platforms_test.go）
+ext-accounts.json
+zai-accounts.json
+state.json
+usage.json

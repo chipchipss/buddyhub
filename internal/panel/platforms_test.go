@@ -73,7 +73,7 @@ func platformOfInPanel(model string) string {
 	return ""
 }
 
-// authedGet 带测试 key 打面板接口（newTestPanel 启用了鉴权）。
+// authedGet 带测试 key 打面板接口（对启用鉴权的面板；无鉴权时多余但无害）。
 func authedGet(p *Panel, path string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("GET", path, nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -93,7 +93,7 @@ func authedPost(p *Panel, path, body string) *httptest.ResponseRecorder {
 
 // 「不要缺」：注册表里的每个平台都必须出现在账号目录里。
 func TestAccountsDirCoversEveryPlatform(t *testing.T) {
-	p := newTestPanel()
+	p := loginTestPanel(t)
 	rec := authedGet(p, "/panel/api/accounts/dir")
 	if rec.Code != 200 {
 		t.Fatalf("状态码 = %d", rec.Code)
@@ -126,7 +126,9 @@ func TestAccountsDirCoversEveryPlatform(t *testing.T) {
 
 // 「不要缺」：注册表里的每个平台都必须能被 API Key 授权。
 func TestAPIKeyAcceptsEveryPlatform(t *testing.T) {
-	p := newTestPanel()
+	// 用隔离目录的面板：newTestPanel 的 StateFile 为空，extstore 会把账号表
+	// 落在**包目录**里（曾经的 bug：测试往源码树写文件并误提交）
+	p := loginTestPanel(t)
 	for _, pl := range platforms {
 		rec := authedPost(p, "/panel/api/apikeys", `{"name":"t","platforms":["`+pl.ID+`"]}`)
 		// 未注入 config 闭包时返回 500 是环境问题，不是白名单问题——
@@ -139,7 +141,7 @@ func TestAPIKeyAcceptsEveryPlatform(t *testing.T) {
 
 // 「不要缺」：注册表里的每个平台都必须能被手工添加（或明确不属于 extstore）。
 func TestManualAddMatchesRegistry(t *testing.T) {
-	p := newTestPanel()
+	p := loginTestPanel(t)
 	for _, pl := range platforms {
 		rec := authedPost(p, "/panel/api/ext/accounts",
 			`{"provider":"`+pl.ID+`","id":"x","cred":{"a":"b"}}`)
@@ -154,7 +156,7 @@ func TestManualAddMatchesRegistry(t *testing.T) {
 
 // 注册表 API 必须与内存里的表一致（前端全靠它）。
 func TestGetPlatformsEndpoint(t *testing.T) {
-	p := newTestPanel()
+	p := loginTestPanel(t)
 	rec := authedGet(p, "/panel/api/platforms")
 	if rec.Code != 200 {
 		t.Fatalf("状态码 = %d", rec.Code)
