@@ -8,13 +8,17 @@ import { h, icon, signal, api, toast, ago, dur, fmtToken, fmtMs, fmtRate, confir
 import { defineView, navigate } from '../shell.js';
 import { overview, refreshOverview } from '../store.js';
 import { openAccountDrawer } from '../drawers.js';
+import { loadPlatforms, platName } from '../platforms.js';
 
 const tab = signal('pool');          // pool | dir
 const dir = signal(null);
 const dirPlat = signal('all');
 
 async function loadDir(quiet = true) {
-  try { dir.set(await api('accounts/dir')); }
+  try {
+    await loadPlatforms();
+    dir.set(await api('accounts/dir'));
+  }
   catch (e) { if (!quiet) toast(e.message, 'fail'); }
 }
 
@@ -129,13 +133,6 @@ function poolView() {
   return h('div', { class: 'acct-grid' }, ...accts.map(accountCard));
 }
 
-const PLAT_NAMES = {
-  workbuddy: '腾讯 WorkBuddy', loomy: 'Loomy（讯飞）', qoder: 'Qoder',
-  lobsterai: 'LobsterAI', raccoon: '小浣熊', codearts: 'CodeArts',
-  copilot: 'GitHub Copilot', cline: 'Cline', autoclaw: 'AutoClaw（智谱）',
-  zai: 'Z.AI 智谱', codex: 'Codex', free: '免费池',
-};
-
 function dirView() {
   const d = dir();
   if (!d) return h('div', { class: 'busy', text: '读取平台目录' });
@@ -144,7 +141,7 @@ function dirView() {
   return h('div', { class: 'stack' },
     h('div', { class: 'row wrap' },
       ...[{ id: 'all', name: '全部', n: plats.reduce((s, p) => s + (p.accounts || []).length, 0) }]
-        .concat(plats.map(p => ({ id: p.id, name: PLAT_NAMES[p.id] || p.name, n: (p.accounts || []).length })))
+        .concat(plats.map(p => ({ id: p.id, name: platName(p.id), n: (p.accounts || []).length })))
         .map(c => h('button', {
           class: 'btn sm' + (dirPlat() === c.id ? ' primary' : ''),
           onclick: () => { dirPlat.set(c.id); },
@@ -154,7 +151,7 @@ function dirView() {
       const accts = p.accounts || [];
       return h('section', { class: 'card' },
         h('header', null,
-          h('h2', { text: PLAT_NAMES[p.id] || p.name }),
+          h('h2', { text: platName(p.id) }),
           p.api_model ? h('span', { class: 'chip', text: 'API ' + p.api_model }) : h('span', { class: 'chip faint', text: '无对话 API' }),
           h('span', { class: 'grow' }),
           h('span', { class: 'hint', text: `${accts.length} 个账号` }),

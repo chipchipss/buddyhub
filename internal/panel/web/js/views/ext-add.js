@@ -10,13 +10,20 @@
 
    有登录方式的平台仍保留「手动填写凭据」折叠区作为兜底。
 
-   字段集来自各 provider 的 Credential 结构（internal/extprovider/*）。
+   **平台清单来自后端注册表**（js/platforms.js），这里只提供两样东西：
+     1. 每个平台的凭据字段（纯 UI 细节，按 id 索引，见 FORMS）
+     2. 每种 login kind 对应哪套交互（见 loginSpecFor）
+
+   加一个平台 = 后端注册表加一行 +（若需要手填凭据）这里加一条 FORMS。
+   交互种类（扫码 / 设备码 / 短信 / 手填）由注册表的 login 字段决定。
+
    实现是命令式的：输入框非受控（值在 DOM 里），切换平台只重绘主体区，
    不会清空已填内容；提交时按当前平台收集。
    ══════════════════════════════════════════════════════════════════ */
 
 import { h, icon, api, toast, copyText } from '../kernel.js';
 import { qrMatrix, qrSVG } from '../qr.js';
+import { platforms, loadPlatforms, plat } from '../platforms.js';
 
 // 登录轮询定时器 + 进行中的登录状态。
 //
@@ -41,9 +48,11 @@ function clearLoginTimer() {
   if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
 }
 
-const PROVIDERS = {
+// 本抽屉里用**通用表单**处理的平台（有专属面板的三个——腾讯 / Loomy / Z.AI
+// ——不在这里，它们各有自己的分段）。
+// 只列字段与提示：展示名、入池方式、有无签到都由后端注册表下发。
+const FORMS = {
   lobsterai: {
-    name: 'LobsterAI（有道）',
     fields: [
       { k: 'access_token', label: 'Access Token', required: true },
       { k: 'uuid', label: 'UUID', required: true },
@@ -53,29 +62,22 @@ const PROVIDERS = {
     tip: '从有道 LobsterAI 客户端的本地凭据复制；access_token 与 uuid 必填。',
   },
   raccoon: {
-    name: '小浣熊（商汤）',
     fields: [
       { k: 'access_token', label: 'Access Token', required: true },
       { k: 'refresh_token', label: 'Refresh Token' },
     ],
-    // 微信扫码：面板出二维码，手机确认即入池（code 由网关生成，不依赖官方客户端）
-    login: { kind: 'qr', button: '微信扫码登录', hint: '用微信扫一扫，在手机上确认登录' },
     tip: '推荐直接扫码；也可从客户端本地凭据复制 access_token 手工填写。',
   },
   qoder: {
-    name: 'Qoder（阿里）',
     fields: [
       { k: 'access_token', label: 'Access Token', required: true },
       { k: 'machine_id', label: 'Machine ID', required: true },
       { k: 'refresh_token', label: 'Refresh Token' },
       { k: 'security_oauth_token', label: 'Security OAuth Token' },
     ],
-    // 设备授权：PKCE 授权 URL，浏览器完成登录后网关轮询取 token
-    login: { kind: 'device', button: '浏览器授权登录', hint: '在浏览器打开链接并完成登录授权' },
     tip: '推荐直接授权登录；手工填写时 machine_id 必填（缺失会被上游拒绝）。',
   },
   codearts: {
-    name: 'CodeArts（华为云）',
     fields: [
       { k: 'access_key_id', label: 'Access Key ID', required: true },
       { k: 'secret_access_key', label: 'Secret Access Key', required: true },
@@ -83,26 +85,37 @@ const PROVIDERS = {
     ],
     tip: '华为云 AK/SK：永久密钥留空 Security Token 即可；临时 STS 凭据才需要填（几小时就过期，不建议入池）。',
   },
-  autoclaw: {
-    name: 'AutoClaw（智谱）',
-    // 手机短信登录：国内版专用（上游已关闭国际版短信入口）
-    login: { kind: 'sms', button: '手机号登录', hint: '国内版支持手机短信登录' },
-    tip: 'AutoClaw 是国内版/国际版两套站点，登录后按账号所属地区转发。模型名用 autoclaw:<模型>。',
-  },
-  cline: {
-    name: 'Cline',
-    // 设备码授权（WorkOS）：免订阅的免费池也能用
-    login: { kind: 'code', button: '开始授权', hint: '在浏览器打开链接、输入设备码并确认' },
-    tip: 'Cline 免费池无需订阅即可用；模型名带池前缀（cline:cline-free/… · cline:cline-pass/… · cline:cline-cloud/…）。',
-  },
-  copilot: {
-    name: 'GitHub Copilot',
-    // 设备码授权：无需手填凭据
-    login: { kind: 'code', button: '开始授权', hint: '在 GitHub 页面输入设备码并授权' },
-    tip: '点「开始授权」拿到设备码，在 GitHub 页面输入即可；授权后账号自动入池，'
-      + '用 copilot:<模型名> 调用（如 copilot:gpt-4o）。',
-  },
 };
+
+// 注册表 login kind → 交互描述。返回 null 表示「只需手填凭据」。
+function loginSpecFor(p) {
+  switch (p && p.login) {
+    case 'qr':     return { kind: 'qr', button: '微信扫码登录', hint: '用微信扫一扫，在手机上确认登录' };
+    case 'device': return { kind: 'device', button: '浏览器授权登录', hint: '在浏览器打开链接并完成登录授权' };
+    case 'code':   return { kind: 'code', button: '开始授权', hint: '在浏览器打开链接、输入设备码并确认' };
+    case 'sms':    return { kind: 'sms', button: '手机号登录', hint: '支持手机短信登录' };
+    default:       return null; // manual：只出字段表单
+  }
+}
+
+// 合成某平台的完整规格：注册表给身份与入池方式，FORMS 给字段。
+function specFor(id) {
+  const p = plat(id) || { id, name: id, note: '' };
+  const f = FORMS[id] || { fields: [] };
+  return {
+    name: p.name,
+    note: p.note || '',
+    login: loginSpecFor(p),
+    fields: f.fields || [],
+    tip: f.tip || p.note || '',
+  };
+}
+
+// 本抽屉处理的平台：注册表里有入池方式、且不是那三个专属面板的。
+const BESPOKE = new Set(['workbuddy', 'loomy', 'zai']);
+function genericPlatforms() {
+  return platforms.peek().filter(p => p.login && !BESPOKE.has(p.id));
+}
 
 /** extAddPanel(onAdded, opts) —— 返回一个命令式的添加面板节点。
  *  opts.flat = true 时平铺（抽屉内嵌用），否则收进 <details>。
@@ -112,7 +125,7 @@ const PROVIDERS = {
  *  实测小浣熊扫码快所以能成，Qoder / Copilot 要在浏览器里操作更久，必死。
  *  定时器只在用户显式放弃（关闭抽屉 / 重新发起）时才停。 */
 export function extAddPanel(onAdded, opts = {}) {
-  let provider = 'lobsterai';
+  let provider = '';
 
   const bodyBox = h('div', { class: 'stack', style: { gap: '10px', marginTop: '10px' } });
   const tipEl = h('div', { class: 'muted', style: { fontSize: '11.5px' } });
@@ -121,7 +134,18 @@ export function extAddPanel(onAdded, opts = {}) {
   const providerSel = h('select', {
     class: 'input', style: { width: 'auto' },
     onchange: ev => { provider = ev.target.value; paint(); },
-  }, ...Object.entries(PROVIDERS).map(([v, p]) => h('option', { value: v, text: p.name })));
+  });
+
+  // 平台清单是异步拉的：到位后重建下拉并选中第一个（保持当前选择若还在）。
+  function fillProviders() {
+    const list = genericPlatforms();
+    if (!list.length) return false;
+    const keep = list.some(p => p.id === provider) ? provider : list[0].id;
+    providerSel.replaceChildren(...list.map(p => h('option', { value: p.id, text: p.name })));
+    provider = keep;
+    providerSel.value = keep;
+    return true;
+  }
 
   /* ── 手工填写凭据（所有平台的兜底路径） ─────────────────────── */
 
@@ -130,7 +154,7 @@ export function extAddPanel(onAdded, opts = {}) {
       class: 'input', placeholder: '账号标识（昵称 / uid，用于列表区分）',
       style: { flex: '1', minWidth: '180px' },
     });
-    const rows = PROVIDERS[provider].fields.map(f => {
+    const rows = specFor(provider).fields.map(f => {
       const input = h('input', {
         class: 'input', placeholder: f.label + (f.required ? '（必填）' : '（可选）'),
         style: { fontFamily: 'var(--mono)', fontSize: '12px' },
@@ -144,7 +168,7 @@ export function extAddPanel(onAdded, opts = {}) {
         const id = idInput.value.trim();
         if (!id) { toast('请填写账号标识', 'fail'); idInput.focus(); return; }
         const cred = {};
-        for (const f of PROVIDERS[provider].fields) {
+        for (const f of specFor(provider).fields) {
           const v = (inputs.get(f.k)?.value || '').trim();
           if (!v) {
             if (f.required) { toast(`「${f.label}」必填`, 'fail'); inputs.get(f.k)?.focus(); return; }
@@ -247,7 +271,7 @@ export function extAddPanel(onAdded, opts = {}) {
       stopExtAddTimers();
       paintActiveLogin(spec);
       setLoginStatus(`已入池：${(r.account || {}).label || (r.account || {}).id || ''}`);
-      toast(`${PROVIDERS[provider].name} 账号已入池`);
+      toast(`${specFor(provider).name} 账号已入池`);
       await onAdded?.();
     }, every);
   }
@@ -364,7 +388,7 @@ export function extAddPanel(onAdded, opts = {}) {
 
   function paint() {
     inputs.clear();
-    const spec = PROVIDERS[provider];
+    const spec = specFor(provider);
     if (spec.login) {
       // 有登录方式：登录为主；无凭据字段的平台（Copilot）不出口填表单。
       const parts = [loginPanel(spec.login)];
@@ -383,7 +407,13 @@ export function extAddPanel(onAdded, opts = {}) {
     tipEl.textContent = spec.tip;
   }
 
-  paint();
+  // 首次：注册表已在缓存里就直接渲染；否则先出加载态，拉回来再重绘
+  if (fillProviders()) {
+    paint();
+  } else {
+    bodyBox.replaceChildren(h('div', { class: 'busy', text: '读取平台列表' }));
+    loadPlatforms().then(() => { if (fillProviders()) paint(); });
+  }
 
   const inner = h('div', { class: 'stack' },
     h('div', { class: 'row wrap', style: { gap: '8px' } }, providerSel),

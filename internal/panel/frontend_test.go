@@ -216,8 +216,29 @@ function walk(el, out = { inputs: 0, buttons: [] }) {
 }
 const has = (btns, kw) => btns.some(b => b.includes(kw));
 
+// 平台注册表：面板所有平台清单都从它来（js/platforms.js），测试里模拟后端下发。
+const PLATFORMS = [
+  { id: 'lobsterai', name: 'LobsterAI（有道）', group: 'points', login: 'manual', checkin: true },
+  { id: 'raccoon', name: '小浣熊（商汤）', group: 'points', login: 'qr', checkin: true },
+  { id: 'qoder', name: 'Qoder（阿里）', group: 'gateway', prefix: 'qoder:', login: 'device', checkin: true },
+  { id: 'codearts', name: 'CodeArts（华为云）', group: 'points', login: 'manual', checkin: true },
+  { id: 'copilot', name: 'GitHub Copilot', group: 'gateway', prefix: 'copilot:', login: 'code' },
+  { id: 'cline', name: 'Cline', group: 'gateway', prefix: 'cline:', login: 'code' },
+  { id: 'autoclaw', name: 'AutoClaw（智谱）', group: 'gateway', prefix: 'autoclaw:', login: 'sms' },
+];
+
+// fetch 桩必须**先**装好再拉注册表，否则会挂在前面那个永不 resolve 的空桩上
+globalThis.fetch = async url => {
+  if (String(url).includes('/api/platforms')) {
+    return { ok: true, status: 200, json: async () => ({ ok: true, platforms: PLATFORMS }) };
+  }
+  return { ok: true, status: 200, json: async () => ({}) };
+};
+
 const { extAddPanel } = await import('./views/ext-add.js');
 const { zaiAddForm } = await import('./views/zai-segment.js');
+const { loadPlatforms } = await import('./platforms.js');
+await loadPlatforms(); // 先把注册表灌进缓存，面板首次渲染就是完整的
 
 // 每个平台的凭据字段数（账号标识输入框另计）。
 // 有登录方式的平台把凭据表单收进折叠区，字段仍然要渲染出来（手工兜底路径）。
@@ -290,11 +311,14 @@ function findByClass(el, cls) {
   for (const c2 of el.children || []) { const r = findByClass(c2, cls); if (r) return r; }
   return null;
 }
-globalThis.fetch = async () => ({
-  ok: true, status: 200,
-  json: async () => ({ ok: true, mode: 'qr', session: 's1',
-    qr_url: 'https://xiaohuanxiong.com/login/mp?code=abc&appname=x', expires_in: 600 }),
-});
+globalThis.fetch = async url => {
+  if (String(url).includes('/api/platforms')) {
+    return { ok: true, status: 200, json: async () => ({ ok: true, platforms: PLATFORMS }) };
+  }
+  return { ok: true, status: 200,
+    json: async () => ({ ok: true, mode: 'qr', session: 's1',
+      qr_url: 'https://xiaohuanxiong.com/login/mp?code=abc&appname=x', expires_in: 600 }) };
+};
 
 for (const [provider, btnText, wantCls] of [['raccoon', '微信扫码登录', 'qr']]) {
   const panel = extAddPanel(() => {}, { flat: true });
@@ -323,6 +347,9 @@ stopExtAddTimers();
    实测小浣熊扫码快能成，Qoder / Copilot 要在浏览器里操作更久，必死。 */
 let pollCount = 0, addedCount = 0;
 globalThis.fetch = async url => {
+  if (String(url).includes('/api/platforms')) {
+    return { ok: true, status: 200, json: async () => ({ ok: true, platforms: PLATFORMS }) };
+  }
   if (String(url).includes('/login/start')) {
     return { ok: true, status: 200, json: async () => ({ ok: true, mode: 'device', session: 'sess-A',
       auth_url: 'https://qoder.com/device/selectAccounts?x=1', expires_in: 600 }) };

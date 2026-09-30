@@ -9,6 +9,7 @@ import { refreshOverview } from '../store.js';
 import { openVouchers } from '../drawers.js';
 import { zaiSegment, loadZai } from './zai-segment.js';
 import { extAddPanel } from './ext-add.js';
+import { platforms, loadPlatforms, platName, platHasCheckin } from '../platforms.js';
 
 const seg = signal('tencent');
 const queue = signal(null);
@@ -260,13 +261,14 @@ function loomySeg() {
 }
 
 /* ── 外部平台 ─────────────────────────────────────────────────── */
-const EXT_NAMES = { lobsterai: 'LobsterAI', raccoon: '小浣熊', qoder: 'Qoder', codearts: '华为云', copilot: 'GitHub Copilot', cline: 'Cline', autoclaw: 'AutoClaw' };
-
-// Copilot 是网关直连通道（无积分、无签到），卡片按「订阅状态」而非「余额」呈现。
-const EXT_NO_CHECKIN = { copilot: true, cline: true, autoclaw: true };
+// 平台名与「有没有签到」都来自注册表（platforms.js）——不再自带表
 
 async function loadExt(quiet = true) {
-  try { ext.set(await api('ext/accounts')); extMsg.set(''); }
+  try {
+    await loadPlatforms();
+    ext.set(await api('ext/accounts'));
+    extMsg.set('');
+  }
   catch (e) { extMsg.set(e.message); if (!quiet) toast(e.message, 'fail'); }
 }
 
@@ -277,7 +279,7 @@ async function extAct(provider, id, action, body) {
     });
     if (action === 'checkin') {
       const res = r.result || {};
-      toast(`[${EXT_NAMES[provider] || provider}] ${res.message || res.kind || '完成'}`, res.kind === 'failed' ? 'fail' : undefined);
+      toast(`[${platName(provider)}] ${res.message || res.kind || '完成'}`, res.kind === 'failed' ? 'fail' : undefined);
     } else if (action === 'remove') toast('已删除');
     await loadExt();
   } catch (e) { toast(e.message, 'fail'); }
@@ -315,29 +317,33 @@ function extSeg() {
           ? h('div', { class: 'acct-grid' }, ...list.map(a => h('article', { class: 'acct' + (a.disabled ? ' off' : '') },
             h('div', { class: 'top' },
               h('div', { class: 'who' },
-                h('div', { class: 'nm', text: `${EXT_NAMES[a.provider] || a.provider} · ${a.label || a.id}` }),
+                h('div', { class: 'nm', text: `${platName(a.provider)} · ${a.label || a.id}` }),
                 h('div', { class: 'id', text: a.id }),
               ),
               h('span', { class: 'chip' + (a.disabled ? ' faint' : '') }, h('i', { class: a.disabled ? 'dot off' : 'dot' }), a.disabled ? '已停用' : '启用中'),
             ),
             h('div', { class: 'credits' },
               h('div', { class: 'line' },
-                EXT_NO_CHECKIN[a.provider]
-                  ? h('span', { class: 'of', style: { fontSize: '12px' }, text: a.note || '订阅状态未知' })
+                // 无签到的通道（Copilot / Cline / AutoClaw）按「订阅状态」呈现，
+                // 而不是硬凑一个 0 分余额——有没有签到由注册表说了算。
+                !platHasCheckin(a.provider)
+                  ? h('span', { class: 'of', style: { fontSize: '12px' }, text: a.note || '已接入' })
                   : h('span', { class: 'n', text: a.balance_ok ? String(a.balance ?? 0) : '—' }),
-                EXT_NO_CHECKIN[a.provider] ? null
-                  : h('span', { class: 'of', text: a.balance_ok ? '分' : (a.note || '') }),
+                platHasCheckin(a.provider)
+                  ? h('span', { class: 'of', text: a.balance_ok ? '分' : (a.note || '') })
+                  : null,
               ),
             ),
             h('div', { class: 'acts' },
-              EXT_NO_CHECKIN[a.provider] ? null
-                : h('button', { class: 'btn', disabled: a.disabled, onclick: () => extAct(a.provider, a.id, 'checkin') }, '签到'),
+              platHasCheckin(a.provider)
+                ? h('button', { class: 'btn', disabled: a.disabled, onclick: () => extAct(a.provider, a.id, 'checkin') }, '签到')
+                : null,
               h('button', {
                 class: 'btn', onclick: () => extAct(a.provider, a.id, 'toggle', { disabled: !a.disabled }),
               }, a.disabled ? '启用' : '停用'),
               h('button', {
                 class: 'btn danger', onclick: async () => {
-                  if (await confirmDialog(`确定删除 ${EXT_NAMES[a.provider] || a.provider} 账号 ${a.id}？`, { ok: '删除' })) {
+                  if (await confirmDialog(`确定删除 ${platName(a.provider)} 账号 ${a.id}？`, { ok: '删除' })) {
                     await extAct(a.provider, a.id, 'remove');
                   }
                 },
@@ -354,7 +360,7 @@ function extSeg() {
         h('summary', { class: 'muted', style: { cursor: 'pointer', fontSize: '12.5px' }, text: '高级：粘贴完整凭据 JSON' }),
         h('div', { class: 'row wrap', style: { marginTop: '10px' } },
           h('select', { class: 'input', id: 'ext-provider', style: { width: 'auto' } },
-            ...Object.entries(EXT_NAMES).map(([v, n]) => h('option', { value: v, text: n }))),
+            ...platforms.peek().filter(p => p.login).map(p => h('option', { value: p.id, text: p.name }))),
           h('input', { class: 'input', id: 'ext-id', placeholder: '账号 ID', style: { flex: '1', minWidth: '140px' } }),
           h('input', { class: 'input', id: 'ext-cred', placeholder: '凭据 JSON', style: { flex: '2', minWidth: '200px', fontFamily: 'var(--mono)', fontSize: '11.5px' } }),
           h('button', {

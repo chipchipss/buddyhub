@@ -1,22 +1,16 @@
 // Package panel: accounts_dir.go — 统一账号目录（大一统账号池的数据面）。
 //
-// GET /panel/api/accounts/dir 返回全部平台的账号清单，平台分组：
+// GET /panel/api/accounts/dir 返回全部平台的账号清单。**平台清单来自注册表**
+// （platforms.go）——这里只负责回答「每个平台的账号从哪来」：
 //
-//	{ "platforms": [
-//	  {"id":"workbuddy","name":"腾讯 WorkBuddy","accounts":[{id,label,status,quota...}]},
-//	  {"id":"loomy",...}, {"id":"zai",...}, {"id":"qoder",...}, ...
-//	]}
+//   - workbuddy  账号池 state.json（对话上游真账号）
+//   - zai        Z.AI 账号池 + 旧版 API Key（掩码展示）
+//   - codex      本机 ~/.codex 登录数
+//   - free       配置里的免费 key（掩码展示）
+//   - 其余        extstore（data/ext-accounts.json）
 //
-// 账号来源（每平台一个 Agent 视图，全部只读汇总，不在这里做写操作）：
-//   - workbuddy: cfg.Pool.List()（账号池/state.json——对话上游真账号）
-//   - loomy-cli: extstore（密码/短信登录落库）
-//   - lobsterai/raccoon/qoder/codearts/copilot/cline/autoclaw: extstore
-//   - zai: config schedule.zai（API Key 池，key 掩码展示）
-//   - codex: keypool.ListCodexAccounts()（本机 ~/.codex）
-//   - free: config free_pool（有 key 的上游列出）
-//
-// 前端据此渲染「全部 + 各平台子目录」导航与分组表格；每平台条目
-// 「管理 →」按钮跳转到对应管理页（platforms→ext / loomy→loomy / workbuddy→accounts）。
+// 前端据此渲染「全部 + 各平台子目录」导航与分组表格；注册表里有的平台
+// **一定**会出现在这里，不会因为漏改某个 map 而消失。
 package panel
 
 import (
@@ -33,15 +27,19 @@ type dirAccount struct {
 	Status   string `json:"status"`    // healthy/cooling/off/unknown
 	Quota    string `json:"quota"`     // "1234/5000" 形态展示（平台尽力而为）
 	Detail   string `json:"detail"`    // 平台自由文本（冷却原因/余额 note）
-	ManageTo string `json:"manage_to"` // 前端跳转 hash（#accounts/#ext/#loomy/#apikeys）
+	ManageTo string `json:"manage_to"` // 前端跳转 hash（#accounts/#ext/#config）
 }
 
 // dirPlatform 单平台分组。
 type dirPlatform struct {
 	ID       string       `json:"id"`
 	Name     string       `json:"name"`
-	APIModel string       `json:"api_model"` // zai: / loomy: 等调用前缀；"" = 该平台非对话上游
-	ManageTo string       `json:"manage_to"` // 该平台管理页 hash（组头「管理 →」跳转）
+	APIModel string       `json:"api_model"` // 调用前缀；"" = 该平台非对话上游
+	Group    string       `json:"group"`     // gateway（有对话 API）/ points（只签到）
+	Login    string       `json:"login"`     // 入池方式（前端据此给「去添加」入口）
+	Checkin  bool         `json:"checkin"`
+	Note     string       `json:"note,omitempty"`
+	ManageTo string       `json:"manage_to"`
 	Accounts []dirAccount `json:"accounts"`
 }
 
@@ -52,105 +50,129 @@ func maskKey(k string) string {
 	return k[:6] + "…" + k[len(k)-4:]
 }
 
+// manageToFor 该平台的管理页跳转目标。
+func manageToFor(pl Platform) string {
+	switch {
+	case pl.ID == "workbuddy":
+		return "#accounts"
+	case pl.Login == LoginNone || pl.Login == LoginConfig:
+		return "#config" // 本机凭据 / 配置页填写
+	default:
+		return "#ext"
+	}
+}
+
 // accountsDir 统一账号目录。
 func (p *Panel) accountsDir(w http.ResponseWriter, r *http.Request) {
-	var platforms []dirPlatform
-
-	// ── workbuddy（腾讯池）──
-	wb := dirPlatform{ID: "workbuddy", Name: "腾讯 WorkBuddy", APIModel: "cn:", Accounts: []dirAccount{}}
-	if p.cfg.Pool != nil {
-		for _, s := range p.cfg.Pool.List() {
-			st, detail := "healthy", ""
-			switch {
-			case s.Disabled:
-				st, detail = "off", "已禁用"
-			case s.CoolRemaining > 0:
-				st, detail = "cooling", "冷却中"
-			}
-			quota := ""
-			if s.CreditsTotal > 0 {
-				quota = itoa(int(s.Credits)) + "/" + itoa(int(s.CreditsTotal))
-			} else if s.Credits > 0 {
-				quota = itoa(int(s.Credits))
-			}
-			wb.Accounts = append(wb.Accounts, dirAccount{
-				ID: s.UID, Label: s.Nickname, Status: st, Quota: quota, Detail: detail,
-				ManageTo: "#accounts",
-			})
-		}
-	}
-	platforms = append(platforms, wb)
-
-	// ── 外部平台（extstore 全部）──
-	extGroups := map[string]dirPlatform{
-		extstore.PLoomyCLI:  {ID: "loomy", Name: "Loomy（讯飞）", APIModel: "loomy:", ManageTo: "#loomy", Accounts: []dirAccount{}},
-		extstore.PLogsterAI: {ID: "lobsterai", Name: "LobsterAI（有道）", APIModel: "", ManageTo: "#ext", Accounts: []dirAccount{}},
-		extstore.PRaccoon:   {ID: "raccoon", Name: "小浣熊（商汤）", APIModel: "", ManageTo: "#ext", Accounts: []dirAccount{}},
-		extstore.PQoder:     {ID: "qoder", Name: "Qoder（阿里）", APIModel: "qoder:", ManageTo: "#ext", Accounts: []dirAccount{}},
-		extstore.PCodeArts:  {ID: "codearts", Name: "CodeArts（华为云）", APIModel: "", ManageTo: "#ext", Accounts: []dirAccount{}},
-		extstore.PCopilot:   {ID: "copilot", Name: "GitHub Copilot", APIModel: "copilot:", ManageTo: "#ext", Accounts: []dirAccount{}},
-		extstore.PCline:     {ID: "cline", Name: "Cline", APIModel: "cline:", ManageTo: "#ext", Accounts: []dirAccount{}},
-		extstore.PAutoClaw:  {ID: "autoclaw", Name: "AutoClaw（智谱）", APIModel: "autoclaw:", ManageTo: "#ext", Accounts: []dirAccount{}},
-	}
+	// extstore 一次 List，按 provider 分桶（避免每个平台各扫一遍）
+	extByProvider := map[string][]dirAccount{}
 	if p.extManager() != nil {
 		for _, a := range p.extManager().List() {
-			g, ok := extGroups[a.Provider]
-			if !ok {
-				continue
-			}
 			st := "healthy"
 			if a.Disabled {
 				st = "off"
 			}
-			g.Accounts = append(g.Accounts, dirAccount{
-				ID: a.ID, Label: a.Label, Status: st, ManageTo: g.ManageTo,
-			})
-			extGroups[a.Provider] = g
-		}
-	}
-	platforms = append(platforms,
-		extGroups[extstore.PLoomyCLI], extGroups[extstore.PQoder],
-		extGroups[extstore.PLogsterAI], extGroups[extstore.PRaccoon],
-		extGroups[extstore.PCodeArts], extGroups[extstore.PCopilot],
-		extGroups[extstore.PCline], extGroups[extstore.PAutoClaw])
-
-	// ── zai（API Key 池）──
-	zai := dirPlatform{ID: "zai", Name: "Z.AI 智谱 GLM", APIModel: "zai:", ManageTo: "#config", Accounts: []dirAccount{}}
-	if len(p.cfg.ZaiKeys) > 0 {
-		for i, k := range p.cfg.ZaiKeys {
-			zai.Accounts = append(zai.Accounts, dirAccount{
-				ID: "zai-" + itoa(i+1), Label: "API Key " + itoa(i+1), Status: "healthy",
-				Detail: maskKey(k), ManageTo: "#config",
+			extByProvider[a.Provider] = append(extByProvider[a.Provider], dirAccount{
+				ID: a.ID, Label: a.Label, Status: st,
 			})
 		}
 	}
-	platforms = append(platforms, zai)
 
-	// ── codex（本机订阅）──
-	codex := dirPlatform{ID: "codex", Name: "Codex（ChatGPT 订阅）", APIModel: "codex:", ManageTo: "#config", Accounts: []dirAccount{}}
-	if p.cfg.CodexCount != nil {
-		if n := p.cfg.CodexCount(); n > 0 {
-			codex.Accounts = append(codex.Accounts, dirAccount{
-				ID: "codex-local", Label: "本机凭据", Status: "healthy",
-				Detail: itoa(n) + " 个登录", ManageTo: "#config",
-			})
+	out := make([]dirPlatform, 0, len(platforms))
+	for _, pl := range platforms {
+		g := dirPlatform{
+			ID: pl.ID, Name: pl.Name, APIModel: pl.Prefix, Group: pl.Group,
+			Login: pl.Login, Checkin: pl.Checkin, Note: pl.Note,
+			ManageTo: manageToFor(pl), Accounts: []dirAccount{},
 		}
-	}
-	platforms = append(platforms, codex)
+		switch pl.ID {
+		case "workbuddy":
+			if p.cfg.Pool != nil {
+				for _, s := range p.cfg.Pool.List() {
+					st, detail := "healthy", ""
+					switch {
+					case s.Disabled:
+						st, detail = "off", "已禁用"
+					case s.CoolRemaining > 0:
+						st, detail = "cooling", "冷却中"
+					}
+					quota := ""
+					if s.CreditsTotal > 0 {
+						quota = itoa(int(s.Credits)) + "/" + itoa(int(s.CreditsTotal))
+					} else if s.Credits > 0 {
+						quota = itoa(int(s.Credits))
+					}
+					g.Accounts = append(g.Accounts, dirAccount{
+						ID: s.UID, Label: s.Nickname, Status: st, Quota: quota, Detail: detail,
+						ManageTo: "#accounts",
+					})
+				}
+			}
 
-	// ── free 池 ──
-	free := dirPlatform{ID: "free", Name: "免费 Key 池", APIModel: "free:", ManageTo: "#config", Accounts: []dirAccount{}}
-	if p.cfg.FreeKeysDesc != nil {
-		for _, d := range p.cfg.FreeKeysDesc() {
-			free.Accounts = append(free.Accounts, dirAccount{
-				ID: "free-" + d.Provider, Label: d.Provider, Status: "healthy",
-				Detail: d.Masked, ManageTo: "#config",
-			})
+		case "zai":
+			// 账号池（面板可增删改）+ 旧版 API Key（掩码）
+			if p.cfg.Zai != nil {
+				for _, s := range p.cfg.Zai.Snapshots() {
+					st := "healthy"
+					if !s.Enabled {
+						st = "off"
+					} else if s.CoolLeft > 0 {
+						st = "cooling"
+					}
+					detail := s.Mode
+					if s.PlanName != "" {
+						detail = s.PlanName
+					}
+					if s.LastErr != "" && st != "healthy" {
+						detail = s.LastErr
+					}
+					g.Accounts = append(g.Accounts, dirAccount{
+						ID: s.ID, Label: s.Name, Status: st, Detail: detail, ManageTo: "#ext",
+					})
+				}
+			}
+			for i, k := range p.cfg.ZaiKeys {
+				g.Accounts = append(g.Accounts, dirAccount{
+					ID: "zai-key-" + itoa(i+1), Label: "旧版 API Key " + itoa(i+1),
+					Status: "healthy", Detail: maskKey(k), ManageTo: "#config",
+				})
+			}
+
+		case "codex":
+			if p.cfg.CodexCount != nil {
+				if n := p.cfg.CodexCount(); n > 0 {
+					g.Accounts = append(g.Accounts, dirAccount{
+						ID: "codex-local", Label: "本机凭据", Status: "healthy",
+						Detail: itoa(n) + " 个登录", ManageTo: "#config",
+					})
+				}
+			}
+
+		case "free":
+			if p.cfg.FreeKeysDesc != nil {
+				for _, d := range p.cfg.FreeKeysDesc() {
+					g.Accounts = append(g.Accounts, dirAccount{
+						ID: "free-" + d.Provider, Label: d.Provider, Status: "healthy",
+						Detail: d.Masked, ManageTo: "#config",
+					})
+				}
+			}
+
+		default:
+			// 其余平台的账号都在 extstore；loomy 的分组 id 是 loomy，落库 provider 是 loomy-cli
+			provider := pl.ID
+			if pl.ID == "loomy" {
+				provider = extstore.PLoomyCLI
+			}
+			for _, a := range extByProvider[provider] {
+				a.ManageTo = g.ManageTo
+				g.Accounts = append(g.Accounts, a)
+			}
 		}
+		out = append(out, g)
 	}
-	platforms = append(platforms, free)
 
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "platforms": platforms})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "platforms": out})
 }
 
 func itoa(n int) string {

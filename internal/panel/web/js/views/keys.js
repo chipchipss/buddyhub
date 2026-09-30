@@ -5,16 +5,18 @@
 
 import { h, icon, signal, api, toast, confirmDialog, copyText } from '../kernel.js';
 import { defineView } from '../shell.js';
+import { platforms, loadPlatforms, platName, platWithPrefix } from '../platforms.js';
 
 const keys = signal(null);
 const err = signal('');
 const picked = signal(new Set(['*']));
 
-const PLAT_NAMES = { workbuddy: '腾讯', loomy: 'Loomy', qoder: 'Qoder', zai: 'Z.AI', codex: 'Codex', free: '免费池', copilot: 'Copilot', cline: 'Cline', autoclaw: 'AutoClaw' };
-const ALL_PLATS = ['workbuddy', 'loomy', 'qoder', 'zai', 'codex', 'free', 'copilot', 'cline', 'autoclaw'];
+// 平台清单来自注册表（platforms.js）——不再自带名字表
+const ALL_PLATS = () => platforms.peek().map(p => p.id);
 
 async function load(quiet = true) {
   err.set('');
+  await loadPlatforms();
   try { keys.set((await api('apikeys')).keys || []); }
   catch (e) { err.set(e.message); if (!quiet) toast(e.message, 'fail'); }
 }
@@ -64,8 +66,8 @@ export default defineView({
       const set = picked.peek();
       chips.replaceChildren(
         h('button', { class: 'btn sm' + (set.has('*') ? ' primary' : ''), text: '全平台', onclick: () => togglePlat('*') }),
-        ...ALL_PLATS.map(p => h('button', {
-          class: 'btn sm' + (set.has(p) ? ' primary' : ''), text: PLAT_NAMES[p],
+        ...ALL_PLATS().map(p => h('button', {
+          class: 'btn sm' + (set.has(p) ? ' primary' : ''), text: platName(p),
           onclick: () => togglePlat(p),
         })),
         h('span', { class: 'grow' }),
@@ -114,7 +116,7 @@ export default defineView({
                 h('div', { class: 'row wrap', style: { gap: '5px' } },
                   (!k.platforms || !k.platforms.length || k.platforms.includes('*'))
                     ? h('span', { class: 'chip strong', text: '全平台' })
-                    : k.platforms.map(p => h('span', { class: 'chip', text: PLAT_NAMES[p] || p })),
+                    : k.platforms.map(p => h('span', { class: 'chip', text: platName(p) })),
                 ),
                 h('button', {
                   class: 'btn sm', onclick: async () => {
@@ -137,8 +139,8 @@ export default defineView({
         h('div', { class: 'body', style: { fontSize: '12.5px', color: 'var(--fg-2)', lineHeight: '1.9' } },
           h('div', null, '地址统一 ', h('code', { style: { fontFamily: 'var(--mono)' }, text: 'http://主机:7863/v1' }), '，模型名前缀决定平台：'),
           h('div', { class: 'row wrap', style: { marginTop: '8px', gap: '6px' } },
-            ...[['cn:', '腾讯'], ['loomy:', '讯飞'], ['zai:', '智谱'], ['copilot:', 'Copilot'], ['cline:', 'Cline'], ['autoclaw:', 'AutoClaw'], ['qoder:', 'Qoder'], ['codex:', '订阅池'], ['free:', '免费池']]
-              .map(([p, n]) => h('span', { class: 'chip' }, h('code', { style: { fontFamily: 'var(--mono)' }, text: p }), n)),
+            ...platWithPrefix().map(p => h('span', { class: 'chip' },
+              h('code', { style: { fontFamily: 'var(--mono)' }, text: p.prefix }), p.name)),
           ),
           h('div', { class: 'muted', style: { marginTop: '8px' } }, '未授权对应平台的 Key 调用该平台模型返回 403；主 api_key（配置页）始终全平台。'),
         ),

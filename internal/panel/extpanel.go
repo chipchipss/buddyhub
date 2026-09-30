@@ -64,10 +64,9 @@ func (p *Panel) extAccountAdd(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid request json")
 		return
 	}
-	switch body.Provider {
-	case extstore.PLogsterAI, extstore.PRaccoon, extstore.PQoder, extstore.PCodeArts, extstore.PCopilot, extstore.PCline, extstore.PAutoClaw:
-	default:
-		writeErr(w, http.StatusBadRequest, "未知平台: "+body.Provider)
+	// 只接受「账号落在 extstore」的平台（注册表说了算，见 platforms.go）
+	if !platformUsesExtstore(body.Provider) {
+		writeErr(w, http.StatusBadRequest, "该平台不走外部账号表: "+body.Provider)
 		return
 	}
 	if body.ID == "" || len(body.Cred) == 0 {

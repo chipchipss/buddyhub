@@ -64,8 +64,12 @@ func (p *Panel) postAPIKeys(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "name 必填")
 		return
 	}
-	// 平台白名单校验（前端下拉来源；写死避免任意串进配置）
-	valid := map[string]bool{"*": true, "workbuddy": true, "loomy": true, "qoder": true, "codex": true, "free": true, "zai": true, "copilot": true, "cline": true, "autoclaw": true}
+	// 平台白名单校验：**从注册表取**（platforms.go）——新增平台不必再改这里，
+	// 也不会出现「注册表里有、白名单里没有」的静默拒绝。
+	valid := map[string]bool{"*": true}
+	for _, id := range platformIDs() {
+		valid[id] = true
+	}
 	for _, plat := range body.Platforms {
 		if !valid[strings.TrimSpace(plat)] {
 			writeErr(w, http.StatusBadRequest, "未知平台: "+plat)

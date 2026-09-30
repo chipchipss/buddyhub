@@ -196,6 +196,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
 	// 多 API Key 管理（生成/删除/列表；与配置页整表单解耦的原子操作）
 	p.mux.HandleFunc("GET /panel/api/accounts/dir", p.withAuth(p.accountsDir))
+	// 平台注册表（单一事实源；前端据此渲染全部平台清单，不再自带名字表）
+	p.mux.HandleFunc("GET /panel/api/platforms", p.withAuth(p.getPlatforms))
 	// Z.AI / ZCode 账号池（Plan JWT + API Key 回退）
 	p.mux.HandleFunc("GET /panel/api/zai/accounts", p.withAuth(p.zaiAccounts))
 	p.mux.HandleFunc("POST /panel/api/zai/accounts", p.withAuth(p.zaiAccountAdd))
