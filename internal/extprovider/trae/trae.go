@@ -9,9 +9,12 @@
 // 因此**浏览器必须与网关在同一台机器上**（面板通常就是本机访问，符合）。
 //
 //  1. 绑定回环端口，生成 PKCE 对 + 设备密钥对（RSA）
-//  2. POST {login_host}/cloudide/api/v3/trae/GetLoginGuidance → 该去哪个登录页
-//  3. 浏览器打开 {login_host}/authorization?login_version=1&auth_from=solo&…
-//  2. 回调带回 auth_code → POST {login_host}/trae/api/v3/oauth/ExchangeToken
+//  2. POST {api}/cloudide/api/v3/trae/GetLoginGuidance → 该去哪个登录页
+//     （回的是 Result.LoginHost，**网页域** www.trae.cn，只用来开浏览器）
+//  3. 浏览器打开 {web}/authorization?login_version=1&auth_from=solo&…
+//  4. 回调带回 auth_code → POST {api}/trae/api/v3/oauth/ExchangeToken
+//     注意换证走的是 **API 域**，不是上面那个网页域：往网页域 POST 拿到的是一坨
+//     HTML（字节的 JS 挑战页），解析必然炸在「invalid character '<'」。
 //
 // ── 对话：SOLO 白名单重建 ────────────────────────────────────
 //
@@ -76,6 +79,10 @@ const (
 	OSVersion      = "Windows 11 Pro"
 	UserAgent      = "Trae/0.1.61"
 	PluginVersion  = "1.0.0"
+	// 授权页按这几个参数判客户端形态（漏了直接 404）
+	DeviceType = "windows"
+	Env        = "prod"
+	AppType    = "trae"
 
 	// LoginTTL 一次登录会话的有效期。
 	LoginTTL = 15 * time.Minute
@@ -227,8 +234,18 @@ func buildAuthURL(loginHost string, c *LoginContext) string {
 		"x_device_id=" + url.QueryEscape(c.DeviceID),
 		"x_machine_id=" + url.QueryEscape(c.MachineID),
 		"x_device_brand=" + url.QueryEscape(DeviceBrand),
+		// 下面这几个漏了会让授权页直接 404 —— 官方页面按它们判客户端形态
+		"x_device_type=" + url.QueryEscape(DeviceType),
+		"x_os_version=" + url.QueryEscape(OSVersion),
+		"x_env=" + url.QueryEscape(Env),
+		"x_app_version=" + url.QueryEscape(IDEVersion),
+		"x_app_type=" + url.QueryEscape(AppType),
+		"code_challenge=" + url.QueryEscape(c.CodeChallenge),
+		"code_challenge_method=S256",
+		// solo 谱系要隐藏 SaaS 登录入口（非 solo 分支不带这个参数）
+		"hide_saas_login=true",
 	}
-	return loginHost + "/authorization?" + strings.Join(q, "&")
+	return strings.TrimRight(loginHost, "/") + "/authorization?" + strings.Join(q, "&")
 }
 
 // NewLogin 绑定本机回环端口并生成登录上下文。
@@ -283,22 +300,41 @@ func requestLoginGuidance(ctx context.Context) string {
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	var doc struct {
-		LoginHost string `json:"login_host"`
-		Data      struct {
-			LoginHost string `json:"login_host"`
-		} `json:"data"`
-	}
-	if json.Unmarshal(raw, &doc) != nil {
+	// 真实回执是 PascalCase 的 Result.LoginHost（实测），
+	// 但字段名随版本变过，几种写法都认一遍——认不出来就回落默认域，
+	// 回落会让授权链接指向错的 host（打开 404）。
+	var probe map[string]any
+	if json.Unmarshal(raw, &probe) != nil {
 		return DefaultLoginHost
 	}
-	if doc.LoginHost != "" {
-		return doc.LoginHost
-	}
-	if doc.Data.LoginHost != "" {
-		return doc.Data.LoginHost
+	if h := digLoginHost(probe); h != "" {
+		return h
 	}
 	return DefaultLoginHost
+}
+
+// digLoginHost 递归找 login host（字段名有多种写法，层级也可能变）。
+func digLoginHost(v any) string {
+	switch t := v.(type) {
+	case map[string]any:
+		for _, k := range []string{"LoginHost", "login_host", "loginHost"} {
+			if s, ok := t[k].(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+		for _, child := range t {
+			if h := digLoginHost(child); h != "" {
+				return h
+			}
+		}
+	case []any:
+		for _, child := range t {
+			if h := digLoginHost(child); h != "" {
+				return h
+			}
+		}
+	}
+	return ""
 }
 
 // Callback 本机回调里带回来的参数。
@@ -330,6 +366,37 @@ func ParseCallback(query url.Values) *Callback {
 	}
 }
 
+// apiHostFor 把「浏览器登录页域」映射到「API 域」。
+//
+// GetLoginGuidance 回的 LoginHost 是**给人看的网页域**（实测 www.trae.cn），
+// 而 ExchangeToken 是 API——两者不同域：往网页域 POST 会拿到一坨 HTML
+// （字节的 JS 挑战页），解析必然失败在「回执解析失败：invalid character '<'」。
+// 所以换证一律走 API 域。
+//
+// 同族域做 www.→api. 替换（国际版 www.trae.ai → api.trae.ai 也能对上），
+// 对不上就不猜，用已知能换证的域兜底。
+func apiHostFor(loginHost string) string {
+	host := strings.TrimSpace(loginHost)
+	if host == "" {
+		return DefaultLoginHost
+	}
+	if !strings.HasPrefix(host, "http://") && !strings.HasPrefix(host, "https://") {
+		host = "https://" + host
+	}
+	u, err := url.Parse(host)
+	if err != nil || u.Host == "" {
+		return DefaultLoginHost
+	}
+	switch {
+	case strings.HasPrefix(u.Host, "www."):
+		return u.Scheme + "://api." + strings.TrimPrefix(u.Host, "www.")
+	case strings.HasPrefix(u.Host, "api."):
+		return u.Scheme + "://" + u.Host
+	default:
+		return DefaultLoginHost
+	}
+}
+
 // Complete 用回调内容换凭据。
 func Complete(ctx context.Context, c *LoginContext, cb *Callback) (*Credential, error) {
 	if cb.Error != "" {
@@ -338,13 +405,8 @@ func Complete(ctx context.Context, c *LoginContext, cb *Callback) (*Credential, 
 	if cb.AuthCode == "" && cb.RefreshToken == "" {
 		return nil, fmt.Errorf("回调里没有授权码也没有续期串")
 	}
-	host := cb.LoginHost
-	if host == "" {
-		host = c.LoginHost
-	}
-	if !strings.HasPrefix(host, "http") {
-		host = "https://" + host
-	}
+	// 注意：回调里的 login_host 是**网页域**，只能用来定位 API 域，不能直接当端点。
+	host := apiHostFor(firstNonEmptyStr(cb.LoginHost, c.LoginHost))
 
 	body, _ := json.Marshal(map[string]any{
 		"ClientID":     ClientIDSolo,
@@ -634,6 +696,16 @@ func firstNum(m map[string]any, keys ...string) int64 {
 		}
 	}
 	return 0
+}
+
+// firstNonEmptyStr 取第一个非空串（回调与上下文里同一个字段可能只在一处有）。
+func firstNonEmptyStr(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func truncate(s string, n int) string {

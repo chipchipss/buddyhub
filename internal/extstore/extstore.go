@@ -27,6 +27,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extprovider/raccoon"
 	"github.com/chipchipss/buddyhub/internal/extprovider/trae"
 	"github.com/chipchipss/buddyhub/internal/extprovider/traework"
+	"github.com/chipchipss/buddyhub/internal/upstream"
 )
 
 // Provider 平台标识。
@@ -331,6 +332,27 @@ func (m *Manager) CheckinOne(ctx context.Context, a *ExtAccount) *CheckinResult 
 		res.Kind, res.Message = "inactive", "Trae 无需签到（网关直连通道）"
 	case PAccio:
 		res.Kind, res.Message = "inactive", "Accio 无需签到（网关直连通道）"
+	case PLoomyCLI:
+		// Loomy 的签到是「激活每日赠送额度」，走 upstream 的 Loomy 客户端
+		// （凭据里存的是登录 session，不是 extprovider 那套密码登录接口）。
+		var cred struct {
+			Session string `json:"session"`
+		}
+		if err := json.Unmarshal(a.Cred, &cred); err != nil || cred.Session == "" {
+			res.Kind, res.Message = "failed", "凭据里没有 session，需重新登录"
+			return res
+		}
+		r, lerr := upstream.NewLoomyClient("").CheckinDailyQuota(cred.Session)
+		if lerr != nil {
+			res.Kind, res.Message = "failed", lerr.Error()
+			return res
+		}
+		if r.AlreadyProcessed {
+			res.Kind, res.Message = "already-claimed", r.Message
+		} else {
+			res.Kind, res.Credit = "claimed", float64(r.Granted)
+			res.Message = r.Message
+		}
 	case PTraeWork:
 		// TraeWork 有每日签到积分（UG 域）。
 		var cred traework.Credential

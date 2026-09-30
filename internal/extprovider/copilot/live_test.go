@@ -2,7 +2,11 @@ package copilot
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
@@ -73,16 +77,26 @@ func TestSetProxy(t *testing.T) {
 	if err := SetProxy("http://127.0.0.1:2080"); err != nil {
 		t.Fatalf("合法代理被拒: %v", err)
 	}
-	tr, ok := httpClient.Transport.(*http.Transport)
+	// 配了代理时外层是「代理优先 + 直连兜底」的包装，真正的代理在 primary 上。
+	ft, ok := httpClient.Transport.(*fallbackTransport)
 	if !ok {
-		t.Fatal("传输层类型不对")
+		t.Fatal("配了代理就该包一层直连兜底")
 	}
+	tr := ft.primary
 	if tr.Proxy == nil {
 		t.Fatal("代理未生效")
 	}
 	u, err := tr.Proxy(&http.Request{URL: &url.URL{Scheme: "https", Host: "github.com"}})
 	if err != nil || u == nil || u.Host != "127.0.0.1:2080" {
 		t.Fatalf("代理地址不对: %v %v", u, err)
+	}
+	// 兜底那条必须是直连（不继承 primary 的代理，否则兜底等于没兜）
+	if ft.direct == tr {
+		t.Fatal("兜底传输层与代理传输层是同一个")
+	}
+	if got, _ := ft.direct.Proxy(&http.Request{URL: &url.URL{Scheme: "https", Host: "github.com"}}); got != nil {
+		// ProxyFromEnvironment 在测试环境通常返回 nil；非 nil 说明继承了显式代理
+		t.Fatalf("兜底传输层带着代理: %v", got)
 	}
 
 	// 空串 = 回到跟随环境变量
@@ -91,5 +105,126 @@ func TestSetProxy(t *testing.T) {
 	}
 	if tr2 := httpClient.Transport.(*http.Transport); tr2.Proxy == nil {
 		t.Fatal("空串应回落到 ProxyFromEnvironment")
+	}
+}
+
+/* ── 代理掉线兜底 ──────────────────────────────────────────────── */
+
+// deadProxyURL 返回一个**确定没人监听**的代理地址。
+// 先占端口再关掉：操作系统刚释放的端口不会立刻被别人抢走。
+func deadProxyURL(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("占端口失败: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return "http://" + addr
+}
+
+// 代理进程没开（用户关了代理软件）时必须直连兜底，而不是让整条通道瘫掉。
+// 这是实测踩过的坑：配了 schedule.copilot.proxy 但代理没运行，
+// 设备码申请直接死在 "proxyconnect ... actively refused"。
+func TestFallsBackToDirectWhenProxyIsDown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	primary := newTransport()
+	u, _ := url.Parse(deadProxyURL(t))
+	primary.Proxy = http.ProxyURL(u)
+
+	direct := newTransport()
+	direct.Proxy = nil // 直连兜底不该再走代理
+
+	ft := &fallbackTransport{primary: primary, direct: direct}
+	client := &http.Client{Transport: ft, Timeout: 10 * time.Second}
+
+	resp, err := client.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("代理挂了应直连兜底，却失败: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("兜底后状态码 = %d", resp.StatusCode)
+	}
+}
+
+// 代理正常时不该触发兜底：把兜底那条指到死代理上，一旦误触发就会失败。
+func TestNoFallbackWhenProxyWorks(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	// primary 直连（等价于「代理可用」——请求正常完成）
+	primary := newTransport()
+	primary.Proxy = nil
+
+	// direct 指向死代理：只有错误地走了兜底才会用到它
+	direct := newTransport()
+	u, _ := url.Parse(deadProxyURL(t))
+	direct.Proxy = http.ProxyURL(u)
+
+	ft := &fallbackTransport{primary: primary, direct: direct}
+	client := &http.Client{Transport: ft, Timeout: 10 * time.Second}
+
+	resp, err := client.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("代理可用时不该兜底: %v", err)
+	}
+	resp.Body.Close()
+}
+
+func TestIsProxyConnError(t *testing.T) {
+	// Go 连不上代理时的真实形状：OpError.Op == "proxyconnect"
+	refused := &url.Error{Op: "Post", URL: "https://github.com/", Err: &net.OpError{
+		Op: "proxyconnect", Net: "tcp",
+		Err: errors.New("dial tcp 127.0.0.1:2080: connectex: No connection could be made"),
+	}}
+	if !isProxyConnError(refused) {
+		t.Error("proxyconnect 错误应被识别")
+	}
+	// 普通连接超时不是代理问题，不该兜底（兜底只会再慢一轮）
+	timeout := &url.Error{Op: "Post", URL: "https://github.com/", Err: &net.OpError{
+		Op: "dial", Net: "tcp", Err: errors.New("i/o timeout"),
+	}}
+	if isProxyConnError(timeout) {
+		t.Error("普通超时不该被当成代理故障")
+	}
+}
+
+// 真实故障路径是 POST（设备码申请）：请求体必须被完整重放，
+// 否则兜底会发出一个空体请求、上游回 400，看起来像「参数错误」而不是代理问题。
+func TestFallbackReplaysPostBody(t *testing.T) {
+	const payload = `{"client_id":"Iv1.b507a08c87ecfe98","scope":"read:user"}`
+
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		if r.Method != http.MethodPost {
+			t.Errorf("兜底后方法变成了 %s", r.Method)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	primary := newTransport()
+	u, _ := url.Parse(deadProxyURL(t))
+	primary.Proxy = http.ProxyURL(u)
+	direct := newTransport()
+	direct.Proxy = nil
+
+	client := &http.Client{Transport: &fallbackTransport{primary: primary, direct: direct}, Timeout: 10 * time.Second}
+	resp, err := client.Post(srv.URL, "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST 兜底失败: %v", err)
+	}
+	resp.Body.Close()
+	if gotBody != payload {
+		t.Fatalf("兜底重放的请求体不对:\n  got  %s\n  want %s", gotBody, payload)
 	}
 }

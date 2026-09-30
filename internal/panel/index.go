@@ -15,7 +15,9 @@
 package panel
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"io/fs"
 	"net/http"
 	"path"
@@ -67,10 +69,7 @@ func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	writeAsset(w, r, "text/html; charset=utf-8", data)
 }
 
 // asset 输出前端模块/样式（同源资源，供 CSP script-src/style-src 'self' 加载）。
@@ -94,8 +93,28 @@ func (p *Panel) asset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setSecurityHeaders(w)
+	writeAsset(w, r, ctype, data)
+}
+
+// writeAsset 输出内嵌静态资源，带**内容 ETag**。
+//
+// 为什么需要：面板前端是 go:embed 进二进制的，升级二进制后文件名不变
+// （ext-add.js 还是 ext-add.js）。只给 `Cache-Control: no-cache` 而没有校验器时，
+// 浏览器**没有依据判断内容变没变**，升级后可能继续跑旧 JS——表现是「新功能
+// 点了没反应」或「已修好的 bug 还在」，而且从服务端完全看不出问题。
+//
+// 有了 ETag：浏览器每次带 If-None-Match 回来，内容没变回 304（省流量），
+// 变了回 200 + 新内容。升级即时生效。
+func writeAsset(w http.ResponseWriter, r *http.Request, ctype string, data []byte) {
+	sum := sha256.Sum256(data)
+	etag := `"` + hex.EncodeToString(sum[:16]) + `"`
 	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("ETag", etag)
+	if match := r.Header.Get("If-None-Match"); match != "" && strings.Contains(match, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }

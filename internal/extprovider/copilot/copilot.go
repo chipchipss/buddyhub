@@ -19,8 +19,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -81,6 +83,10 @@ func SetHTTPClient(c *http.Client) {
 // 直连不通（实测国内多数网络 100% 超时，走本地代理 2-3s 稳定成功），但把整条网关
 // 的出口都绑到代理进程上太脆——代理一挂，腾讯/讯飞/智谱/阿里全部跟着不可用。
 // 只让 GitHub 的流量走代理，其它上游保持直连。
+//
+// 代理配了不等于代理**开着**：用户关掉代理软件后，所有请求都会死在
+// "proxyconnect ... actively refused" 上。所以配了代理的传输层外面再包一层
+// 直连兜底（见 fallbackTransport）——代理挂了就直连，别让整条通道瘫掉。
 func SetProxy(rawURL string) error {
 	tr := newTransport()
 	if strings.TrimSpace(rawURL) != "" {
@@ -92,9 +98,57 @@ func SetProxy(rawURL string) error {
 			return fmt.Errorf("代理地址缺少主机（%s）", rawURL)
 		}
 		tr.Proxy = http.ProxyURL(u)
+		httpClient = &http.Client{Timeout: 0, Transport: &fallbackTransport{
+			primary: tr,
+			direct:  newTransport(), // Proxy 保持 ProxyFromEnvironment：兜底也要尊重环境变量
+		}}
+		return nil
 	}
 	httpClient = &http.Client{Timeout: 0, Transport: tr}
 	return nil
+}
+
+// fallbackTransport 代理优先、直连兜底。
+//
+// 只在**代理自身连不上**时兜底（proxyconnect 失败）。代理连得上但上游返回错误、
+// 或直连被墙导致的超时，都不在这里兜——那些是真实的上游结果，重试只会更慢。
+type fallbackTransport struct {
+	primary *http.Transport
+	direct  *http.Transport
+}
+
+func (t *fallbackTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.primary.RoundTrip(req)
+	if err == nil || !isProxyConnError(err) {
+		return resp, err
+	}
+	// 请求体可能已被 primary 消费掉，用 GetBody 复位。
+	// 没有 body 的请求（GET、或空体 POST）本来就没有可复位的，直接重试；
+	// 有 body 却拿不到 GetBody 的才放弃——那种重试会发出一个空体请求。
+	retry := req.Clone(req.Context())
+	if req.Body != nil {
+		if req.GetBody == nil {
+			return nil, err
+		}
+		body, berr := req.GetBody()
+		if berr != nil {
+			return nil, err
+		}
+		retry.Body = body
+	}
+	return t.direct.RoundTrip(retry)
+}
+
+// isProxyConnError 判断错误是不是「代理进程连不上」。
+//
+// Go 在连不上代理时会把 OpError.Op 置为 "proxyconnect"，错误文本也以它开头；
+// 两者取其一即可命中（不同 Go 版本包装层次不完全一致）。
+func isProxyConnError(err error) bool {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "proxyconnect" {
+		return true
+	}
+	return strings.Contains(err.Error(), "proxyconnect")
 }
 
 // Credential 落进 extstore 的凭据形态。

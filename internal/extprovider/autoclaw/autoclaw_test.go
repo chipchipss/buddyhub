@@ -221,9 +221,9 @@ func TestSendCodeAndLoginShareDeviceID(t *testing.T) {
 	if cred.PhoneTail != "138****0000" {
 		t.Fatalf("手机号掩码错误: %q", cred.PhoneTail)
 	}
-	// 登录路径结尾的斜杠是上游要求的
-	if !strings.HasSuffix(rec.reqs[1].URL.Path, "/agent-login/") {
-		t.Fatalf("登录路径结尾缺斜杠: %s", rec.reqs[1].URL.Path)
+	// 登录路径不带结尾斜杠（带了会被 307 重定向一次，见 loginPath 注释）
+	if strings.HasSuffix(rec.reqs[1].URL.Path, "/") {
+		t.Fatalf("登录路径带结尾斜杠（上游会 307）: %s", rec.reqs[1].URL.Path)
 	}
 }
 
@@ -403,4 +403,72 @@ func parseInt64(s string) (int64, error) {
 	var n int64
 	err := json.Unmarshal([]byte(s), &n)
 	return n, err
+}
+
+// 用户从各处复制来的号码常带空格/横线/+86 —— 原样透传上游会判「格式不正确」。
+func TestNormalizePhone(t *testing.T) {
+	ok := map[string]string{
+		"13800000000":         "13800000000",
+		"+8613800000000":      "13800000000",
+		"8613800000000":       "13800000000",
+		"138 0000 0000":       "13800000000",
+		"138-0000-0000":       "13800000000",
+		" +86 138 0000 0000 ": "13800000000",
+	}
+	for in, want := range ok {
+		got, err := NormalizePhone(in)
+		if err != nil {
+			t.Errorf("%q 应通过，却报错: %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("%q → %q，期望 %q", in, got, want)
+		}
+	}
+	bad := []string{"", "1380000000", "138000000000", "23800000000", "1380000000a", "+1 415 555 0100"}
+	for _, in := range bad {
+		if _, err := NormalizePhone(in); err == nil {
+			t.Errorf("%q 应被拒绝", in)
+		}
+	}
+}
+
+// 发码与登录两步都必须用规范化后的号码（上游两步校验一致）。
+func TestSendCodeNormalizesPhone(t *testing.T) {
+	var sent string
+	withMock(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		sent = body["phone"]
+		writeJSON(w, map[string]any{"code": 0, "data": map[string]any{"result": true}})
+	})
+	if _, err := SendCode(context.Background(), RegionCN, "+86 138-0000-0000"); err != nil {
+		t.Fatalf("SendCode: %v", err)
+	}
+	if sent != "13800000000" {
+		t.Fatalf("上游收到的是 %q，期望规范化后的 13800000000", sent)
+	}
+}
+
+// 上游对「验证码不对」「请求体缺字段」回的都是笼统的 400001，
+// 原文「请求数据有问题」没法行动——网关要把它翻译成用户能照做的话。
+// 但仍然要能回对码本身，否则排障时无从下手。
+func TestLoginErrorIsActionable(t *testing.T) {
+	withMock(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"code": 400001, "msg": "请求数据有问题,请检查后重试"})
+	})
+	_, err := LoginWithCode(context.Background(), RegionCN, "13800000000", "123456", "dev")
+	if err == nil {
+		t.Fatal("非 0 业务码应报错")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "400001") {
+		t.Errorf("错误里要留着上游码便于排障: %q", msg)
+	}
+	if strings.Contains(msg, "请求数据有问题,请检查后重试") {
+		t.Errorf("别把上游原样那句没法行动的话抛给用户: %q", msg)
+	}
+	if !strings.Contains(msg, "验证码") {
+		t.Errorf("应指向最可能的原因（验证码），得到: %q", msg)
+	}
 }

@@ -3,6 +3,7 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -62,10 +63,22 @@ func (p *Panel) zaiOAuthStart(w http.ResponseWriter, r *http.Request) {
 	zaiOAuthStore[flow.FlowID] = &zaiOAuthFlow{flow: flow, created: time.Now(), name: strings.TrimSpace(req.Name)}
 	zaiOAuthMu.Unlock()
 
+	// 这条流程只在内存里：**进程重启即失效**（面板重启后前端手里的 flow_id
+	// 就接不上了）。打一行日志，至少事后能看出「发起过但没走完」。
+	log.Printf("panel: Z.AI 授权流程已发起 flow=%s（进程重启会失效）", shortID(flow.FlowID))
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"flow_id":       flow.FlowID,
 		"authorize_url": flow.AuthorizeURL,
 	})
+}
+
+// shortID 日志里只打前 8 位（够定位，不刷屏）。
+func shortID(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
 }
 
 // zaiOAuthPoll GET /panel/api/zai/oauth/poll?flow_id=... —— 轮询授权状态。
@@ -85,6 +98,9 @@ func (p *Panel) zaiOAuthPoll(w http.ResponseWriter, r *http.Request) {
 	f := zaiOAuthStore[flowID]
 	zaiOAuthMu.Unlock()
 	if f == nil {
+		// 最常见的原因就是**进程重启过**（流程只在内存里）。记一行，别让它
+		// 看起来像「用户自己没操作」。
+		log.Printf("panel: Z.AI 授权流程查不到 flow=%s（进程重启或已过期）", shortID(flowID))
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "授权会话不存在或已过期，请重新发起"})
 		return
 	}
@@ -130,6 +146,8 @@ func (p *Panel) zaiOAuthPoll(w http.ResponseWriter, r *http.Request) {
 	zaiOAuthMu.Lock()
 	delete(zaiOAuthStore, flowID)
 	zaiOAuthMu.Unlock()
+
+	log.Printf("panel: Z.AI 账号已通过 OAuth 入池 %s（回退 Key %v）", name, apiKey != "")
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"done":    true,

@@ -403,8 +403,11 @@ type Model struct {
 }
 
 // ListModels 拉模型目录。
+//
+// ⚠️ 是 **POST** 不是 GET（实测 GET 返回 405 Method Not Allowed）。
 func ListModels(ctx context.Context, cred *Credential) ([]Model, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, GatewayBase+ModelConfigPath, nil)
+	body, _ := json.Marshal(map[string]any{})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, GatewayBase+ModelConfigPath, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

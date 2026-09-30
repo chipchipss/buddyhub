@@ -16,6 +16,61 @@ let oauthTimer = null;
 
 function stopOAuthPoll() { if (oauthTimer) { clearInterval(oauthTimer); oauthTimer = null; } }
 
+/* 进行中的 OAuth 流程 id 落 localStorage。
+   用户在智谱页面登录期间如果刷新/切走了面板，模块状态会丢——服务端那条流程
+   还在（15 分钟 TTL），但前端不知道 flow_id 就再也轮询不到了，表现是
+   「登录完成了却一直没入池」。存下来，回来时自动续上。 */
+const LS_OAUTH = 'buddyhub.zaiOAuth';
+
+function saveOAuthFlow(flowId) {
+  try { localStorage.setItem(LS_OAUTH, JSON.stringify({ flowId, at: Date.now() })); } catch { /* 私密模式 */ }
+}
+function loadOAuthFlow() {
+  let raw;
+  try { raw = localStorage.getItem(LS_OAUTH); } catch { return ''; }
+  if (!raw) return '';
+  try {
+    const v = JSON.parse(raw);
+    if (!v || !v.flowId || Date.now() - v.at > 15 * 60 * 1000) { clearOAuthFlow(); return ''; }
+    return v.flowId;
+  } catch { clearOAuthFlow(); return ''; }
+}
+function clearOAuthFlow() {
+  try { localStorage.removeItem(LS_OAUTH); } catch { /* 私密模式 */ }
+}
+
+/** resumeOAuth 页面加载后恢复未完成的 OAuth 轮询（有则续上）。 */
+export function resumeOAuth() {
+  if (oauthTimer) return;
+  const flowId = loadOAuthFlow();
+  if (!flowId) return;
+  oauth.set({ flowId, status: '继续等待智谱页面完成登录…' });
+  pollOAuth(flowId);
+}
+
+// pollOAuth 轮询一条流程直到完成/失败。
+function pollOAuth(flowId) {
+  stopOAuthPoll();
+  oauthTimer = setInterval(async () => {
+    const cur = oauth.peek();
+    if (!cur || !cur.flowId) return;
+    try {
+      const p = await api('zai/oauth/poll?flow_id=' + encodeURIComponent(flowId));
+      if (!p.done) return;
+      stopOAuthPoll();
+      clearOAuthFlow();
+      oauth.set(null);
+      addOpen.set(false);
+      toast(p.message || '账号已入池');
+      await loadZai();
+    } catch (e) {
+      stopOAuthPoll();
+      clearOAuthFlow();
+      oauth.set({ status: '授权失败：' + e.message });
+    }
+  }, 3000);
+}
+
 /** 发起 OAuth 免密登录：拿授权链接 → 轮询 → 完成后自动兑换回退 Key 并入池。 */
 async function startOAuth() {
   stopOAuthPoll();
@@ -25,22 +80,8 @@ async function startOAuth() {
       method: 'POST', body: JSON.stringify({ name: addName.peek().trim() }),
     });
     oauth.set({ url: r.authorize_url, flowId: r.flow_id, status: '在浏览器完成登录，此处自动检测' });
-    oauthTimer = setInterval(async () => {
-      const cur = oauth.peek();
-      if (!cur || !cur.flowId) return;
-      try {
-        const p = await api('zai/oauth/poll?flow_id=' + encodeURIComponent(cur.flowId));
-        if (!p.done) return;
-        stopOAuthPoll();
-        oauth.set(null);
-        addOpen.set(false);
-        toast(p.message || '账号已入池');
-        await loadZai();
-      } catch (e) {
-        stopOAuthPoll();
-        oauth.set({ status: '授权失败：' + e.message });
-      }
-    }, 3000);
+    saveOAuthFlow(r.flow_id);
+    pollOAuth(r.flow_id);
   } catch (e) {
     oauth.set({ status: '发起失败：' + e.message });
   }
@@ -306,6 +347,8 @@ export function zaiAddForm(onAdded) {
 }
 
 export function zaiSegment() {
+  // 页面重载后把未完成的 OAuth 轮询续上（有则续，无则什么都不做）
+  resumeOAuth();
   // 读信号而非 peek：渲染期读到的信号变化才会触发重渲染（loadZai 回来后本段自动刷新）
   const d = zai();
   const errV = zaiErr();

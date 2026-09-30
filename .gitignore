@@ -53,3 +53,7 @@ ext-accounts.json
 zai-accounts.json
 state.json
 usage.json
+
+# 运行时日志（若误在仓库根起服务会产生）
+/server.log
+/server.err.log

@@ -35,6 +35,12 @@ let loginHost = null;   // 当前面板实例的展示位（重建时被新实�
 let loginStatus = null;
 let lastLoginMsg = null; // { provider, text } 终态提示，面板重建后仍保留
 
+/* 短信登录的 device_id：必须与发码那一步是同一个（上游把设备和登录会话绑定），
+   而两步之间用户要等短信、往往隔了几十秒——期间面板会被视图的 5 秒 tick 重建，
+   挂在 DOM 闭包里的 device_id 就没了，点「登录并入池」只会得到「请先点发送验证码」。
+   所以按平台存在模块级，面板重建后仍能取回。 */
+const smsDevice = new Map(); // provider → device_id
+
 /** stopExtAddTimers() —— 放弃进行中的登录（抽屉关闭时调用）。
  *  注意不要在面板重建时调用，那会把用户正在做的授权掐死。 */
 export function stopExtAddTimers() {
@@ -46,6 +52,33 @@ export function stopExtAddTimers() {
 // clearLoginTimer 只停定时器，不动登录状态（被新会话顶掉时用）。
 function clearLoginTimer() {
   if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
+}
+
+/* ── 未完成登录的持久化 ─────────────────────────────────────────
+   用户点「开始授权」后要去另一个标签页（有时是同一个）完成授权，回来时
+   页面可能已经重新加载——模块级状态一并丢失，轮询停摆，界面就**一直停在
+   「等待授权」**。把会话存进 localStorage，回来时自动续上。
+
+   只存到会话自身过期为止（服务端 TTL 10–15 分钟），过期即丢。 */
+const LS_LOGIN = 'buddyhub.login';
+
+function saveLogin(provider, d) {
+  try { localStorage.setItem(LS_LOGIN, JSON.stringify({ provider, d, at: Date.now() })); } catch { /* 私密模式 */ }
+}
+
+function loadSavedLogin() {
+  let raw;
+  try { raw = localStorage.getItem(LS_LOGIN); } catch { return null; }
+  if (!raw) return null;
+  let v;
+  try { v = JSON.parse(raw); } catch { clearLogin(); return null; }
+  const ttl = ((v && v.d && v.d.expires_in) || 600) * 1000;
+  if (!v || !v.provider || !v.d || Date.now() - v.at > ttl) { clearLogin(); return null; }
+  return v;
+}
+
+function clearLogin() {
+  try { localStorage.removeItem(LS_LOGIN); } catch { /* 私密模式 */ }
 }
 
 // 本抽屉里用**通用表单**处理的平台（有专属面板的三个——腾讯 / Loomy / Z.AI
@@ -223,6 +256,18 @@ export function extAddPanel(onAdded, opts = {}) {
     // 把本实例登记为「进行中登录的展示位」：面板被 tick 重建后，新实例接手继续显示。
     loginHost = host;
     loginStatus = statusEl;
+
+    // 恢复未完成的登录：用户点「开始授权」后往往要切到另一个标签页（甚至
+    // 同一个标签页）去完成授权，回来时页面可能已经重新加载——模块级状态
+    // 一并没了，轮询也就停了，表现就是**一直停在「等待授权」**。
+    // 会话存在 localStorage 里，回来时自动续上。
+    if (!loginTimer) {
+      const saved = loadSavedLogin();
+      if (saved && saved.provider === provider) {
+        activeLogin = { provider, d: saved.d, status: '继续等待授权…' };
+        if (spec.kind !== 'paste') startPolling(spec, saved.d);
+      }
+    }
     paintActiveLogin(spec);
 
     startBtn.onclick = async () => {
@@ -231,6 +276,7 @@ export function extAddPanel(onAdded, opts = {}) {
       try {
         const d = await api(`ext/${provider}/login/start`, { method: 'POST' });
         activeLogin = { provider, d, status: '等待完成授权…' };
+        saveLogin(provider, d);
         paintActiveLogin(spec);
         // paste 型（微信回调落在上游域名上，网关截不到）不轮询，
         // 等用户把 code 贴回来再提交——见 renderChallenge 的 paste 分支。
@@ -250,13 +296,13 @@ export function extAddPanel(onAdded, opts = {}) {
   function startPolling(spec, d) {
     const every = Math.max(2, d.interval || 2) * 1000;
     const deadline = Date.now() + (d.expires_in || 600) * 1000;
-    let errStreak = 0;
 
     loginTimer = setInterval(async () => {
       // 已被别的登录顶掉 → 只停自己的定时器，别去动 activeLogin（那是新会话的）
       if (!activeLogin || activeLogin.d.session !== d.session) { clearLoginTimer(); return; }
       if (Date.now() > deadline) {
         stopExtAddTimers();
+        clearLogin();
         paintActiveLogin(spec);
         setLoginStatus('登录已超时，请重新发起。');
         return;
@@ -267,21 +313,22 @@ export function extAddPanel(onAdded, opts = {}) {
           method: 'POST', body: JSON.stringify({ session: d.session }),
         });
       } catch (e) {
-        // 单次网络抖动不该判死整个登录；连续失败才放弃并把原因留给用户看。
-        errStreak++;
-        if (errStreak < 3) { setLoginStatus(`轮询异常（第 ${errStreak} 次）：${e.message}`); return; }
-        const msg = `轮询连续失败，已停止：${e.message}`;
+        // 后端只在**终态**时返回非 200（设备码过期 / 授权被拒 / 会话失效）——
+        // 上游的瞬时抖动后端自己会吞掉并回 200 + pending。所以这里直接停并
+        // 把原因显示出来，而不是当成网络抖动重试三次才告诉用户。
         stopExtAddTimers();
-        paintActiveLogin(spec);   // 会先把状态重置成默认提示
-        setLoginStatus(msg);      // 再把原因盖回去
+        clearLogin();
+        paintActiveLogin(spec);
+        setLoginStatus(e.message);
+        toast(e.message, 'fail');
         return;
       }
-      errStreak = 0;
       if (!r.done) {
         if (r.status && r.status !== 'pending') setLoginStatus(STATUS_WORDS[r.status] || r.status);
         return;
       }
       stopExtAddTimers();
+      clearLogin();
       paintActiveLogin(spec);
       setLoginStatus(`已入池：${(r.account || {}).label || (r.account || {}).id || ''}`);
       toast(`${specFor(provider).name} 账号已入池`);
@@ -367,6 +414,7 @@ export function extAddPanel(onAdded, opts = {}) {
           });
           if (!r.done) { toast('还没完成，请确认已在微信里确认授权', 'fail'); return; }
           stopExtAddTimers();
+          clearLogin();
           host.replaceChildren();
           setLoginStatus(`已入池：${(r.account || {}).label || (r.account || {}).id || ''}`);
           toast(`${spec.name} 账号已入池`);
@@ -376,6 +424,7 @@ export function extAddPanel(onAdded, opts = {}) {
       };
       const parts = [];
       if (svg) parts.push(h('div', { class: 'qr', style: { alignSelf: 'flex-start' } }, svg));
+      saveLogin(provider, d); // 页面重载后还能把二维码与回填框恢复出来
       host.replaceChildren(
         ...parts,
         h('div', { class: 'row wrap', style: { gap: '8px' } },
@@ -388,9 +437,19 @@ export function extAddPanel(onAdded, opts = {}) {
       return;
     }
     if (spec.kind === 'sms') {
+      // 恢复上次的填写：面板被 tick 重建后（等短信的几十秒里必然发生），
+      // 号码/验证码/device_id 都要还在，否则用户得从头再来一遍。
+      const saved = smsDevice.get(provider) || {};
       const phone = h('input', { class: 'input', placeholder: '手机号（国内版）', style: { flex: '1', minWidth: '160px' } });
       const code = h('input', { class: 'input', placeholder: '6 位短信验证码', style: { flex: '1', minWidth: '120px' } });
-      let deviceId = '';
+      phone.value = saved.phone || '';
+      code.value = saved.code || '';
+      let deviceId = saved.deviceId || '';
+
+      const keep = () => smsDevice.set(provider, { phone: phone.value.trim(), code: code.value.trim(), deviceId });
+      phone.addEventListener('input', keep);
+      code.addEventListener('input', keep);
+
       const sendBtn = h('button', { class: 'btn' }, '发送验证码');
       sendBtn.onclick = async () => {
         const p = phone.value.trim();
@@ -399,6 +458,7 @@ export function extAddPanel(onAdded, opts = {}) {
         try {
           const r = await api('ext/autoclaw/send_code', { method: 'POST', body: JSON.stringify({ phone: p, region: 'cn' }) });
           deviceId = r.device_id || '';
+          keep();
           toast('验证码已发送');
         } catch (e) { toast(e.message, 'fail'); }
         finally { sendBtn.disabled = false; }
@@ -414,6 +474,7 @@ export function extAddPanel(onAdded, opts = {}) {
             method: 'POST',
             body: JSON.stringify({ phone: p, code: code.value.trim(), device_id: deviceId, region: 'cn' }),
           });
+          smsDevice.delete(provider); // 登录成功，这一轮的状态作废
           toast('已入池：' + ((r.account || {}).label || ''));
           await onAdded?.();
         } catch (e) { toast(e.message, 'fail'); }
@@ -422,8 +483,10 @@ export function extAddPanel(onAdded, opts = {}) {
       host.replaceChildren(
         h('div', { class: 'row wrap', style: { gap: '8px' } }, phone, sendBtn),
         h('div', { class: 'row wrap', style: { gap: '8px' } }, code, loginBtn),
-        h('div', { class: 'muted', style: { fontSize: '11.5px' },
-          text: '国际版上游已关闭短信入口，需从桌面端导入或手工填写凭据。' }),
+        deviceId
+          ? h('div', { class: 'muted', style: { fontSize: '11.5px' }, text: '验证码已发送，填写后点「登录并入池」。' })
+          : h('div', { class: 'muted', style: { fontSize: '11.5px' },
+            text: '国际版上游已关闭短信入口，需从桌面端导入或手工填写凭据。' }),
       );
       return;
     }

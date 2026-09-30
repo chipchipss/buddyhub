@@ -270,6 +270,8 @@ ACTIVE ──额度用完(402/quota)──▶ EXHAUSTED（定期再探，恢复�
 
 留空则跟随环境变量 `HTTPS_PROXY`，再不行直连。地址必须带 scheme（`http://`），写裸 `127.0.0.1:2080` 会被拒绝并提示——否则代理静默不生效，用户以为配了却还是连不上。
 
+**配了代理但代理没开着也不影响使用**：传输层外层包了直连兜底，只有在「代理进程本身连不上」（`proxyconnect ... actively refused`）时才退回直连一次，重放的请求体与方法保持不变。代理连得上但上游回错误时不兜底——那是真实的上游结果。
+
 想先验证连通性，跑一次真实冒烟（只申请设备码，不授权）：
 
 ```bash
@@ -374,10 +376,13 @@ AutoClaw（智谱的桌面 Agent）接进同一个 OpenAI 兼容接口——模�
 
 ```
 POST {userapi}/userapi/v1/agent-send-code  {"phone","source_id":"autoclaw","device_id"}
-POST {userapi}/userapi/v1/agent-login/     {"phone","code","platform":"web","source_id","device_id"}
+POST {userapi}/userapi/v1/agent-login       {"phone","code","platform":"web","source_id","device_id"}
 ```
 
 `device_id` 由网关生成并在两步之间透传——上游把设备与登录会话绑定，两步用不同的值会登录失败。
+
+> 上游对「验证码不对 / 已过期 / 请求体缺字段」统一回 `code 400001 请求数据有问题`（实测改遍请求体形状都一样，只有路径写错才会回 `404 未找到资源`）。网关把它翻译成「验证码不正确或已过期（上游 code 400001…）」并留一行日志（号码掩码，不打验证码）。
+> 登录路径**不要**带结尾斜杠：`/agent-login/` 会被上游 307 到 `/agent-login`，多绕一圈。
 
 > 国际版**上游已关闭短信入口**（主登录是 Zai/Google OAuth，且被阿里云风控验证码挡着）。国际版账号需从桌面端导入或手工填写凭据。
 

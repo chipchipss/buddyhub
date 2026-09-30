@@ -33,18 +33,20 @@ func (p *Panel) extAutoClawSendCode(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid request json")
 		return
 	}
-	phone := strings.TrimSpace(body.Phone)
-	if phone == "" {
-		writeErr(w, http.StatusBadRequest, "请填写手机号")
+	// 先规范化再掩码：用户可能输入「+86 177-3167-0097」，
+	// 直接掩码原始串会显示成「+86****0097」（看着像没剥干净）。
+	phone, err := autoclaw.NormalizePhone(body.Phone)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	region := autoclaw.ParseRegion(body.Region)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	deviceID, err := autoclaw.SendCode(ctx, region, phone)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	deviceID, serr := autoclaw.SendCode(ctx, region, phone)
+	if serr != nil {
+		writeErr(w, http.StatusBadRequest, serr.Error())
 		return
 	}
 	log.Printf("panel: AutoClaw 验证码已发送（%s · %s）", autoclaw.MaskPhone(phone), region.Label())
@@ -79,6 +81,11 @@ func (p *Panel) extAutoClawLogin(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	cred, err := autoclaw.LoginWithCode(ctx, region, phone, body.Code, body.DeviceID)
 	if err != nil {
+		// 登录失败**必须留痕**：上游对「验证码不对」和「请求体不对」都回笼统的
+		// 400001，只看面板提示分不清是用户输错了还是我们发错了。号码掩码、验证码
+		// 不打（那是用户的敏感信息）。
+		log.Printf("panel: AutoClaw 短信登录失败（%s · %s · device=%s）：%v",
+			autoclaw.MaskPhone(phone), region.Label(), shortID(body.DeviceID), err)
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

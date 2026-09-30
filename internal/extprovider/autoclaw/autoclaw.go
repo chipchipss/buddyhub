@@ -19,7 +19,7 @@
 // 国内版走**手机短信**（全自动，与 Loomy 同形）：
 //
 //	POST {userapi}/userapi/v1/agent-send-code  {"phone","source_id":"autoclaw","device_id"}
-//	POST {userapi}/userapi/v1/agent-login/     {"phone","code","platform":"web","source_id","device_id"}
+//	POST {userapi}/userapi/v1/agent-login       {"phone","code","platform":"web","source_id","device_id"}
 //
 // 国际版**没有短信**（上游只在国际版关了短信入口），主登录是 Zai/Google OAuth，
 // 且被阿里云风控验证码挡着；本包不实现那条链路，国际版账号需从桌面端导入或
@@ -106,8 +106,10 @@ const (
 	SourceID = "autoclaw"
 
 	sendCodePath = "/userapi/v1/agent-send-code"
-	loginPath    = "/userapi/v1/agent-login/"
-	refreshPath  = "/userapi/v1/refresh"
+	// loginPath **不要**带结尾斜杠：`/agent-login/` 会被上游 307 到
+	// `/agent-login`（实测多绕一圈才拿到 400001），直接写最终路径。
+	loginPath   = "/userapi/v1/agent-login"
+	refreshPath = "/userapi/v1/refresh"
 	// refreshFallbackPath 签名校验失败（code 400002）时的降级路径。
 	refreshFallbackPath = "/userapi/v1/agent-refresh"
 )
@@ -251,6 +253,10 @@ func SendCode(ctx context.Context, region Region, phone string) (string, error) 
 	if !region.SupportsSMS() {
 		return "", fmt.Errorf("国际版不支持短信登录（上游已关闭该入口），请从桌面端导入或手工填写凭据")
 	}
+	phone, err := NormalizePhone(phone)
+	if err != nil {
+		return "", err
+	}
 	deviceID := newDeviceID()
 	body, _ := json.Marshal(map[string]string{
 		"phone": phone, "source_id": SourceID, "device_id": deviceID,
@@ -282,6 +288,10 @@ func SendCode(ctx context.Context, region Region, phone string) (string, error) 
 func LoginWithCode(ctx context.Context, region Region, phone, code, deviceID string) (*Credential, error) {
 	if !region.SupportsSMS() {
 		return nil, fmt.Errorf("国际版不支持短信登录")
+	}
+	phone, err := NormalizePhone(phone)
+	if err != nil {
+		return nil, err
 	}
 	code = strings.TrimSpace(code)
 	if len(code) != 6 {
@@ -330,6 +340,36 @@ func LoginWithCode(ctx context.Context, region Region, phone, code, deviceID str
 	}, nil
 }
 
+// NormalizePhone 规范化中国大陆手机号。
+//
+// 用户从各种地方复制来的号码常带空格、横线、`+86` / `86` 前缀——**原样透传
+// 上游会判「手机号格式不正确」**（发码可能容忍，登录那步就拒）。这里统一剥干净
+// 并校验 11 位（1 开头、第二位 2-9、全数字），不合规直接本地拦下、不打上游。
+func NormalizePhone(raw string) (string, error) {
+	var b strings.Builder
+	for _, ch := range raw {
+		// 空白与横线一律剥掉；ch < 0x20 覆盖 tab/换行/回车等控制字符
+		if ch == ' ' || ch == '-' || ch < 0x20 {
+			continue
+		}
+		b.WriteRune(ch)
+	}
+	digits := b.String()
+	digits = strings.TrimPrefix(digits, "+86")
+	if rest := strings.TrimPrefix(digits, "86"); rest != digits && len(rest) == 11 {
+		digits = rest
+	}
+	if len(digits) != 11 || digits[0] != '1' || digits[1] < '2' || digits[1] > '9' {
+		return "", fmt.Errorf("请填写 11 位中国大陆手机号")
+	}
+	for _, ch := range digits {
+		if ch < '0' || ch > '9' {
+			return "", fmt.Errorf("请填写 11 位中国大陆手机号")
+		}
+	}
+	return digits, nil
+}
+
 // MaskPhone 手机号掩码（展示用）。
 func MaskPhone(phone string) string {
 	phone = strings.TrimSpace(phone)
@@ -347,11 +387,15 @@ func describeLoginError(code int, upstreamMsg string) string {
 		1003: "验证码发送过于频繁，请稍后再试",
 		1004: "该手机号今日验证码次数已达上限",
 		429:  "请求过于频繁，请稍后再试",
+		// 400001 上游对「验证码不对」「验证码过期」「请求体缺字段」回的都是它，
+		// 实测改遍请求体形状都还是 400001——所以按最可能的原因给用户指路，
+		// 而不是把「请求数据有问题」原样抛出去（那句话没法行动）。
+		400001: "验证码不正确或已过期（上游 code 400001，重新发送验证码后再试）",
 	}[code]
 	if base == "" {
 		base = fmt.Sprintf("登录失败（上游 code %d）", code)
 	}
-	if upstreamMsg != "" {
+	if upstreamMsg != "" && code != 400001 {
 		base += "：" + upstreamMsg
 	}
 	return base

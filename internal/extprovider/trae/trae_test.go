@@ -702,3 +702,65 @@ func TestSetProxy(t *testing.T) {
 		t.Fatal("代理未生效")
 	}
 }
+
+/* ── 换证域：网页域 → API 域 ───────────────────────────────────── */
+
+// 实测踩的坑：GetLoginGuidance 回的 LoginHost 是 www.trae.cn（网页域），
+// 直接拿它换证会 POST 到网页，拿回一坨 HTML（字节的 JS 挑战页），
+// 表现是「换证回执解析失败：invalid character '<'」。换证必须走 API 域。
+func TestExchangeHostIsAPIHostNotWebHost(t *testing.T) {
+	cases := map[string]string{
+		"www.trae.cn":         "https://api.trae.cn",
+		"https://www.trae.cn": "https://api.trae.cn",
+		"api.trae.cn":         "https://api.trae.cn",
+		"www.trae.ai":         "https://api.trae.ai",
+		"":                    DefaultLoginHost,
+		"trae.cn":             DefaultLoginHost, // 既非 www 也非 api：不猜
+		"://bad":              DefaultLoginHost,
+	}
+	for in, want := range cases {
+		if got := apiHostFor(in); got != want {
+			t.Errorf("apiHostFor(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+}
+
+// 换证请求实际打到的 host 必须是 API 域，不能是回调带回来的网页域。
+func TestCompletePostsToAPIHost(t *testing.T) {
+	var gotHost string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"at","refresh_token":"rt"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	// 自建传输层：先记下原始 host，再改写到 mock
+	old := httpClient
+	t.Cleanup(func() { httpClient = old })
+	SetHTTPClient(&http.Client{Transport: hostCapture{target: srv, host: &gotHost}})
+
+	ctx := &LoginContext{LoginHost: "www.trae.cn", DeviceID: "d", MachineID: "m"}
+	cred, err := Complete(context.Background(), ctx, &Callback{AuthCode: "code", LoginHost: "www.trae.cn"})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if cred.AccessToken != "at" {
+		t.Fatalf("令牌未解析: %+v", cred)
+	}
+	if gotHost != "api.trae.cn" {
+		t.Fatalf("换证打到了 %q，期望 api.trae.cn（网页域会返回 HTML）", gotHost)
+	}
+}
+
+// hostCapture 记录请求原始 host 后改写到 httptest 服务器。
+type hostCapture struct {
+	target *httptest.Server
+	host   *string
+}
+
+func (h hostCapture) RoundTrip(req *http.Request) (*http.Response, error) {
+	*h.host = req.URL.Host
+	req.URL.Scheme = "http"
+	req.URL.Host = strings.TrimPrefix(h.target.URL, "http://")
+	return http.DefaultTransport.RoundTrip(req)
+}
