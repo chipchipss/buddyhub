@@ -78,6 +78,8 @@ var platforms = []Platform{
 		Note: "浏览器授权（本机回调）"},
 	{ID: "accio", Name: "Accio（阿里）", Group: GroupGateway, Prefix: "accio:", Login: LoginCallback,
 		Note: "浏览器授权（本机回调）"},
+	{ID: "traework", Name: "TraeWork（字节）", Group: GroupGateway, Prefix: "traework:", Login: LoginManual,
+		Checkin: true, Note: "粘贴客户端凭据（含每日签到）"},
 
 	// ── 积分 / 签到平台（无对话 API）──
 	{ID: "raccoon", Name: "小浣熊（商汤）", Group: GroupPoints, Login: LoginQR,

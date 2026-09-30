@@ -228,6 +228,7 @@ const PLATFORMS = [
   { id: 'qclaw', name: 'QClaw（腾讯）', group: 'gateway', prefix: 'qclaw:', login: 'paste' },
   { id: 'trae', name: 'Trae（字节）', group: 'gateway', prefix: 'trae:', login: 'callback' },
   { id: 'accio', name: 'Accio（阿里）', group: 'gateway', prefix: 'accio:', login: 'callback' },
+  { id: 'traework', name: 'TraeWork（字节）', group: 'gateway', prefix: 'traework:', login: 'manual', checkin: true },
 ];
 
 // fetch 桩必须**先**装好再拉注册表，否则会挂在前面那个永不 resolve 的空桩上
@@ -250,6 +251,7 @@ const WANT = {
   raccoon: { fields: 2, login: '微信扫码登录' },
   qoder: { fields: 4, login: '浏览器授权登录' },
   codearts: { fields: 3, login: null },
+  traework: { fields: 3, login: null },
   copilot: { fields: 0, login: '开始授权' },
   cline: { fields: 0, login: '开始授权' },
   // 短信登录没有「发起」按钮，直接出表单（发码 → 校验两段同步调用），

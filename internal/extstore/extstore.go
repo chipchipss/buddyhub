@@ -26,6 +26,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
 	"github.com/chipchipss/buddyhub/internal/extprovider/raccoon"
 	"github.com/chipchipss/buddyhub/internal/extprovider/trae"
+	"github.com/chipchipss/buddyhub/internal/extprovider/traework"
 )
 
 // Provider 平台标识。
@@ -49,6 +50,8 @@ const (
 	PTrae = "trae"
 	// PAccio Accio（阿里；本机回调授权）。
 	PAccio = "accio"
+	// PTraeWork TraeWork（字节 TRAE SOLO CN；粘贴客户端凭据入池）。
+	PTraeWork = "traework"
 )
 
 // ExtAccount 一个外部平台账号。
@@ -328,6 +331,15 @@ func (m *Manager) CheckinOne(ctx context.Context, a *ExtAccount) *CheckinResult 
 		res.Kind, res.Message = "inactive", "Trae 无需签到（网关直连通道）"
 	case PAccio:
 		res.Kind, res.Message = "inactive", "Accio 无需签到（网关直连通道）"
+	case PTraeWork:
+		// TraeWork 有每日签到积分（UG 域）。
+		var cred traework.Credential
+		if err := json.Unmarshal(a.Cred, &cred); err != nil {
+			res.Kind, res.Message = "failed", "凭据解析失败"
+			return res
+		}
+		r := traework.CheckinDaily(ctx, &cred)
+		res.Kind, res.Credit, res.Message = r.Kind, r.Credit, r.Message
 	default:
 		res.Kind, res.Message = "failed", "未知平台: "+a.Provider
 	}
@@ -399,6 +411,19 @@ func (m *Manager) ViewOne(ctx context.Context, a *ExtAccount) *ExtAccountView {
 			} else {
 				v.Note = err.Error()
 			}
+		}
+	case PTraeWork:
+		// TraeWork 视图：能拉到模型目录即视为可用。
+		var cred traework.Credential
+		if json.Unmarshal(a.Cred, &cred) != nil {
+			v.Note = "凭据解析失败"
+			return v
+		}
+		if _, err := traework.ListModels(ctx, &cred); err == nil {
+			v.BalanceOK = true
+			v.Note = "TraeWork"
+		} else {
+			v.Note = err.Error()
 		}
 	case PAccio:
 		// Accio 视图：能查到额度即视为可用。

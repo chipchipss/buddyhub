@@ -52,6 +52,14 @@ function clearLoginTimer() {
 // ——不在这里，它们各有自己的分段）。
 // 只列字段与提示：展示名、入池方式、有无签到都由后端注册表下发。
 const FORMS = {
+  traework: {
+    fields: [
+      { k: 'access_token', label: 'Access Token', required: true },
+      { k: 'refresh_token', label: 'Refresh Token' },
+      { k: 'device_id', label: 'Device ID' },
+    ],
+    tip: '从 TraeWork 客户端 storage.json 的「iCubeAuthInfo://icube.cloudide」条目里取；access_token 必填。',
+  },
   lobsterai: {
     fields: [
       { k: 'access_token', label: 'Access Token', required: true },

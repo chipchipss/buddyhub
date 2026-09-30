@@ -40,6 +40,7 @@ func PlatformOf(bare string) string {
 		{qclawModelPrefix, "qclaw"},
 		{traeModelPrefix, "trae"},
 		{accioModelPrefix, "accio"},
+		{traeworkModelPrefix, "traework"},
 		{codexModelPrefix, "codex"},
 		{freeModelPrefix, "free"},
 		{loomyModelPrefix, "loomy"},

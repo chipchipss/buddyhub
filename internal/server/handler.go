@@ -141,6 +141,7 @@ type Handler struct {
 	lastQClawErr    string
 	lastTraeErr     string
 	lastAccioErr    string
+	lastTraeWorkErr string
 
 	// clineFlights / autoclawFlights 续期单飞表。
 	// 两家的 refresh_token 都是一次性轮换语义：并发续期会互相作废并把人踢下线，
@@ -626,6 +627,22 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		out = append(out, entry)
 	}
+	// TraeWork 模型名单（traework: 前缀）：有账号时实时拉（10 分钟缓存）。
+	for _, m := range h.traeworkCatalog() {
+		if m.ID == "" {
+			continue
+		}
+		entry := map[string]any{
+			"id":       traeworkModelPrefix + m.ID,
+			"object":   "model",
+			"created":  1753600000,
+			"owned_by": "traework",
+		}
+		if m.Name != "" && m.Name != m.ID {
+			entry["description"] = m.Name
+		}
+		out = append(out, entry)
+	}
 	// Loomy 模型名单（loomy: 前缀）：有可用凭据时实时拉上游目录透出
 	// （原样无别名；上游对未知模型静默回落 deepseek，故客户端应读响应 model 字段）。
 	if mods := h.loomyCatalog(); len(mods) > 0 {
@@ -969,6 +986,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			detail += "；最近失败原因: " + h.lastAccioErr
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_accio_account", detail)
+		return
+	}
+
+	// TraeWork 直连通道（traework: 前缀模型）：上游是会话式协议
+	// （建会话 → 开事件流 → 发消息），事件体形状不稳定，递归收集。
+	if isTraeWorkModel(bareModel) {
+		twm := strings.TrimPrefix(bareModel, traeworkModelPrefix)
+		bodyTW := body
+		if twm != bareModel {
+			bodyTW = rewriteModel(body, twm)
+		}
+		if h.traeworkChatStream(w, r, bodyTW, twm) {
+			return
+		}
+		detail := "没有可用的 TraeWork 账号（面板-添加账号-外部平台-TraeWork 粘贴客户端凭据）"
+		if h.lastTraeWorkErr != "" {
+			detail += "；最近失败原因: " + h.lastTraeWorkErr
+		}
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_traework_account", detail)
 		return
 	}
 
