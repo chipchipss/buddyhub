@@ -76,6 +76,8 @@ var platforms = []Platform{
 		Note: "微信扫码登录（上游已宣布停运）"},
 	{ID: "trae", Name: "Trae（字节）", Group: GroupGateway, Prefix: "trae:", Login: LoginCallback,
 		Note: "浏览器授权（本机回调）"},
+	{ID: "accio", Name: "Accio（阿里）", Group: GroupGateway, Prefix: "accio:", Login: LoginCallback,
+		Note: "浏览器授权（本机回调）"},
 
 	// ── 积分 / 签到平台（无对话 API）──
 	{ID: "raccoon", Name: "小浣熊（商汤）", Group: GroupPoints, Login: LoginQR,

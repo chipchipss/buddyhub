@@ -11,6 +11,7 @@ package panel
 //	Cline              设备码     WorkOS 设备码 → 浏览器确认 → 轮询（再登记换令牌）
 //	QClaw              扫码回填   面板出微信二维码 → 扫码授权 → 用户把回调里的 code 贴回来
 //	Trae               本机回调   网关临时监听回环端口 → 浏览器授权后自动跳回 → 无需人工操作
+//	Accio              本机回调   同上（PKCE + loopback）
 //
 // 都是两段式交互，无法在一次 HTTP 往返里完成，故用内存会话：
 //
@@ -30,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chipchipss/buddyhub/internal/extprovider/accio"
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
 	"github.com/chipchipss/buddyhub/internal/extprovider/copilot"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qclaw"
@@ -75,6 +77,11 @@ type extLoginSession struct {
 	traeLn   net.Listener
 	traeDone chan *trae.Callback
 	traeErr  chan error
+	// accio：同款本机回调
+	accioCtx  *accio.LoginContext
+	accioLn   net.Listener
+	accioDone chan *accio.Callback
+	accioErr  chan error
 }
 
 var (
@@ -126,8 +133,13 @@ func dropExtLoginSession(id string) {
 	delete(extLoginSessions, id)
 	extLoginMu.Unlock()
 	// Trae 的回环监听要随手关掉，否则会话过期后端口一直占着
-	if s != nil && s.traeLn != nil {
-		_ = s.traeLn.Close()
+	if s != nil {
+		if s.traeLn != nil {
+			_ = s.traeLn.Close()
+		}
+		if s.accioLn != nil {
+			_ = s.accioLn.Close()
+		}
 	}
 }
 
@@ -271,6 +283,36 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 			"hint":       "在浏览器打开链接完成授权，本页会自动接住回调（浏览器需与本机在同一台机器）",
 		})
 
+	case extstore.PAccio:
+		lctx, ln, err := accio.NewLogin(accio.RegionCN)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		sess := &extLoginSession{
+			provider: provider, createdAt: time.Now(),
+			accioCtx: lctx, accioLn: ln,
+			accioDone: make(chan *accio.Callback, 1),
+			accioErr:  make(chan error, 1),
+		}
+		go func() {
+			cb, aerr := accio.AwaitCallback(context.Background(), ln, extLoginTTL)
+			if aerr != nil {
+				sess.accioErr <- aerr
+				return
+			}
+			sess.accioDone <- cb
+		}()
+		id := putExtLoginSession(sess)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":         true,
+			"mode":       "callback",
+			"session":    id,
+			"auth_url":   lctx.AuthURL,
+			"expires_in": int(extLoginTTL.Seconds()),
+			"hint":       "在浏览器打开链接完成授权，本页会自动接住回调（浏览器需与本机在同一台机器）",
+		})
+
 	default:
 		writeErr(w, http.StatusBadRequest, "该平台暂不支持登录入池："+provider)
 	}
@@ -318,6 +360,8 @@ func (p *Panel) extLoginPoll(w http.ResponseWriter, r *http.Request) {
 		cred, done, note = completeQClaw(ctx, sess, code)
 	case extstore.PTrae:
 		cred, done, note = pollTraeCallback(ctx, sess)
+	case extstore.PAccio:
+		cred, done, note = pollAccioCallback(ctx, sess)
 	default:
 		writeErr(w, http.StatusBadRequest, "该平台暂不支持登录入池："+provider)
 		return
@@ -558,6 +602,35 @@ func pollTraeCallback(ctx context.Context, sess *extLoginSession) (cred *extLogi
 		}
 		return &extLoginCred{id: id, label: label, note: "Trae SOLO", cred: *c}, true, ""
 	case err := <-sess.traeErr:
+		return nil, true, "等待授权回调失败：" + err.Error()
+	default:
+		return nil, false, "等待浏览器授权…"
+	}
+}
+
+// pollAccioCallback 检查 Accio 的本机回调是否已到达。
+func pollAccioCallback(ctx context.Context, sess *extLoginSession) (cred *extLoginCred, done bool, note string) {
+	select {
+	case cb := <-sess.accioDone:
+		c, err := accio.Complete(ctx, sess.accioCtx, cb)
+		if err != nil {
+			return nil, true, "Accio 授权失败：" + err.Error()
+		}
+		id := c.UserID
+		if id == "" {
+			id = c.Email
+		}
+		if id == "" {
+			id = "accio-" + head(newSessionID(), 8)
+		}
+		label := "Accio"
+		if c.Email != "" {
+			label = "Accio " + c.Email
+		} else if c.Name != "" {
+			label = "Accio " + c.Name
+		}
+		return &extLoginCred{id: id, label: label, note: "Accio 浏览器授权", cred: *c}, true, ""
+	case err := <-sess.accioErr:
 		return nil, true, "等待授权回调失败：" + err.Error()
 	default:
 		return nil, false, "等待浏览器授权…"

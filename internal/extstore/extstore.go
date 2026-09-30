@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chipchipss/buddyhub/internal/extprovider/accio"
 	"github.com/chipchipss/buddyhub/internal/extprovider/autoclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
 	"github.com/chipchipss/buddyhub/internal/extprovider/codearts"
@@ -46,6 +47,8 @@ const (
 	PQClaw = "qclaw"
 	// PTrae Trae（字节 SOLO；本机回调授权）。
 	PTrae = "trae"
+	// PAccio Accio（阿里；本机回调授权）。
+	PAccio = "accio"
 )
 
 // ExtAccount 一个外部平台账号。
@@ -323,6 +326,8 @@ func (m *Manager) CheckinOne(ctx context.Context, a *ExtAccount) *CheckinResult 
 		res.Kind, res.Message = "inactive", "QClaw 无需签到（网关直连通道）"
 	case PTrae:
 		res.Kind, res.Message = "inactive", "Trae 无需签到（网关直连通道）"
+	case PAccio:
+		res.Kind, res.Message = "inactive", "Accio 无需签到（网关直连通道）"
 	default:
 		res.Kind, res.Message = "failed", "未知平台: "+a.Provider
 	}
@@ -394,6 +399,22 @@ func (m *Manager) ViewOne(ctx context.Context, a *ExtAccount) *ExtAccountView {
 			} else {
 				v.Note = err.Error()
 			}
+		}
+	case PAccio:
+		// Accio 视图：能查到额度即视为可用。
+		var cred accio.Credential
+		if json.Unmarshal(a.Cred, &cred) != nil {
+			v.Note = "凭据解析失败"
+			return v
+		}
+		if q, err := accio.FetchQuota(ctx, &cred); err == nil {
+			v.Balance, v.BalanceOK = q.Remaining, true
+			v.Note = "Accio " + accio.ParseRegion(string(cred.Region)).Label()
+			if q.PlanName != "" {
+				v.Note = "Accio " + q.PlanName
+			}
+		} else {
+			v.Note = err.Error()
 		}
 	case PTrae:
 		// Trae 视图：能拉到模型目录即视为可用。

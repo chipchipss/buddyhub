@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/extprovider/accio"
 	"github.com/chipchipss/buddyhub/internal/extprovider/autoclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
 	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
@@ -139,6 +140,7 @@ type Handler struct {
 	lastAutoClawErr string
 	lastQClawErr    string
 	lastTraeErr     string
+	lastAccioErr    string
 
 	// clineFlights / autoclawFlights 续期单飞表。
 	// 两家的 refresh_token 都是一次性轮换语义：并发续期会互相作废并把人踢下线，
@@ -147,6 +149,7 @@ type Handler struct {
 	autoclawFlights flightGroup[*autoclaw.Credential]
 	qclawFlights    flightGroup[*qclaw.Credential]
 	traeFlights     flightGroup[*trae.Credential]
+	accioFlights    flightGroup[*accio.Credential]
 }
 
 // NewHandler 构建 handler。
@@ -607,6 +610,22 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		out = append(out, entry)
 	}
+	// Accio 模型名单（accio: 前缀）：有账号时实时拉（10 分钟缓存）。
+	for _, m := range h.accioCatalog() {
+		if m.ID == "" {
+			continue
+		}
+		entry := map[string]any{
+			"id":       accioModelPrefix + m.ID,
+			"object":   "model",
+			"created":  1753600000,
+			"owned_by": "accio",
+		}
+		if m.Name != "" && m.Name != m.ID {
+			entry["description"] = m.Name
+		}
+		out = append(out, entry)
+	}
 	// Loomy 模型名单（loomy: 前缀）：有可用凭据时实时拉上游目录透出
 	// （原样无别名；上游对未知模型静默回落 deepseek，故客户端应读响应 model 字段）。
 	if mods := h.loomyCatalog(); len(mods) > 0 {
@@ -931,6 +950,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			detail += "；最近失败原因: " + h.lastTraeErr
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_trae_account", detail)
+		return
+	}
+
+	// Accio 直连通道（accio: 前缀模型）：上游是 ADK（Gemini 风格）信封，
+	// 出站体与响应流两侧都要完整翻译。
+	if isAccioModel(bareModel) {
+		am := strings.TrimPrefix(bareModel, accioModelPrefix)
+		bodyAM := body
+		if am != bareModel {
+			bodyAM = rewriteModel(body, am)
+		}
+		if h.accioChatStream(w, r, bodyAM, am) {
+			return
+		}
+		detail := "没有可用的 Accio 账号（面板-添加账号-外部平台-Accio 浏览器授权后重试）"
+		if h.lastAccioErr != "" {
+			detail += "；最近失败原因: " + h.lastAccioErr
+		}
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_accio_account", detail)
 		return
 	}
 

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/extprovider/accio"
 	"github.com/chipchipss/buddyhub/internal/extprovider/autoclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
 	"github.com/chipchipss/buddyhub/internal/extprovider/copilot"
@@ -288,6 +289,13 @@ func main() {
 			log.Printf("[trae] 代理配置无效，本通道将直连：%v", err)
 		} else {
 			log.Printf("[trae] 本通道走代理 %s", proxy)
+		}
+	}
+	if proxy := cfg.Schedule.Accio.Proxy; strings.TrimSpace(proxy) != "" {
+		if err := accio.SetProxy(proxy); err != nil {
+			log.Printf("[accio] 代理配置无效，本通道将直连：%v", err)
+		} else {
+			log.Printf("[accio] 本通道走代理 %s", proxy)
 		}
 	}
 
