@@ -34,6 +34,7 @@ func ResolveModel(model string) (realm, bare string) { return resolveModel(model
 func PlatformOf(bare string) string {
 	for _, p := range []struct{ prefix, name string }{
 		{qoderModelPrefix, "qoder"},
+		{copilotModelPrefix, "copilot"},
 		{codexModelPrefix, "codex"},
 		{freeModelPrefix, "free"},
 		{loomyModelPrefix, "loomy"},

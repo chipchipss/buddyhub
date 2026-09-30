@@ -10,7 +10,7 @@
 // 账号来源（每平台一个 Agent 视图，全部只读汇总，不在这里做写操作）：
 //   - workbuddy: cfg.Pool.List()（账号池/state.json——对话上游真账号）
 //   - loomy-cli: extstore（密码/短信登录落库）
-//   - lobsterai/raccoon/qoder/codearts: extstore
+//   - lobsterai/raccoon/qoder/codearts/copilot: extstore
 //   - zai: config schedule.zai（API Key 池，key 掩码展示）
 //   - codex: keypool.ListCodexAccounts()（本机 ~/.codex）
 //   - free: config free_pool（有 key 的上游列出）
@@ -88,6 +88,7 @@ func (p *Panel) accountsDir(w http.ResponseWriter, r *http.Request) {
 		extstore.PRaccoon:   {ID: "raccoon", Name: "小浣熊（商汤）", APIModel: "", ManageTo: "#ext", Accounts: []dirAccount{}},
 		extstore.PQoder:     {ID: "qoder", Name: "Qoder（阿里）", APIModel: "qoder:", ManageTo: "#ext", Accounts: []dirAccount{}},
 		extstore.PCodeArts:  {ID: "codearts", Name: "CodeArts（华为云）", APIModel: "", ManageTo: "#ext", Accounts: []dirAccount{}},
+		extstore.PCopilot:   {ID: "copilot", Name: "GitHub Copilot", APIModel: "copilot:", ManageTo: "#ext", Accounts: []dirAccount{}},
 	}
 	if p.extManager() != nil {
 		for _, a := range p.extManager().List() {
@@ -107,7 +108,8 @@ func (p *Panel) accountsDir(w http.ResponseWriter, r *http.Request) {
 	}
 	platforms = append(platforms,
 		extGroups[extstore.PLoomyCLI], extGroups[extstore.PQoder],
-		extGroups[extstore.PLogsterAI], extGroups[extstore.PRaccoon], extGroups[extstore.PCodeArts])
+		extGroups[extstore.PLogsterAI], extGroups[extstore.PRaccoon],
+		extGroups[extstore.PCodeArts], extGroups[extstore.PCopilot])
 
 	// ── zai（API Key 池）──
 	zai := dirPlatform{ID: "zai", Name: "Z.AI 智谱 GLM", APIModel: "zai:", ManageTo: "#config", Accounts: []dirAccount{}}

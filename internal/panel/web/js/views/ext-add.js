@@ -14,6 +14,14 @@
 
 import { h, icon, api, toast } from '../kernel.js';
 
+// 设备流轮询定时器（模块级：面板重绘/切换平台时统一清理，避免轮询泄漏）。
+let deviceTimer = null;
+
+/** stopExtAddTimers() —— 停掉进行中的设备流轮询（抽屉关闭 / 视图卸载时调用）。 */
+export function stopExtAddTimers() {
+  if (deviceTimer) { clearInterval(deviceTimer); deviceTimer = null; }
+}
+
 const PROVIDERS = {
   lobsterai: {
     name: 'LobsterAI（有道）',
@@ -52,11 +60,22 @@ const PROVIDERS = {
     ],
     tip: '华为云临时 AK/SK（含 security_token）；三项都必填。',
   },
+  copilot: {
+    name: 'GitHub Copilot',
+    // 设备流登录：无需手填凭据，浏览器授权即可（见 paintDevice）。
+    device: true,
+    tip: '点「开始授权」拿到设备码，在 GitHub 页面输入即可；授权后账号自动入池，'
+      + '用 copilot:<模型名> 调用（如 copilot:gpt-4o）。',
+  },
 };
 
-/** extAddPanel(onAdded) —— 返回一个命令式的添加面板节点。 */
-export function extAddPanel(onAdded) {
+/** extAddPanel(onAdded, opts) —— 返回一个命令式的添加面板节点。
+ *  opts.flat = true 时平铺（抽屉内嵌用），否则收进 <details>。 */
+export function extAddPanel(onAdded, opts = {}) {
   let provider = 'lobsterai';
+
+  // 设备流轮询定时器（模块级：面板重绘时先清掉上一个，避免轮询泄漏）。
+  if (deviceTimer) { clearInterval(deviceTimer); deviceTimer = null; }
 
   const idInput = h('input', {
     class: 'input', placeholder: '账号标识（昵称 / 手机尾号 / uid，用于列表区分）',
@@ -69,6 +88,10 @@ export function extAddPanel(onAdded) {
   function paintFields() {
     inputs.clear();
     const spec = PROVIDERS[provider];
+    // 设备流平台不需要手填标识与凭据，整行表单隐藏。
+    idInput.hidden = !!spec.device;
+    submit.hidden = !!spec.device;
+    if (spec.device) { paintDevice(); return; }
     fieldsBox.replaceChildren(
       ...spec.fields.map(f => {
         const input = h('input', {
@@ -80,6 +103,72 @@ export function extAddPanel(onAdded) {
       }),
     );
     tipEl.textContent = spec.tip;
+  }
+
+  /* ── GitHub Copilot：设备流登录 ─────────────────────────────── */
+
+  function paintDevice() {
+    if (deviceTimer) { clearInterval(deviceTimer); deviceTimer = null; }
+    inputs.clear();
+
+    const codeEl = h('div', {
+      style: {
+        font: '600 26px var(--mono)', letterSpacing: '3px', userSelect: 'all',
+        padding: '10px 0',
+      },
+    });
+    const linkEl = h('a', { class: 'link', target: '_blank', rel: 'noreferrer' });
+    const statusEl = h('div', { class: 'muted', style: { fontSize: '12px' } });
+    const startBtn = h('button', { class: 'btn primary' }, icon('key'), '开始授权');
+
+    const box = h('div', { class: 'stack', style: { gap: '6px', marginTop: '4px' } },
+      startBtn, codeEl, linkEl, statusEl);
+    fieldsBox.replaceChildren(box);
+    tipEl.textContent = PROVIDERS.copilot.tip;
+
+    startBtn.onclick = async () => {
+      startBtn.disabled = true;
+      if (deviceTimer) { clearInterval(deviceTimer); deviceTimer = null; }
+      try {
+        const d = await api('ext/copilot/start', { method: 'POST' });
+        codeEl.textContent = d.user_code || '';
+        linkEl.textContent = d.verification_uri || 'https://github.com/login/device';
+        linkEl.href = d.verification_uri || 'https://github.com/login/device';
+        statusEl.textContent = '在 GitHub 页面输入上方设备码并授权，本页会自动完成接入…';
+        // 按 GitHub 下发的 interval 轮询（最少 5s，避免 slow_down）。
+        const every = Math.max(5, d.interval || 5) * 1000;
+        const deadline = Date.now() + (d.expires_in || 900) * 1000;
+        deviceTimer = setInterval(async () => {
+          if (Date.now() > deadline) {
+            clearInterval(deviceTimer); deviceTimer = null;
+            statusEl.textContent = '设备码已过期，请重新开始授权。';
+            startBtn.disabled = false;
+            return;
+          }
+          let r;
+          try {
+            r = await api('ext/copilot/poll', { method: 'POST', body: JSON.stringify({ session: d.session }) });
+          } catch (e) {
+            clearInterval(deviceTimer); deviceTimer = null;
+            statusEl.textContent = e.message;
+            startBtn.disabled = false;
+            return;
+          }
+          if (!r.done) return;
+          clearInterval(deviceTimer); deviceTimer = null;
+          codeEl.textContent = '';
+          linkEl.textContent = '';
+          linkEl.removeAttribute('href');
+          statusEl.textContent = `已接入：${(r.account || {}).label || (r.account || {}).id || 'Copilot 账号'}`;
+          toast(`Copilot 账号已入池：${(r.account || {}).id || ''}`);
+          await onAdded?.();
+        }, every);
+      } catch (e) {
+        statusEl.textContent = e.message;
+      } finally {
+        startBtn.disabled = false;
+      }
+    };
   }
 
   const providerSel = h('select', {
@@ -115,12 +204,20 @@ export function extAddPanel(onAdded) {
 
   paintFields();
 
-  return h('details', { class: 'glass-flat', style: { padding: '12px 14px', marginTop: '10px' } },
-    h('summary', { style: { cursor: 'pointer', fontSize: '12.5px', fontWeight: '550' },
-      text: '添加外部平台账号（逐字段填写）' }),
-    h('div', { class: 'row wrap', style: { gap: '8px', marginTop: '12px' } }, providerSel, idInput),
+  const inner = h('div', { class: 'stack' },
+    h('div', { class: 'row wrap', style: { gap: '8px' } }, providerSel, idInput),
     fieldsBox,
     tipEl,
     h('div', { class: 'row', style: { marginTop: '12px' } }, submit),
+  );
+
+  // 嵌进抽屉时直接平铺（opts.flat），放在视图里时收进 <details> 免得占版面。
+  if (opts.flat) {
+    return h('div', { class: 'glass-flat', style: { padding: '12px 14px' } }, inner);
+  }
+  return h('details', { class: 'glass-flat', style: { padding: '12px 14px', marginTop: '10px' } },
+    h('summary', { style: { cursor: 'pointer', fontSize: '12.5px', fontWeight: '550' },
+      text: '添加外部平台账号（逐字段填写）' }),
+    h('div', { style: { marginTop: '12px' } }, inner),
   );
 }

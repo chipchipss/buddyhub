@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>多平台 Buddy 账号统一积分与网关中心 · OpenAI / Anthropic / Responses API 兼容</b><br>
-  Web 面板 · 账号池轮转 · 工具调用自愈 · Responses API · 定时签到 / 活跃 / 旅行 / 保活 · 成长任务一键完成 · <b>讯飞 Loomy + LobsterAI + 小浣熊 + Qoder + 华为云 积分自动领取</b>
+  Web 面板 · 账号池轮转 · 工具调用自愈 · Responses API · 定时签到 / 活跃 / 旅行 / 保活 · 成长任务一键完成 · <b>讯飞 Loomy + LobsterAI + 小浣熊 + Qoder + 华为云 积分自动领取 · Z.AI / ZCode · GitHub Copilot</b>
 </p>
 
 <p align="center">
@@ -47,7 +47,8 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
 | 🖥️ **Web 管理面板** | 内嵌单色玻璃面板（前端为原生 ES 模块，无构建步骤），总览 / 账号 / 用量与积分 / 自动化 / 模型档位 / API 密钥 / 配置（热生效）/ 运行日志，`⌘K` 命令面板，见 [Web 管理面板](#-web-管理面板) |
-| 🤖 **多平台账号池** | 腾讯 WorkBuddy（OAuth 设备授权 + 成长任务全自动）· 讯飞 Loomy（客户端检测 / 密码 / 短信 / Token）· 外部平台（LobsterAI · 小浣熊 · Qoder · 华为云 CodeArts 签到）· **Z.AI / ZCode**（Coding Plan JWT + API Key 双通道、额度、套餐领取），见 [Z.AI 账号池](#-zai--zcode-账号池) |
+| 🤖 **多平台账号池** | 腾讯 WorkBuddy（OAuth 设备授权 + 成长任务全自动）· 讯飞 Loomy（客户端检测 / 密码 / 短信 / Token）· 外部平台（LobsterAI · 小浣熊 · Qoder · 华为云 CodeArts 签到）· **Z.AI / ZCode**（Coding Plan JWT + API Key 双通道、额度、套餐领取）· **GitHub Copilot**（设备流登录 + token 自动续期 + OpenAI 原生透传），见 [Z.AI 账号池](#-zai--zcode-账号池) / [GitHub Copilot 通道](#-github-copilot-通道) |
+| ➕ **统一入池入口** | 「添加账号」抽屉覆盖全部平台：腾讯 WorkBuddy · Loomy · Z.AI · 外部平台（含 Copilot 设备码授权）· 手动 JSON |
 
 ## 🎯 成长任务一键完成（17/18）
 
@@ -124,6 +125,29 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 成长中心连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。网关把它挂在每日签到排程末尾自动跑闭环（见[定时任务](#定时任务)）：档位解锁当天自动兑换、有抽奖次数自动抽完，全程无需人工盯。
 
+## 🧩 外部平台账号池
+
+腾讯池之外的积分型平台统一收在 `data/ext-accounts.json`，面板「自动化 → 外部平台」管理，每天 10:00 自动签到，也可一键全部签到。
+
+| 平台 | Provider | 凭据字段 | 签到 |
+|---|---|---|---|
+| **LobsterAI**（有道） | `lobsterai` | `access_token`* · `uuid`* · `refresh_token` · `first_key_from` | 每日签到 |
+| **小浣熊**（商汤） | `raccoon` | `access_token`* · `refresh_token`（**到期自动续期并回写**） | 登录奖励 |
+| **Qoder**（阿里） | `qoder` | `access_token`* · `machine_id`* · `refresh_token` · `security_oauth_token` | 双通道领取（campaigns → activity claim） |
+| **CodeArts**（华为云） | `codearts` | `access_key_id`* · `secret_access_key`* · `security_token`* | 每日签到 |
+| **GitHub Copilot** | `copilot` | 设备码授权（自动写入 `github_token` + `copilot_token`） | 无（网关直连通道） |
+
+\* 为必填项。
+
+### 添加账号
+
+「添加账号」抽屉 → **外部平台** → 选平台 → **逐字段填写**（表单按该平台的凭据结构生成，必填项留空会被拦住，不用手写 JSON）。
+
+- Copilot 例外：选到它时表单换成**设备码授权**——点「开始授权」拿到形如 `ABCD-1234` 的设备码，在 `github.com/login/device` 输入并确认，页面自动轮询完成入池
+- 也支持在「自动化 → 外部平台」页内直接添加（同一套表单），或用底部的「高级：粘贴完整凭据 JSON」批量导入
+
+> 💡 Qoder 的 `machine_id` 必填——缺失会被上游直接拒绝。各平台凭据都可从对应官方客户端的本地凭据文件里取。
+
 ## 🤖 Z.AI / ZCode 账号池
 
 把 Z.AI（智谱 GLM）的 **Coding Plan 订阅账号**与 **API Key** 收进同一账号池，对外仍是同一个 OpenAI 兼容接口——模型名带 `zai:` 前缀即可（`zai:GLM-5.3`、`zai:glm-5.2` 等，小写别名自动映射到官方大小写敏感名）。
@@ -175,6 +199,57 @@ ACTIVE ──额度用完(402/quota)──▶ EXHAUSTED（定期再探，恢复�
 
 > ⚠️ 上游对 billing 族接口的连续查询敏感（WAF 会拦）。额度轮询与领取轮都做了错峰，**不建议把间隔调得过密**。
 
+## 🐙 GitHub Copilot 通道
+
+把 GitHub Copilot 订阅接进同一个 OpenAI 兼容接口——模型名带 `copilot:` 前缀即可（`copilot:gpt-4o`、`copilot:claude-sonnet-4` 等，具体名单由上游按订阅等级下发）。
+
+这条通道的**协议翻译成本为零**：`api.githubcopilot.com` 上游本身就是 OpenAI 格式，网关只做鉴权与透传，不重写请求体、不转换 SSE。
+
+### 三段式协议
+
+| 步骤 | 端点 | 说明 |
+|---|---|---|
+| 1. 设备流 | `github.com/login/device/code` → `github.com/login/oauth/access_token` | 浏览器授权，拿到长期 GitHub token |
+| 2. 兑换 | `api.github.com/copilot_internal/v2/token` | GitHub token → **Copilot token（约 25 分钟过期）** |
+| 3. 对话 | `api.githubcopilot.com/chat/completions` | OpenAI 原生协议 + `Copilot-Integration-Id: vscode-chat` |
+
+`client_id` 用的是官方 Copilot 扩展的**公开**应用标识（所有用户相同，非秘密），因此无需自行注册 OAuth App。
+
+### 添加账号
+
+面板「添加账号 → 外部平台 → GitHub Copilot」→ 点「开始授权」→ 把设备码（形如 `ABCD-1234`）输入 `github.com/login/device` → 页面自动轮询完成入池。也可在「自动化 → 外部平台」里添加。
+
+授权成功后凭据落进 `data/ext-accounts.json`（provider `copilot`），账号卡片显示订阅类型与 token 剩余有效期。
+
+### 自动续期与换号
+
+- **到期前 3 分钟自动续期**：用长期 GitHub token 换新的 Copilot token，续期结果写回账号表（下一个请求直接可用）
+- **401/403 强制续期重试一次**：token 被上游提前失效时不直接失败
+- **失败换号**：多账号时逐个尝试，某账号 429 / 5xx / 凭据失效只跳过该账号，不影响整体可用性
+
+### 网络要求（重要）
+
+设备流的两个端点都在 **`github.com`（网页域）** 上，而 `api.github.com` 是另一个域名。部分网络下前者不通、后者可直连——此时设备流会超时。
+
+网关的 HTTP 客户端遵循 Go 标准代理约定，**设置 `HTTPS_PROXY` 即可**（与 `git config http.proxy` 同一个代理）：
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:2080 ./buddyhub -config config.json
+```
+
+想先验证连通性，跑一次真实冒烟（只申请设备码，不授权）：
+
+```bash
+COPILOT_LIVE=1 HTTPS_PROXY=http://127.0.0.1:2080 \
+  go test ./internal/extprovider/copilot/ -run Live -v
+```
+
+> 💡 实测细节：设备码刚下发的一小段窗口内，GitHub 可能回 `incorrect_device_code`（尚未生效），随后才转为 `authorization_pending`。网关把前 3 次当作「暂未生效」容忍，避免用户刚点授权就被判失败。
+
+### 与签到型平台的差异
+
+Copilot **不是积分平台**：没有每日签到、没有余额。它在外部账号列表里按「订阅状态 + token 有效期」呈现，卡片上不提供「签到」按钮。
+
 ## 🆚 与上游的差异
 
 本分支相对 [上游 master](https://github.com/Sliverkiss/workbuddy2api) 的增量（均已在真实多账号环境验证）：
@@ -192,6 +267,8 @@ ACTIVE ──额度用完(402/quota)──▶ EXHAUSTED（定期再探，恢复�
 | **余额后台刷新** | `schedule.balance_refresh_minutes`（默认 5）周期查余额并更新池，冷却账号余额恢复自动解冻 |
 | **模型能力透出** | `/v1/models` 附带 `supported_efforts` / `default_effort` / 积分倍率 / 输入输出上限等上游真实字段 |
 | **安全加固** | 常量时间密钥比较（`internal/httpauth`）、CSP 与安全响应头、UID 白名单防路径穿越、前端属性转义修复 |
+| **多平台账号池** | 腾讯之外的通道统一进 `data/ext-accounts.json`：LobsterAI / 小浣熊 / Qoder / 华为云 CodeArts（每日签到 + 余额）· **Z.AI / ZCode**（Coding Plan JWT + API Key 双通道、额度合并、套餐领取、每号独立设备指纹）· **GitHub Copilot**（设备流登录、token 到期前自动续期、OpenAI 原生透传） |
+| **统一入池入口** | 「添加账号」抽屉覆盖全部平台（腾讯 · Loomy · Z.AI · 外部平台 · 手动 JSON），每个平台按自己的凭据形态出表单——外部平台逐字段填写，Copilot 走设备码授权，不用手写 JSON |
 | **领养前置修复** | 上游 `travelAdopt` 缺 report 前置导致领养恒失败于 `first_buddy task not completed yet`；本分支修正后实测 +300 到账（3/3 账号） |
 
 ### 同步上游
@@ -228,19 +305,25 @@ flowchart LR
     Client["客户端 / SDK\nOpenAI 兼容请求"] --> H
 
     subgraph GWI["WorkBuddy2API 网关 :7863"]
-        H["HTTP Handler\n鉴权 · 请求体上限 · 提示词改写 · 轮转"] --> P
+        H["HTTP Handler\n鉴权 · 请求体上限 · 提示词改写 · 按前缀路由"] --> P
         H --> S
-        P["账号池\n三因子加权 · 熔断 · 冷却 · 租约"] --> U
+        H -. "loomy: / zai: / copilot: / qoder: / codex: / free:" .-> B
+        P["腾讯账号池\n三因子加权 · 熔断 · 冷却 · 租约"] --> U
         S["会话粘性路由"] -.绑定镜像.-> REDIS
         T["定时调度\n签到 09/21 · 旅行 09/21 · 活跃 10 · 保活 22"] --> P
         U["上游 Client\nChatHTTP 流式 · 短 RPC"]
+        B["多平台通道桥接\n各自账号池 · 自动续期 · 失败换号"]
     end
 
     P -. "读凭证 (0600)" .-> AUTH[("auths/*.json")]
     P -. "状态镜像" .-> REDIS[("Upstash Redis\n可选")]
+    B -. "外部平台账号" .-> EXT[("data/ext-accounts.json\ndata/zai-accounts.json")]
     U -->|"chat/completions (SSE)"| CB["CodeBuddy\ncopilot.tencent.com"]
     U -->|"billing / auth / growth"| CB
+    B -->|"loomy / GLM / Copilot / Qoder"| EXTUP["各平台上游\n讯飞 · 智谱 · GitHub · 阿里"]
 ```
+
+模型名的**前缀就是路由协议**：无前缀走腾讯池，其余前缀分派给对应通道（见[模型路由](#模型路由前缀即协议)），各通道的凭据、续期与换号逻辑彼此独立——某个平台挂了不会波及其它平台。
 
 上游请求在出站前经历统一的改写管线（`internal/upstream/payload.go`）：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容为 OpenAI 对象形态、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏。
 
@@ -454,6 +537,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 `WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT` · `WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
 
+标准代理变量同样生效（Go 的 `ProxyFromEnvironment`，不走 `WB2A_` 前缀）：`HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`。**GitHub Copilot 通道通常需要它**——设备流的端点在 `github.com`（网页域），部分网络下不通而 `api.github.com` 可直连，详见 [GitHub Copilot 通道](#-github-copilot-通道)。
+
 ## 核心行为语义
 
 ### 系统提示词体系
@@ -603,7 +688,7 @@ web/
   js/shell.js         侧栏 / 顶栏 / 状态条 / 命令面板 / 路由
   js/store.js         共享状态与主题
   js/qr.js            离线 QR 编码器（券码二维码，CSP 下不引外链服务）
-  js/drawers.js       抽屉：添加账号 / 账号任务 / 券码
+  js/drawers.js       抽屉：添加账号（五个平台分段）/ 账号任务 / 券码
   js/views/*.js       八个视图 + 分段模块（zai-segment / ext-add），各自声明 render()
 ```
 
@@ -630,13 +715,13 @@ web/
 | **总览** | 池健康瓷贴（总数 / 可用 / 冷却 / 禁用 / 积分剩余与总额 / 粘性会话）+ 批量操作 + 平台分布 + 最近动态 |
 | **账号** | 两个视角：**账号池**（账号卡：状态、积分量条、成功失败、上次用量；单号操作签到 / 余额 / 任务 / 解冻 / 禁用 / 移除）与**全部平台**目录（跨平台只读总览，可跳各平台管理页） |
 | **用量与积分** | Token 用量（时序堆叠图 + 按账号 / 模型 / 域三张表，支持窗口与平台筛选）与积分构成（逐包对比：来源、面额、剩余、发放与到期） |
-| **自动化** | 四段工作台：**腾讯任务**（扫描待办 → 排队执行，账号内串行、账号间并发 1–3；开学季券码查询）· **Loomy**（新手之旅 8 项一键完成、每日签到、积分余额）· **外部平台**（LobsterAI / 小浣熊 / Qoder / 华为云 账号卡 + 一键签到 + **逐字段添加账号**）· **Z.AI**（Coding Plan 账号池：OAuth 免密登录 / 手动 JWT / API Key、额度与用量、套餐领取、设备指纹换发，见 [Z.AI 账号池](#-zai--zcode-账号池)） |
+| **自动化** | 四段工作台：**腾讯任务**（扫描待办 → 排队执行，账号内串行、账号间并发 1–3；开学季券码查询）· **Loomy**（新手之旅 8 项一键完成、每日签到、积分余额）· **外部平台**（LobsterAI / 小浣熊 / Qoder / 华为云 CodeArts / GitHub Copilot 账号卡 + 一键签到 + **逐字段添加账号**）· **Z.AI**（Coding Plan 账号池：OAuth 免密登录 / 手动 JWT / API Key、额度与用量、套餐领取、设备指纹换发，见 [Z.AI 账号池](#-zai--zcode-账号池)） |
 | **模型与档位** | 实时查询上游：积分倍率（牌价 vs 生效价）、默认思考档、支持档位（含「off（可关）」）、上下文长度与最大输出；有探测数据时显示**实测上限与钳制告警**（见「探测模型真实输出上限」） |
 | **API 密钥** | 生成 / 删除多把 Key，每把可授权平台子集（留空 = 全平台）；列表展示密钥与授权范围 |
 | **配置** | 在线编辑 config.json：API 密钥、定时任务（四类任务时点与开关、余额刷新间隔）、账号池与流量治理参数、上游超时与 UA、提示词模式、脱敏 / 粘性开关 |
 | **运行日志** | 最近 500 行服务日志 + 请求表格日志；按「任务 / 对话 / 系统」频道筛选，自动滚动可开关 |
 
-**添加账号**（顶栏按钮）是右侧抽屉，三种接入方式：腾讯 OAuth 设备授权（显示授权链接 + 自动轮询，凭证落盘后**热加载进池，免重启**）· Loomy（客户端自动检测 / 手机号密码 / 短信验证码 / 手动 Token）· 手动 JSON 批量导入。账号卡上的「任务」同样以抽屉展开：全部任务的进度、奖励与状态，支持「全部接受」与**一键完成**（覆盖 17 个任务，推进进度 + 异步计分等待 + 自动领奖，幂等可重复点）。
+**添加账号**（顶栏按钮）是右侧抽屉，**覆盖全部平台**——五个分段：腾讯 OAuth 设备授权（显示授权链接 + 自动轮询，凭证落盘后**热加载进池，免重启**）· Loomy（客户端自动检测 / 手机号密码 / 短信验证码 / 手动 Token）· Z.AI（OAuth 免密登录 / JWT / API Key）· 外部平台（LobsterAI · 小浣熊 · Qoder · 华为云 CodeArts 逐字段填写 + **GitHub Copilot 设备码授权**）· 手动 JSON 批量导入。账号卡上的「任务」同样以抽屉展开：全部任务的进度、奖励与状态，支持「全部接受」与**一键完成**（覆盖 17 个任务，推进进度 + 异步计分等待 + 自动领奖，幂等可重复点）。
 
 **移动端**：窗口窄于 900px 时侧栏收成顶部横滑玻璃条；`100dvh` 与安全区（`env(safe-area-inset-*)`）避免地址栏 / 刘海裁切；触屏输入框字号 16px 防 iOS 聚焦缩放；悬停效果一律限定在精确指针设备上。
 
@@ -680,6 +765,23 @@ web/
 响应同时带 `X-Service: workbuddy2api` 头。这两个身份标识用于区分**本网关**与同端口上可能残留的其他服务——对方即使返回 2xx 也不会带该字段 / 头，宿主探测据此避免"假成功"。
 
 **宿主健康探测指引**：强校验（推荐）用 `/status` + `api_key`——只有持有正确 `api_key` 的本网关返回 200，其他服务返回 401 / 404；弱校验（不适合持 key 的负载均衡器）用 `/healthz` + `service` 字段判据（`/healthz` 恒无鉴权，`service == "workbuddy2api"` 才算命中本网关）。容器自带 `HEALTHCHECK` 用的就是弱校验（仅进程内自检，够用）。
+
+### 模型路由（前缀即协议）
+
+一个端点背后挂多条上游通道，**模型名的前缀决定走哪条**。前缀是网关侧的路由协议，出站前会被剥掉（上游只认裸模型名）：
+
+| 模型名前缀 | 通道 | 账号来源 | 文档 |
+|---|---|---|---|
+| *(无前缀)* | 腾讯 WorkBuddy 账号池 | `auths/workbuddy-*.json` | [快速开始](#快速开始) |
+| `cn:` / `global:` | 腾讯池的域选择（国内 / 国际） | 同上 | — |
+| `loomy:` | 讯飞 Loomy 模型网关 | 客户端 session / `loomy-cli` 账号 | — |
+| `zai:` | Z.AI / 智谱 GLM（Plan JWT + API Key 双通道） | `data/zai-accounts.json` | [Z.AI 账号池](#-zai--zcode-账号池) |
+| `copilot:` | GitHub Copilot | `data/ext-accounts.json`（provider `copilot`） | [GitHub Copilot 通道](#-github-copilot-通道) |
+| `qoder:` | Qoder（阿里） | `data/ext-accounts.json`（provider `qoder`） | — |
+| `codex:` | Codex 订阅池 | 本机 `~/.codex*` 凭据 | — |
+| `free:` | 免费 key 池（`free:<provider>/<model>`） | 配置的免费 Key | — |
+
+找不到可用账号时**直接回 503 并说明原因**（含最近一次失败原因），不静默回落腾讯池——前缀就是路由协议，回落会把语义搞乱。
 
 ### 流式行为细节
 

@@ -65,7 +65,7 @@ func (p *Panel) extAccountAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch body.Provider {
-	case extstore.PLogsterAI, extstore.PRaccoon, extstore.PQoder, extstore.PCodeArts:
+	case extstore.PLogsterAI, extstore.PRaccoon, extstore.PQoder, extstore.PCodeArts, extstore.PCopilot:
 	default:
 		writeErr(w, http.StatusBadRequest, "未知平台: "+body.Provider)
 		return

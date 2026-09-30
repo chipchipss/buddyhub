@@ -260,7 +260,10 @@ function loomySeg() {
 }
 
 /* ── 外部平台 ─────────────────────────────────────────────────── */
-const EXT_NAMES = { lobsterai: 'LobsterAI', raccoon: '小浣熊', qoder: 'Qoder', codearts: '华为云' };
+const EXT_NAMES = { lobsterai: 'LobsterAI', raccoon: '小浣熊', qoder: 'Qoder', codearts: '华为云', copilot: 'GitHub Copilot' };
+
+// Copilot 是网关直连通道（无积分、无签到），卡片按「订阅状态」而非「余额」呈现。
+const EXT_NO_CHECKIN = { copilot: true };
 
 async function loadExt(quiet = true) {
   try { ext.set(await api('ext/accounts')); extMsg.set(''); }
@@ -319,12 +322,16 @@ function extSeg() {
             ),
             h('div', { class: 'credits' },
               h('div', { class: 'line' },
-                h('span', { class: 'n', text: a.balance_ok ? String(a.balance ?? 0) : '—' }),
-                h('span', { class: 'of', text: a.balance_ok ? '分' : (a.note || '') }),
+                a.provider === 'copilot'
+                  ? h('span', { class: 'of', style: { fontSize: '12px' }, text: a.note || '订阅状态未知' })
+                  : h('span', { class: 'n', text: a.balance_ok ? String(a.balance ?? 0) : '—' }),
+                a.provider === 'copilot' ? null
+                  : h('span', { class: 'of', text: a.balance_ok ? '分' : (a.note || '') }),
               ),
             ),
             h('div', { class: 'acts' },
-              h('button', { class: 'btn', disabled: a.disabled, onclick: () => extAct(a.provider, a.id, 'checkin') }, '签到'),
+              EXT_NO_CHECKIN[a.provider] ? null
+                : h('button', { class: 'btn', disabled: a.disabled, onclick: () => extAct(a.provider, a.id, 'checkin') }, '签到'),
               h('button', {
                 class: 'btn', onclick: () => extAct(a.provider, a.id, 'toggle', { disabled: !a.disabled }),
               }, a.disabled ? '启用' : '停用'),

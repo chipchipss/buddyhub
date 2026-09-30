@@ -126,10 +126,11 @@ type Handler struct {
 	extManager ExtManager
 	// lastQoderErr / lastCodexErr 桥接失败原因（观测用，非并发安全——
 	// 仅同账号串行失败时被写入，读取方在返回错误前立即读，竞态无害）。
-	lastQoderErr string
-	lastCodexErr string
-	lastLoomyErr string
-	lastZaiErr   string
+	lastQoderErr   string
+	lastCodexErr   string
+	lastLoomyErr   string
+	lastZaiErr     string
+	lastCopilotErr string
 }
 
 // NewHandler 构建 handler。
@@ -501,6 +502,26 @@ func (h *Handler) modelList() []map[string]any {
 			})
 		}
 	}
+	// GitHub Copilot 模型名单（copilot: 前缀）：实时拉上游目录（按订阅等级过滤），
+	// 10 分钟缓存；上游不可达时回退上次成功结果。
+	for _, m := range h.copilotCatalog() {
+		if m.ID == "" {
+			continue
+		}
+		entry := map[string]any{
+			"id":       copilotModelPrefix + m.ID,
+			"object":   "model",
+			"created":  1753600000,
+			"owned_by": "copilot",
+		}
+		if m.Vendor != "" {
+			entry["owned_by"] = "copilot/" + m.Vendor
+		}
+		if desc := m.Name; desc != "" && desc != m.ID {
+			entry["description"] = desc
+		}
+		out = append(out, entry)
+	}
 	// Loomy 模型名单（loomy: 前缀）：有可用凭据时实时拉上游目录透出
 	// （原样无别名；上游对未知模型静默回落 deepseek，故客户端应读响应 model 字段）。
 	if mods := h.loomyCatalog(); len(mods) > 0 {
@@ -728,6 +749,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			detail += "；最近失败原因: " + h.lastQoderErr
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_qoder_account", detail)
+		return
+	}
+
+	// GitHub Copilot 直连通道（copilot: 前缀模型）：独立于腾讯池，走 extstore 里的
+	// Copilot 账号（设备流登录 → Copilot token 自动续期）。上游即 OpenAI 协议，
+	// 网关只做鉴权与透传。找不到可用账号时回 503 提示，不静默回落腾讯池。
+	if isCopilotModel(bareModel) {
+		cm := strings.TrimPrefix(bareModel, copilotModelPrefix)
+		bodyCM := body
+		if cm != bareModel {
+			bodyCM = rewriteModel(body, cm)
+		}
+		if h.copilotChatStream(w, r, bodyCM, cm) {
+			return
+		}
+		detail := "没有可用的 GitHub Copilot 账号（面板-自动化-外部平台中添加后重试）"
+		if h.lastCopilotErr != "" {
+			detail += "；最近失败原因: " + h.lastCopilotErr
+		}
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_copilot_account", detail)
 		return
 	}
 

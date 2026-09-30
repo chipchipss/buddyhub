@@ -23,13 +23,13 @@ type Snapshot struct {
 }
 
 // APIKeyEntry 一把可下发的网关 Key。Platforms 空/含 "*" = 全平台；
-// 否则仅列出的前缀平台可用（"cn"/"global"/"loomy"/"qoder"/"codex"/"free"/"zai"）。
+// 否则仅列出的前缀平台可用（"cn"/"global"/"loomy"/"qoder"/"codex"/"free"/"zai"/"copilot"）。
 type APIKeyEntry struct {
-	Key        string    `json:"key"`
-	Name       string    `json:"name"`
-	Platforms  []string  `json:"platforms,omitempty"`
-	CreatedAt  time.Time `json:"created_at,omitempty"`
-	Note       string    `json:"note,omitempty"`
+	Key       string    `json:"key"`
+	Name      string    `json:"name"`
+	Platforms []string  `json:"platforms,omitempty"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	Note      string    `json:"note,omitempty"`
 }
 
 // AllowsPlatform 该 Key 是否授权访问指定平台前缀。空平台列表 = 全平台。

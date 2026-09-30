@@ -145,8 +145,126 @@ process.exit(0);
 	}
 }
 
-// TestIndexHTMLNoInlineScript index.html 不得含内联 <script> 块：
-// 严格 CSP（script-src 'self'）会拦截内联脚本，页面将完全不可用。
+// TestAddPanelsRender 「添加账号」各平台表单必须真的渲染出对应字段。
+//
+// 为什么需要：这几个面板是命令式的（切换平台只重绘字段区，不重建整棵子树），
+// 所以语法检查与顶层求值冒烟都看不见它们——字段漏一个、设备流分支抛异常、
+// 或平台切换后字段不刷新，Go 侧测试全绿而用户看到的是空表单。无 node 时跳过。
+func TestAddPanelsRender(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; render check skipped")
+	}
+	dir := copyModules(t)
+
+	// 真实 DOM 桩（不是 Proxy 黑洞）：够 h() 建树并回读结构。
+	harness := `class El {
+  constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.props = {};
+    this.style = {}; this.dataset = {}; this.listeners = {}; this._text = ''; this.isConnected = true; }
+  setAttribute(k, v) { this.props[k] = String(v); }
+  getAttribute(k) { return this.props[k] ?? null; }
+  removeAttribute(k) { delete this.props[k]; }
+  setAttributeNS(a, k, v) { this.setAttribute(k, v); }
+  addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
+  removeEventListener() {}
+  appendChild(c) { this.children.push(c); c.parentNode = this; return c; }
+  append(...cs) { for (const c of cs) this.appendChild(c); }
+  prepend(...cs) { this.children.unshift(...cs); }
+  before() {} after() {} remove() { this.isConnected = false; }
+  insertBefore(c) { return this.appendChild(c); }
+  replaceChildren(...cs) { this.children = cs; for (const c of cs) c.parentNode = this; }
+  focus() {}
+  get firstChild() { return this.children[0] ?? null; }
+  get lastChild() { return this.children[this.children.length - 1] ?? null; }
+  get textContent() { return this._text || this.children.map(c => c.textContent).join(''); }
+  set textContent(v) { this._text = String(v); this.children = []; }
+  get classList() { const self = this; return { add: c => self._cls(c, 1), remove: c => self._cls(c, 0) }; }
+  _cls(c, on) { const s = new Set((this.props.class || '').split(' ').filter(Boolean));
+    on ? s.add(c) : s.delete(c); this.props.class = [...s].join(' '); }
+  get value() { return this._value ?? ''; }
+  set value(v) { this._value = v; }
+  querySelector() { return null; }
+  closest() { return null; }
+}
+globalThis.Node = El; globalThis.Element = El; globalThis.HTMLElement = El;
+globalThis.document = {
+  createElement: t => new El(t), createElementNS: (ns, t) => new El(t),
+  createDocumentFragment: () => new El('#fragment'),
+  createTextNode: t => { const e = new El('#text'); e._text = t; return e; },
+  getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
+  addEventListener() {}, removeEventListener() {},
+  documentElement: new El('html'), head: new El('head'), body: new El('body'), cookie: '',
+};
+globalThis.window = { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }),
+  open() {}, location: { hash: '', href: '' } };
+globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+Object.defineProperty(globalThis, 'navigator',
+  { value: { clipboard: { writeText: () => Promise.resolve() } }, configurable: true, writable: true });
+globalThis.matchMedia = globalThis.window.matchMedia;
+globalThis.fetch = () => new Promise(() => {});
+globalThis.requestAnimationFrame = () => 0;
+globalThis.isSecureContext = false;
+
+// 递归收集 input 数量与按钮（含 hidden 标志），用于断言
+function walk(el, out = { inputs: 0, hiddenInputs: 0, buttons: [] }) {
+  if (!el || typeof el !== 'object') return out;
+  const tag = (el.tagName || '').toLowerCase();
+  if (tag === 'input') { out.inputs++; if (el.hidden) out.hiddenInputs++; }
+  if (tag === 'button') out.buttons.push({ text: el.textContent.trim(), hidden: !!el.hidden });
+  for (const c of el.children || []) walk(c, out);
+  return out;
+}
+const has = (btns, kw, hidden) => btns.some(b => b.text.includes(kw) && b.hidden === hidden);
+
+const { extAddPanel } = await import('./views/ext-add.js');
+const { zaiAddForm } = await import('./views/zai-segment.js');
+
+// 每个平台的凭据字段数（账号标识输入框另计；Copilot 走设备流，不填凭据）
+const WANT = { lobsterai: 4, raccoon: 2, qoder: 4, codearts: 3, copilot: 0 };
+const problems = [];
+for (const [provider, fields] of Object.entries(WANT)) {
+  const panel = extAddPanel(() => {}, { flat: true });
+  const sel = panel.children[0].children[0].children[0];
+  if (!sel || (sel.tagName || '').toLowerCase() !== 'select') { problems.push(provider + ': 未找到平台选择器'); continue; }
+  sel.value = provider;
+  for (const f of sel.listeners.change || []) f({ target: sel });
+  const got = walk(panel);
+  if (got.inputs !== fields + 1) problems.push(provider + ': 输入框 ' + got.inputs + ' 个，期望 ' + (fields + 1));
+  if (provider === 'copilot') {
+    // 设备流：凭据表单整行隐藏（[hidden] 规则在 tokens.css），改出「开始授权」
+    if (got.hiddenInputs !== 1) problems.push('copilot: 标识输入框应隐藏，实际隐藏 ' + got.hiddenInputs + ' 个');
+    if (!has(got.buttons, '开始授权', false)) problems.push('copilot: 缺「开始授权」按钮');
+    if (!has(got.buttons, '添加', true)) problems.push('copilot: 「添加」按钮应隐藏');
+  } else {
+    if (got.hiddenInputs !== 0) problems.push(provider + ': 不该有隐藏输入框');
+    if (!has(got.buttons, '添加', false)) problems.push(provider + ': 缺「添加」按钮');
+  }
+}
+
+const zai = walk(zaiAddForm(() => {}));
+if (zai.inputs !== 2) problems.push('zai: 输入框 ' + zai.inputs + ' 个，期望 2');
+if (!has(zai.buttons, '入池', false)) problems.push('zai: 缺「入池」按钮');
+if (!has(zai.buttons, 'OAuth', false)) problems.push('zai: 缺「OAuth 免密登录」按钮');
+
+if (problems.length) { console.error(problems.join('\n')); process.exit(1); }
+console.log('RENDER OK');
+`
+	hf := filepath.Join(dir, "render.mjs")
+	if err := os.WriteFile(hf, []byte(harness), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(node, hf)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("添加账号表单渲染失败: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("RENDER OK")) {
+		t.Fatalf("渲染检查未通过:\n%s", out)
+	}
+}
+
+// TestIndexHTMLNoInlineScript index.html 不得含内联 <script> 块：// 严格 CSP（script-src 'self'）会拦截内联脚本，页面将完全不可用。
 func TestIndexHTMLNoInlineScript(t *testing.T) {
 	p := newTestPanel()
 	rec := httptest.NewRecorder()

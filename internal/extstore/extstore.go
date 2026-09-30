@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/extprovider/codearts"
+	"github.com/chipchipss/buddyhub/internal/extprovider/copilot"
 	"github.com/chipchipss/buddyhub/internal/extprovider/lobsterai"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
 	"github.com/chipchipss/buddyhub/internal/extprovider/raccoon"
@@ -31,6 +32,8 @@ const (
 	// PLoomyCLI 密码/短信登录落库的 Loomy 账号（区别于本机客户端检测的
 	// "loomy" session 来源；凭据含可选加密密码，支持无人值守续期）。
 	PLoomyCLI = "loomy-cli"
+	// PCopilot GitHub Copilot（设备流登录；凭据为 GitHub token + 短期 Copilot token）。
+	PCopilot = "copilot"
 )
 
 // ExtAccount 一个外部平台账号。
@@ -294,6 +297,9 @@ func (m *Manager) CheckinOne(ctx context.Context, a *ExtAccount) *CheckinResult 
 		}
 		r := codearts.New().CheckinDaily(ctx, &cred)
 		res.Kind, res.Credit, res.Message = r.Kind, r.Credit, r.Message
+	case PCopilot:
+		// Copilot 不是积分平台，没有每日签到；凭据有效性由余额视图（ViewOne）验证。
+		res.Kind, res.Message = "inactive", "Copilot 无需签到（网关直连通道）"
 	default:
 		res.Kind, res.Message = "failed", "未知平台: "+a.Provider
 	}
@@ -365,6 +371,27 @@ func (m *Manager) ViewOne(ctx context.Context, a *ExtAccount) *ExtAccountView {
 			} else {
 				v.Note = err.Error()
 			}
+		}
+	case PCopilot:
+		// Copilot 没有积分余额；视图展示订阅类型 + token 是否仍可续期，
+		// 顺带把续期后的短期 token 写回（等价于一次健康检查）。
+		var cred copilot.Credential
+		if json.Unmarshal(a.Cred, &cred) != nil {
+			v.Note = "凭据解析失败"
+			return v
+		}
+		if fresh, err := copilot.Refresh(ctx, &cred); err == nil {
+			v.BalanceOK = true
+			if raw, merr := json.Marshal(fresh); merr == nil {
+				m.replaceCred(a.Provider, a.ID, raw)
+			}
+			plan := fresh.Plan
+			if plan == "" {
+				plan = "已订阅"
+			}
+			v.Note = "Copilot " + plan + " · " + copilot.FormatExpiry(fresh.ExpiresAt)
+		} else {
+			v.Note = err.Error()
 		}
 	}
 	return v

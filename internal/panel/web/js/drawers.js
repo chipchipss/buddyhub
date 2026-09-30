@@ -9,6 +9,8 @@ import { h, icon, signal, api, apiUpload, toast, openDrawer, closeDrawer, copyTe
 import { qrMatrix, qrSVG } from './qr.js';
 import { refreshOverview } from './store.js';
 import { navigate } from './shell.js';
+import { extAddPanel, stopExtAddTimers } from './views/ext-add.js';
+import { zaiAddForm } from './views/zai-segment.js';
 
 /* ══ 1. 添加账号 ══════════════════════════════════════════════════ */
 const addTab = signal('tencent');
@@ -40,17 +42,25 @@ function renderAdd() {
     body,
     footer: h('div', { class: 'row', style: { width: '100%' } },
       h('span', { class: 'grow' }),
-      h('button', { class: 'btn', text: '关闭', onclick: () => { stopPoll(); closeDrawer(); } }),
+      h('button', { class: 'btn', text: '关闭', onclick: () => { stopPoll(); stopExtAddTimers(); closeDrawer(); } }),
     ),
   });
 }
 
+// 每个平台的接入方式（新增平台时只改这张表）
+const ADD_TABS = [
+  ['tencent', '腾讯 WorkBuddy'],
+  ['loomy', 'Loomy'],
+  ['zai', 'Z.AI'],
+  ['ext', '外部平台'],
+  ['import', '手动 JSON'],
+];
+
 function tabsRow() {
-  const tabs = [['tencent', '腾讯 WorkBuddy'], ['loomy', 'Loomy'], ['import', '手动 JSON']];
-  return h('div', { class: 'seg' },
-    ...tabs.map(([v, n]) => h('button', {
+  return h('div', { class: 'seg', style: { flexWrap: 'wrap' } },
+    ...ADD_TABS.map(([v, n]) => h('button', {
       class: addTab.peek() === v ? 'on' : '', text: n,
-      onclick: () => { addTab.set(v); stopPoll(); renderAdd(); },
+      onclick: () => { addTab.set(v); stopPoll(); stopExtAddTimers(); renderAdd(); },
     })),
   );
 }
@@ -58,12 +68,34 @@ function tabsRow() {
 function tabBody() {
   return h('div', { class: 'stack' },
     tabsRow(),
-    addTab.peek() === 'tencent' ? tencentPanel() : addTab.peek() === 'loomy' ? loomyPanel() : importPanel(),
+    addTab.peek() === 'tencent' ? tencentPanel()
+      : addTab.peek() === 'loomy' ? loomyPanel()
+        : addTab.peek() === 'zai' ? zaiPanel()
+          : addTab.peek() === 'ext' ? extPanel()
+            : importPanel(),
     status.peek().text
       ? h('div', { class: 'chip' + (status.peek().kind === 'fail' ? ' faint' : ' strong'),
           style: { padding: '10px 13px', whiteSpace: 'normal', display: 'block' },
           text: status.peek().text })
       : null,
+  );
+}
+
+// Z.AI / 智谱：JWT 或 API Key 入池，也支持 OAuth 免密登录。
+function zaiPanel() {
+  return h('div', { class: 'stack' },
+    h('div', { class: 'muted', style: { fontSize: '12px' },
+      text: 'JWT 走 Plan 通道（消耗订阅额度）；API Key 走回退通道（免验证码）。入池后可用 zai:GLM-5.3 调用。' }),
+    zaiAddForm(() => refreshOverview()),
+  );
+}
+
+// 外部平台：LobsterAI / 小浣熊 / Qoder / 华为云 CodeArts / GitHub Copilot。
+function extPanel() {
+  return h('div', { class: 'stack' },
+    h('div', { class: 'muted', style: { fontSize: '12px' },
+      text: 'GitHub Copilot 用设备码授权，其余平台粘贴客户端凭据即可。' }),
+    extAddPanel(() => refreshOverview(), { flat: true }),
   );
 }
 

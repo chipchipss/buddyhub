@@ -202,9 +202,18 @@ function addPanel() {
       h('button', { class: 'btn primary', onclick: () => addOpen.set(true) }, icon('plus'), '添加 Z.AI 账号'),
     );
   }
+  return h('div', { class: 'stack' },
+    zaiAddForm(() => { addOpen.set(false); loadZai(); }),
+    h('div', { class: 'row', style: { marginTop: '4px' } },
+      h('button', { class: 'btn ghost', onclick: () => { stopOAuthPoll(); oauth.set(null); addOpen.set(false); } }, '取消'),
+    ),
+  );
+}
 
-  // 整块命令式管理：输入框是非受控的（值在 DOM 里），provider/OAuth 的局部刷新
-  // 走订阅式重绘——避免响应式重渲染把正在输入的名称/密钥清空。
+/** zaiAddForm(onAdded) —— Z.AI / 智谱的「添加账号入池」表单（可独立嵌入抽屉）。
+ *  整块命令式管理：输入框是非受控的（值在 DOM 里），provider/OAuth 的局部刷新
+ *  走订阅式重绘——避免响应式重渲染把正在输入的名称/密钥清空。 */
+export function zaiAddForm(onAdded) {
   const nameInput = h('input', {
     class: 'input', placeholder: '账号名称（如：主号）', style: { flex: '1', minWidth: '150px' },
   });
@@ -234,8 +243,8 @@ function addPanel() {
         const kind = r.mode === 'jwt' ? 'Plan JWT' : 'API Key';
         toast('已入池（识别为 ' + kind + '）');
         nameInput.value = ''; secretInput.value = '';
-        addOpen.set(false);
         await loadZai();
+        await onAdded?.();
       } catch (e) { toast(e.message, 'fail'); }
       finally { ev.currentTarget.disabled = false; }
     },
@@ -289,10 +298,7 @@ function addPanel() {
       flowBox,
       secretInput,
       hintEl,
-      h('div', { class: 'row', style: { marginTop: '4px' } },
-        submitBtn,
-        h('button', { class: 'btn ghost', onclick: () => { stopOAuthPoll(); oauth.set(null); addOpen.set(false); } }, '取消'),
-      ),
+      h('div', { class: 'row', style: { marginTop: '4px' } }, submitBtn),
     ),
   );
 }

@@ -226,6 +226,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/ext/loomy/login_password", p.withAuth(p.extLoginLoomyPassword))
 	p.mux.HandleFunc("POST /panel/api/ext/loomy/send_sms", p.withAuth(p.extLoginLoomySendSMS))
 	p.mux.HandleFunc("POST /panel/api/ext/loomy/login_sms", p.withAuth(p.extLoginLoomySMS))
+	// GitHub Copilot 设备流登录（两段式：start 取设备码 → poll 轮询授权）
+	p.mux.HandleFunc("POST /panel/api/ext/copilot/start", p.withAuth(p.extCopilotStart))
+	p.mux.HandleFunc("POST /panel/api/ext/copilot/poll", p.withAuth(p.extCopilotPoll))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
