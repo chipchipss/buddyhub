@@ -47,6 +47,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
 | 🖥️ **Web 管理面板** | 内嵌单色玻璃面板（前端为原生 ES 模块，无构建步骤），总览 / 账号 / 用量与积分 / 自动化 / 模型档位 / API 密钥 / 配置（热生效）/ 运行日志，`⌘K` 命令面板，见 [Web 管理面板](#-web-管理面板) |
+| 🤖 **多平台账号池** | 腾讯 WorkBuddy（OAuth 设备授权 + 成长任务全自动）· 讯飞 Loomy（客户端检测 / 密码 / 短信 / Token）· 外部平台（LobsterAI · 小浣熊 · Qoder · 华为云 CodeArts 签到）· **Z.AI / ZCode**（Coding Plan JWT + API Key 双通道、额度、套餐领取），见 [Z.AI 账号池](#-zai--zcode-账号池) |
 
 ## 🎯 成长任务一键完成（17/18）
 
@@ -122,6 +123,57 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 ### 连登兑换与抽奖（自动）
 
 成长中心连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。网关把它挂在每日签到排程末尾自动跑闭环（见[定时任务](#定时任务)）：档位解锁当天自动兑换、有抽奖次数自动抽完，全程无需人工盯。
+
+## 🤖 Z.AI / ZCode 账号池
+
+把 Z.AI（智谱 GLM）的 **Coding Plan 订阅账号**与 **API Key** 收进同一账号池，对外仍是同一个 OpenAI 兼容接口——模型名带 `zai:` 前缀即可（`zai:GLM-5.3`、`zai:glm-5.2` 等，小写别名自动映射到官方大小写敏感名）。
+
+### 两条通道
+
+| 通道 | 端点 | 鉴权 | 额度来源 | 验证码 |
+|---|---|---|---|---|
+| **Plan**（JWT） | `zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages` | `Bearer <三段 JWT>` | Coding Plan 订阅 | **必需** |
+| **回退**（API Key） | `api.z.ai/api/anthropic/v1/messages` | `x-api-key` | 充值 / 兑换额度 | 免 |
+
+一个账号可同时持有两者：OAuth 登录会**自动把 JWT 兑换成 API Key 一并入池**，JWT 额度耗尽或 429 耗尽时无缝回落，不需要人工干预。
+
+### 添加账号（三种方式）
+
+1. **OAuth 免密登录**（推荐）：面板「自动化 → Z.AI」→ OAuth 免密登录 → 浏览器完成登录 → 自动入池（同时兑换回退 Key）
+2. **手动粘贴**：Coding Plan JWT（三段点分）或 API Key
+3. **旧配置**：`schedule.zai.zai_keys` / `bigmodel_keys` 在账号池为空时自动导入为账号
+
+### 验证码：外部求解器契约
+
+Plan 通道每次调用需携带阿里云无痕验证参数。本仓库**不内嵌求解器实现**（求解需要在模拟浏览器里跑官方 SDK），只约定契约：
+
+```
+<command> <solver.js> <sceneId> <region> <prefix>
+  → stdout 打印 VERIFY_PARAM=<param>
+```
+
+把 `schedule.zai.captcha_solver` 指向任意满足该契约的求解器即可（例如 zcode2api 的 `captcha_node/solver.js`，首次先 `npm install`）。**不配置时 Plan 通道自动降级**，账号自带的 API Key 照常工作。
+
+验证参数有效期约 2 分钟，网关维护一个预解池（水位 `captcha_pool_min/max`）在后台补货，热路径直接从池里取（亚毫秒）；上游返回验证码挑战时整池作废——那批参数很可能已被风控标记，复用只会连环失败。
+
+### 账号状态机
+
+```
+ACTIVE ──额度用完(402/quota)──▶ EXHAUSTED（定期再探，恢复即回 ACTIVE）
+  │  ──5xx 重试耗尽──────────▶ COOLING（冷却 300s）
+  │  ──401/403(非验证码)─────▶ INVALID（凭证失效，需重新登录）
+  └──3012/405 真风控─────────▶ DISABLED（保护资产，须人工确认恢复）
+```
+
+**429 不冷却账号**：按 `Retry-After` 原地等待重试，耗尽后换号，账号保持可用——限流不是账号的错。验证码挑战（`code 3007`）同样是**换一枚参数原地重试**，不会把账号判死。
+
+### 额度、领取与指纹
+
+- **额度**：`billing/current` + `billing/balance` + `usage` 三查询，同模型多窗口（日窗 + 一次性赠送）**相加合并**；全窗口归零且无生效赠送 → 标记额度用完，恢复即回可用（冷却期不提前解除、风控禁用绝不因额度数字复活）。后台默认 5 分钟错峰刷新
+- **限时套餐领取**：激活上报（`app_launch` / `app_daily_active`）→ `billing/preview` → 逐个 `billing/claim`；**1005「今日名额用完」按上游 `next_at` 退避**（等待期不再打 claim，preview 照常发现新套餐）。默认 10 分钟一轮，面板也可手动「领取套餐」
+- **设备指纹**：每个账号独立一套桌面形态（`darwin-arm64` / `win32-x64` 等真实 SKU + 独立 `device_mid`），**一号一台**——多账号共用设备形态是上游的关联信号。面板可「换指纹」重发
+
+> ⚠️ 上游对 billing 族接口的连续查询敏感（WAF 会拦）。额度轮询与领取轮都做了错峰，**不建议把间隔调得过密**。
 
 ## 🆚 与上游的差异
 
@@ -374,6 +426,17 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `session_sticky.enabled` | `true` | 会话粘性路由开关 |
 | `session_sticky.ttl` | `30m` | 会话绑定 TTL（滚动续期） |
 | `session_sticky.gc_interval` | `5m` | 过期绑定 GC 周期 |
+| `schedule.zai.zai_keys` | 空 | **旧版兼容入口**：账号池为空时导入为账号；此后以账号池为准（面板管理），见 [Z.AI 账号池](#-zai--zcode-账号池) |
+| `schedule.zai.bigmodel_keys` | 空 | 同上，智谱开放平台（open.bigmodel.cn）的 Key |
+| `schedule.zai.accounts_file` | 空 | 账号池落盘路径；空 = 与 `state_file` 同目录的 `zai-accounts.json` |
+| `schedule.zai.max_concurrency` | `2` | Z.AI 单账号并发上限（`0` = 不限；满并发账号智能跳过不排队） |
+| `schedule.zai.captcha_solver` | 空 | 验证码求解器脚本路径；**空 = Plan（JWT）通道不可用**，仅走 API Key 回退 |
+| `schedule.zai.captcha_command` | `node` | 求解器解释器 |
+| `schedule.zai.captcha_timeout_sec` | `40` | 单次求解超时（秒） |
+| `schedule.zai.captcha_pool_min` / `_max` | `4` / `12` | 预解池水位（低于 min 后台补货） |
+| `schedule.zai.system_file` | 空 | Plan 通道要求的身份块 JSON；缺失时 JWT 请求可能被上游拒为 3012 |
+| `schedule.zai.quota_refresh_minutes` | `5` | 后台额度刷新间隔（分钟，`0` = 关闭）。⚠️ 上游 WAF 对 billing 族敏感 |
+| `schedule.zai.claim_round_minutes` | `10` | 后台套餐领取轮间隔（分钟，`0` = 关闭） |
 
 ### 上游超时语义（三段各归其位）
 
@@ -541,7 +604,7 @@ web/
   js/store.js         共享状态与主题
   js/qr.js            离线 QR 编码器（券码二维码，CSP 下不引外链服务）
   js/drawers.js       抽屉：添加账号 / 账号任务 / 券码
-  js/views/*.js       八个视图，各自声明 render()
+  js/views/*.js       八个视图 + 分段模块（zai-segment / ext-add），各自声明 render()
 ```
 
 内核约 250 行、零依赖：`signal()` 是可读写响应式值，`effect()` 自动追踪依赖——**视图就是一个返回 DOM 节点的函数**，渲染期间读到的信号变化时框架自动换掉旧节点；DOM 由 `h()` 声明式构建而非字符串拼接，注入类问题在结构上不存在。
@@ -567,7 +630,7 @@ web/
 | **总览** | 池健康瓷贴（总数 / 可用 / 冷却 / 禁用 / 积分剩余与总额 / 粘性会话）+ 批量操作 + 平台分布 + 最近动态 |
 | **账号** | 两个视角：**账号池**（账号卡：状态、积分量条、成功失败、上次用量；单号操作签到 / 余额 / 任务 / 解冻 / 禁用 / 移除）与**全部平台**目录（跨平台只读总览，可跳各平台管理页） |
 | **用量与积分** | Token 用量（时序堆叠图 + 按账号 / 模型 / 域三张表，支持窗口与平台筛选）与积分构成（逐包对比：来源、面额、剩余、发放与到期） |
-| **自动化** | 三段工作台：**腾讯任务**（扫描待办 → 排队执行，账号内串行、账号间并发 1–3；开学季券码查询）· **Loomy**（新手之旅 8 项一键完成、每日签到、积分余额）· **外部平台**（LobsterAI / 小浣熊 / Qoder / 华为云 账号卡 + 一键签到） |
+| **自动化** | 四段工作台：**腾讯任务**（扫描待办 → 排队执行，账号内串行、账号间并发 1–3；开学季券码查询）· **Loomy**（新手之旅 8 项一键完成、每日签到、积分余额）· **外部平台**（LobsterAI / 小浣熊 / Qoder / 华为云 账号卡 + 一键签到 + **逐字段添加账号**）· **Z.AI**（Coding Plan 账号池：OAuth 免密登录 / 手动 JWT / API Key、额度与用量、套餐领取、设备指纹换发，见 [Z.AI 账号池](#-zai--zcode-账号池)） |
 | **模型与档位** | 实时查询上游：积分倍率（牌价 vs 生效价）、默认思考档、支持档位（含「off（可关）」）、上下文长度与最大输出；有探测数据时显示**实测上限与钳制告警**（见「探测模型真实输出上限」） |
 | **API 密钥** | 生成 / 删除多把 Key，每把可授权平台子集（留空 = 全平台）；列表展示密钥与授权范围 |
 | **配置** | 在线编辑 config.json：API 密钥、定时任务（四类任务时点与开关、余额刷新间隔）、账号池与流量治理参数、上游超时与 UA、提示词模式、脱敏 / 粘性开关 |

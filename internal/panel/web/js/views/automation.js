@@ -8,6 +8,7 @@ import { defineView } from '../shell.js';
 import { refreshOverview } from '../store.js';
 import { openVouchers } from '../drawers.js';
 import { zaiSegment, loadZai } from './zai-segment.js';
+import { extAddPanel } from './ext-add.js';
 
 const seg = signal('tencent');
 const queue = signal(null);
@@ -339,8 +340,11 @@ function extSeg() {
           : h('div', { class: 'empty' }, icon('accounts'), h('div', { class: 't', text: '还没有外部账号' }),
             h('div', { class: 'd', text: '可用「添加账号」弹层，或在下方手工粘贴凭据' })),
 
+      // 逐字段添加（每个平台按自己的凭据形态出表单）
+      extAddPanel(loadExt),
+
       h('details', { style: { marginTop: '6px' } },
-        h('summary', { class: 'muted', style: { cursor: 'pointer', fontSize: '12.5px' }, text: '手工添加（粘贴凭据 JSON）' }),
+        h('summary', { class: 'muted', style: { cursor: 'pointer', fontSize: '12.5px' }, text: '高级：粘贴完整凭据 JSON' }),
         h('div', { class: 'row wrap', style: { marginTop: '10px' } },
           h('select', { class: 'input', id: 'ext-provider', style: { width: 'auto' } },
             ...Object.entries(EXT_NAMES).map(([v, n]) => h('option', { value: v, text: n }))),
