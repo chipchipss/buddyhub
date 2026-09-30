@@ -10,6 +10,7 @@ package panel
 //	Copilot            设备码     申请设备码 → GitHub 输入 → 轮询兑换 token
 //	Cline              设备码     WorkOS 设备码 → 浏览器确认 → 轮询（再登记换令牌）
 //	QClaw              扫码回填   面板出微信二维码 → 扫码授权 → 用户把回调里的 code 贴回来
+//	Trae               本机回调   网关临时监听回环端口 → 浏览器授权后自动跳回 → 无需人工操作
 //
 // 都是两段式交互，无法在一次 HTTP 往返里完成，故用内存会话：
 //
@@ -24,6 +25,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -33,6 +35,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extprovider/qclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
 	"github.com/chipchipss/buddyhub/internal/extprovider/raccoon"
+	"github.com/chipchipss/buddyhub/internal/extprovider/trae"
 	"github.com/chipchipss/buddyhub/internal/extstore"
 )
 
@@ -67,6 +70,11 @@ type extLoginSession struct {
 	clineFlow *cline.DeviceFlow
 	// qclaw
 	qclawFlow *qclaw.LoginFlow
+	// trae：本机回环监听 + 回调结果通道
+	traeCtx  *trae.LoginContext
+	traeLn   net.Listener
+	traeDone chan *trae.Callback
+	traeErr  chan error
 }
 
 var (
@@ -114,8 +122,13 @@ func (s *extLoginSession) resetErrStreak() {
 
 func dropExtLoginSession(id string) {
 	extLoginMu.Lock()
+	s := extLoginSessions[id]
 	delete(extLoginSessions, id)
 	extLoginMu.Unlock()
+	// Trae 的回环监听要随手关掉，否则会话过期后端口一直占着
+	if s != nil && s.traeLn != nil {
+		_ = s.traeLn.Close()
+	}
 }
 
 func putExtLoginSession(s *extLoginSession) string {
@@ -227,6 +240,37 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 			"hint":       "用微信扫码授权，然后把跳转后页面地址里的 code 贴回来",
 		})
 
+	case extstore.PTrae:
+		lctx, ln, err := trae.NewLogin(ctx)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		sess := &extLoginSession{
+			provider: provider, createdAt: time.Now(),
+			traeCtx: lctx, traeLn: ln,
+			traeDone: make(chan *trae.Callback, 1),
+			traeErr:  make(chan error, 1),
+		}
+		// 后台等回调：浏览器授权后会跳到本机这个端口
+		go func() {
+			cb, aerr := trae.AwaitCallback(context.Background(), ln, trae.LoginTTL)
+			if aerr != nil {
+				sess.traeErr <- aerr
+				return
+			}
+			sess.traeDone <- cb
+		}()
+		id := putExtLoginSession(sess)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":         true,
+			"mode":       "callback",
+			"session":    id,
+			"auth_url":   lctx.AuthURL,
+			"expires_in": int(trae.LoginTTL.Seconds()),
+			"hint":       "在浏览器打开链接完成授权，本页会自动接住回调（浏览器需与本机在同一台机器）",
+		})
+
 	default:
 		writeErr(w, http.StatusBadRequest, "该平台暂不支持登录入池："+provider)
 	}
@@ -272,6 +316,8 @@ func (p *Panel) extLoginPoll(w http.ResponseWriter, r *http.Request) {
 		cred, done, note = pollClineCode(ctx, sess)
 	case extstore.PQClaw:
 		cred, done, note = completeQClaw(ctx, sess, code)
+	case extstore.PTrae:
+		cred, done, note = pollTraeCallback(ctx, sess)
 	default:
 		writeErr(w, http.StatusBadRequest, "该平台暂不支持登录入池："+provider)
 		return
@@ -492,4 +538,28 @@ func completeQClaw(ctx context.Context, sess *extLoginSession, raw string) (cred
 		label = "QClaw " + c.Nickname
 	}
 	return &extLoginCred{id: id, label: label, note: "微信扫码登录", cred: *c}, true, ""
+}
+
+// pollTraeCallback 检查本机回调是否已到达（不阻塞轮询）。
+func pollTraeCallback(ctx context.Context, sess *extLoginSession) (cred *extLoginCred, done bool, note string) {
+	select {
+	case cb := <-sess.traeDone:
+		c, err := trae.Complete(ctx, sess.traeCtx, cb)
+		if err != nil {
+			return nil, true, "Trae 授权失败：" + err.Error()
+		}
+		id := c.UID
+		if id == "" {
+			id = "trae-" + head(newSessionID(), 8)
+		}
+		label := "Trae"
+		if c.Nickname != "" {
+			label = "Trae " + c.Nickname
+		}
+		return &extLoginCred{id: id, label: label, note: "Trae SOLO", cred: *c}, true, ""
+	case err := <-sess.traeErr:
+		return nil, true, "等待授权回调失败：" + err.Error()
+	default:
+		return nil, false, "等待浏览器授权…"
+	}
 }

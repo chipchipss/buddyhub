@@ -24,6 +24,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extprovider/copilot"
 	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qclaw"
+	"github.com/chipchipss/buddyhub/internal/extprovider/trae"
 	"github.com/chipchipss/buddyhub/internal/livecfg"
 	"github.com/chipchipss/buddyhub/internal/panel"
 	"github.com/chipchipss/buddyhub/internal/pool"
@@ -280,6 +281,13 @@ func main() {
 			log.Printf("[qclaw] 代理配置无效，本通道将直连：%v", err)
 		} else {
 			log.Printf("[qclaw] 本通道走代理 %s", proxy)
+		}
+	}
+	if proxy := cfg.Schedule.Trae.Proxy; strings.TrimSpace(proxy) != "" {
+		if err := trae.SetProxy(proxy); err != nil {
+			log.Printf("[trae] 代理配置无效，本通道将直连：%v", err)
+		} else {
+			log.Printf("[trae] 本通道走代理 %s", proxy)
 		}
 	}
 

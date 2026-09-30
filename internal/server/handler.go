@@ -18,6 +18,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
 	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qclaw"
+	"github.com/chipchipss/buddyhub/internal/extprovider/trae"
 	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/httpauth"
 	"github.com/chipchipss/buddyhub/internal/livecfg"
@@ -137,6 +138,7 @@ type Handler struct {
 	lastClineErr    string
 	lastAutoClawErr string
 	lastQClawErr    string
+	lastTraeErr     string
 
 	// clineFlights / autoclawFlights 续期单飞表。
 	// 两家的 refresh_token 都是一次性轮换语义：并发续期会互相作废并把人踢下线，
@@ -144,6 +146,7 @@ type Handler struct {
 	clineFlights    flightGroup[*cline.Credential]
 	autoclawFlights flightGroup[*autoclaw.Credential]
 	qclawFlights    flightGroup[*qclaw.Credential]
+	traeFlights     flightGroup[*trae.Credential]
 }
 
 // NewHandler 构建 handler。
@@ -588,6 +591,22 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		out = append(out, entry)
 	}
+	// Trae 模型名单（trae: 前缀）：有账号时实时拉（10 分钟缓存）。
+	for _, m := range h.traeCatalog() {
+		if m.ID == "" {
+			continue
+		}
+		entry := map[string]any{
+			"id":       traeModelPrefix + m.ID,
+			"object":   "model",
+			"created":  1753600000,
+			"owned_by": "trae",
+		}
+		if m.Name != "" && m.Name != m.ID {
+			entry["description"] = m.Name
+		}
+		out = append(out, entry)
+	}
 	// Loomy 模型名单（loomy: 前缀）：有可用凭据时实时拉上游目录透出
 	// （原样无别名；上游对未知模型静默回落 deepseek，故客户端应读响应 model 字段）。
 	if mods := h.loomyCatalog(); len(mods) > 0 {
@@ -893,6 +912,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			detail += "；最近失败原因: " + h.lastQClawErr
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_qclaw_account", detail)
+		return
+	}
+
+	// Trae 直连通道（trae: 前缀模型）：走 extstore 里的 Trae 账号（本机回调授权）。
+	// 上游是 SOLO 信封：出站体白名单重建、响应是自定义事件流，两侧都要转换。
+	if isTraeModel(bareModel) {
+		tm := strings.TrimPrefix(bareModel, traeModelPrefix)
+		bodyTM := body
+		if tm != bareModel {
+			bodyTM = rewriteModel(body, tm)
+		}
+		if h.traeChatStream(w, r, bodyTM, tm) {
+			return
+		}
+		detail := "没有可用的 Trae 账号（面板-添加账号-外部平台-Trae 浏览器授权后重试）"
+		if h.lastTraeErr != "" {
+			detail += "；最近失败原因: " + h.lastTraeErr
+		}
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_trae_account", detail)
 		return
 	}
 

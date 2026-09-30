@@ -226,6 +226,7 @@ const PLATFORMS = [
   { id: 'cline', name: 'Cline', group: 'gateway', prefix: 'cline:', login: 'code' },
   { id: 'autoclaw', name: 'AutoClaw（智谱）', group: 'gateway', prefix: 'autoclaw:', login: 'sms' },
   { id: 'qclaw', name: 'QClaw（腾讯）', group: 'gateway', prefix: 'qclaw:', login: 'paste' },
+  { id: 'trae', name: 'Trae（字节）', group: 'gateway', prefix: 'trae:', login: 'callback' },
 ];
 
 // fetch 桩必须**先**装好再拉注册表，否则会挂在前面那个永不 resolve 的空桩上
@@ -255,6 +256,8 @@ const WANT = {
   autoclaw: { fields: 0, login: '发送验证码', inputs: 2 },
   // 扫码回填：点「微信扫码登录」才出二维码与回填框（发起前只有一个按钮）
   qclaw: { fields: 0, login: '微信扫码登录' },
+  // 本机回调复用「浏览器授权」交互（发起前只有一个按钮）
+  trae: { fields: 0, login: '浏览器授权登录' },
 };
 const problems = [];
 for (const [provider, want] of Object.entries(WANT)) {

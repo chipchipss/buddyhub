@@ -16,6 +16,7 @@ func TestPlatformRegistryIsWellFormed(t *testing.T) {
 	validLogins := map[string]bool{
 		LoginNone: true, LoginOAuth: true, LoginDetect: true, LoginSMS: true,
 		LoginQR: true, LoginDevice: true, LoginCode: true, LoginManual: true, LoginConfig: true,
+		LoginCallback: true,
 	}
 	for _, p := range platforms {
 		if p.ID == "" {

@@ -92,6 +92,8 @@ function loginSpecFor(p) {
   switch (p && p.login) {
     case 'qr':     return { kind: 'qr', button: '微信扫码登录', hint: '用微信扫一扫，在手机上确认登录' };
     case 'device': return { kind: 'device', button: '浏览器授权登录', hint: '在浏览器打开链接并完成登录授权' };
+    // 本机回调：交互与 device 相同（出链接 + 自动轮询），差别在回调由网关自己接住
+    case 'callback': return { kind: 'device', button: '浏览器授权登录', hint: '在浏览器打开链接完成授权，本页会自动接住回调' };
     case 'code':   return { kind: 'code', button: '开始授权', hint: '在浏览器打开链接、输入设备码并确认' };
     case 'sms':    return { kind: 'sms', button: '手机号登录', hint: '支持手机短信登录' };
     case 'paste':  return { kind: 'paste', button: '微信扫码登录', hint: '扫码后把回调地址里的 code 贴回来' };

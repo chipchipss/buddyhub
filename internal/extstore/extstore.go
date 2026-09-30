@@ -24,6 +24,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extprovider/qclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
 	"github.com/chipchipss/buddyhub/internal/extprovider/raccoon"
+	"github.com/chipchipss/buddyhub/internal/extprovider/trae"
 )
 
 // Provider 平台标识。
@@ -43,6 +44,8 @@ const (
 	PAutoClaw = "autoclaw"
 	// PQClaw QClaw（腾讯；微信扫码登录）。
 	PQClaw = "qclaw"
+	// PTrae Trae（字节 SOLO；本机回调授权）。
+	PTrae = "trae"
 )
 
 // ExtAccount 一个外部平台账号。
@@ -318,6 +321,8 @@ func (m *Manager) CheckinOne(ctx context.Context, a *ExtAccount) *CheckinResult 
 		res.Kind, res.Message = "inactive", "AutoClaw 无需签到（网关直连通道）"
 	case PQClaw:
 		res.Kind, res.Message = "inactive", "QClaw 无需签到（网关直连通道）"
+	case PTrae:
+		res.Kind, res.Message = "inactive", "Trae 无需签到（网关直连通道）"
 	default:
 		res.Kind, res.Message = "failed", "未知平台: "+a.Provider
 	}
@@ -389,6 +394,19 @@ func (m *Manager) ViewOne(ctx context.Context, a *ExtAccount) *ExtAccountView {
 			} else {
 				v.Note = err.Error()
 			}
+		}
+	case PTrae:
+		// Trae 视图：能拉到模型目录即视为可用。
+		var cred trae.Credential
+		if json.Unmarshal(a.Cred, &cred) != nil {
+			v.Note = "凭据解析失败"
+			return v
+		}
+		if _, err := trae.ListModels(ctx, &cred); err == nil {
+			v.BalanceOK = true
+			v.Note = "Trae SOLO"
+		} else {
+			v.Note = err.Error()
 		}
 	case PQClaw:
 		// QClaw 视图：对话用的 sk key 是长期凭据，能列模型即视为可用。

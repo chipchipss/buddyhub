@@ -19,15 +19,16 @@ import (
 
 // 入池方式：决定前端出哪一套交互。
 const (
-	LoginNone   = ""       // 无（本机凭据 / 配置页填写）
-	LoginOAuth  = "oauth"  // 浏览器 OAuth 设备授权
-	LoginDetect = "detect" // 本机客户端登录态检测
-	LoginSMS    = "sms"    // 手机短信验证码
-	LoginQR     = "qr"     // 扫码（面板出二维码）
-	LoginDevice = "device" // 设备授权链接（浏览器打开）
-	LoginCode   = "code"   // 设备码（用户在浏览器输入码）
-	LoginManual = "manual" // 逐字段手工填写凭据
-	LoginConfig = "config" // 配置页填写
+	LoginNone     = ""         // 无（本机凭据 / 配置页填写）
+	LoginOAuth    = "oauth"    // 浏览器 OAuth 设备授权
+	LoginDetect   = "detect"   // 本机客户端登录态检测
+	LoginSMS      = "sms"      // 手机短信验证码
+	LoginQR       = "qr"       // 扫码（面板出二维码）
+	LoginDevice   = "device"   // 设备授权链接（浏览器打开）
+	LoginCode     = "code"     // 设备码（用户在浏览器输入码）
+	LoginCallback = "callback" // 本机回调（浏览器授权后自动跳回网关，无需人工操作）
+	LoginManual   = "manual"   // 逐字段手工填写凭据
+	LoginConfig   = "config"   // 配置页填写
 )
 
 // 分组按**能力**分（不是按「怎么配置」——那是 Login 字段的事）：
@@ -72,7 +73,9 @@ var platforms = []Platform{
 	{ID: "qoder", Name: "Qoder（阿里）", Group: GroupGateway, Prefix: "qoder:", Login: LoginDevice,
 		Checkin: true, Note: "设备授权登录"},
 	{ID: "qclaw", Name: "QClaw（腾讯）", Group: GroupGateway, Prefix: "qclaw:", Login: LoginQR,
-		Note: "微信扫码登录"},
+		Note: "微信扫码登录（上游已宣布停运）"},
+	{ID: "trae", Name: "Trae（字节）", Group: GroupGateway, Prefix: "trae:", Login: LoginCallback,
+		Note: "浏览器授权（本机回调）"},
 
 	// ── 积分 / 签到平台（无对话 API）──
 	{ID: "raccoon", Name: "小浣熊（商汤）", Group: GroupPoints, Login: LoginQR,
