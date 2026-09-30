@@ -7,6 +7,7 @@ import { h, icon, signal, api, toast, confirmDialog } from '../kernel.js';
 import { defineView } from '../shell.js';
 import { refreshOverview } from '../store.js';
 import { openVouchers } from '../drawers.js';
+import { zaiSegment, loadZai } from './zai-segment.js';
 
 const seg = signal('tencent');
 const queue = signal(null);
@@ -382,6 +383,7 @@ export default defineView({
   tick() {
     if (seg.peek() === 'loomy') loadLoomy();
     if (seg.peek() === 'ext') loadExt();
+    if (seg.peek() === 'zai') loadZai();
     if (seg.peek() === 'tencent' && queueTimer) pollQueue();
   },
   render() {
@@ -392,9 +394,10 @@ export default defineView({
           h('button', { class: s === 'tencent' ? 'on' : '', text: '腾讯任务', onclick: () => seg.set('tencent') }),
           h('button', { class: s === 'loomy' ? 'on' : '', text: 'Loomy', onclick: () => { seg.set('loomy'); loadLoomy(); loadCredits(); } }),
           h('button', { class: s === 'ext' ? 'on' : '', text: '外部平台', onclick: () => { seg.set('ext'); loadExt(); } }),
+          h('button', { class: s === 'zai' ? 'on' : '', text: 'Z.AI', onclick: () => { seg.set('zai'); loadZai(); } }),
         ),
       ),
-      s === 'tencent' ? tencentSeg() : s === 'loomy' ? loomySeg() : extSeg(),
+      s === 'tencent' ? tencentSeg() : s === 'loomy' ? loomySeg() : s === 'zai' ? zaiSegment() : extSeg(),
     );
   },
 });

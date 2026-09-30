@@ -243,6 +243,10 @@ func main() {
 	defer rec.Stop()
 	log.Printf("[usage] 逐请求用量记录已启用: %s (%s)", usagePath, rec.Describe())
 
+	// Z.AI / ZCode 账号池（Plan JWT + API Key 回退 + 验证码 + 状态机）。
+	// 未配置账号时返回 nil，zai: 通道保持禁用。
+	zaiClient, zaiCaptcha := buildZaiStack(cfg)
+
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -253,6 +257,8 @@ func main() {
 		RedisMode:   redisMode,
 		StickyCount: sessCount,
 		ZaiKeys:     cfg.Schedule.Zai.ZaiKeys,
+		Zai:         zaiClient,
+		ZaiCaptcha:  zaiCaptcha,
 		CodexCount:  server.CodexCount,
 		FreeKeysDesc: func() []struct{ Provider, Masked string } {
 			return server.KeyPoolDesc()
@@ -292,6 +298,8 @@ func main() {
 		APIKey:       cfg.APIKey,
 		ZaiKeys:      cfg.Schedule.Zai.ZaiKeys,
 		BigModelKeys: cfg.Schedule.Zai.BigModelKeys,
+		Zai:          zaiClient,
+		ZaiCaptcha:   zaiCaptcha,
 		Session:      sessRouter,
 		StickyCount:  sessCount,
 		RedisMode:    redisMode,

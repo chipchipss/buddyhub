@@ -1,10 +1,13 @@
-// Package server: zai_bridge.go — Z.AI / 智谱 GLM API Key 直连路由。
+// Package server: zai_bridge.go — Z.AI / ZCode 通道（Plan JWT + API Key 回退）。
 //
-// 模型名带 "zai:" 前缀（如 zai:GLM-5.3-Flash，大小写不敏感别名自动映射）时走
-// 本路径：OpenAI chat 请求 → Anthropic messages 体（upstream.ZaiTranslateIn）
-// → api.z.ai / open.bigmodel.cn（x-api-key 鉴权，免验证码）→ 响应反向翻译
-// （JSON 直转；SSE 经 ZaiSSEConverter 有状态转换）。凭据取 config 的
-// schedule.zai 段（zai_keys / bigmodel_keys 轮换），皆空时 503 提示。
+// 模型名带 "zai:" 前缀时走本路径：
+//
+//	OpenAI chat 请求 → Anthropic messages 体（upstream.ZaiTranslateIn）
+//	  → zai.Client.Do（池化选号 → 取验证码 → 构造身份头 → 分类失败 → 更新账号状态）
+//	  → 响应反向翻译（JSON 直转；SSE 经 ZaiSSEConverter 有状态转换）
+//
+// 账号来源与运行态由 internal/zai 管理（data/zai-accounts.json），
+// 不再直接从 config 的 key 数组轮询——那套已被账号池取代（首次启动会自动导入）。
 package server
 
 import (
@@ -20,19 +23,12 @@ import (
 	"github.com/chipchipss/buddyhub/internal/upstream"
 )
 
-// zaiKeys 取两池 key（config schedule.zai 透传到 Config 值）。
-func (h *Handler) zaiKeys() (zai, bigmodel []string) {
-	return h.cfg.ZaiKeys, h.cfg.BigModelKeys
-}
-
-// ZaiChatStream Z.AI 通道：翻译→转发→反译。返回 false = 无可用 key。
+// ZaiChatStream Z.AI 通道：翻译 → 池化转发 → 反译。返回 false = 无可用账号。
 func (h *Handler) ZaiChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
-	zaiKeys, bmKeys := h.zaiKeys()
-	type pool struct {
-		kind string
-		keys []string
+	if h.cfg.Zai == nil {
+		h.lastZaiErr = "未配置 Z.AI 账号（面板「自动化 → Z.AI」添加，或 config 的 schedule.zai.zai_keys）"
+		return false
 	}
-	pools := []pool{{"zai", zaiKeys}, {"bigmodel", bmKeys}}
 
 	anthBody, model, err := upstream.ZaiTranslateIn(body)
 	if err != nil {
@@ -40,55 +36,74 @@ func (h *Handler) ZaiChatStream(w http.ResponseWriter, r *http.Request, body []b
 		return true
 	}
 
-	lastErr := "没有可用的 Z.AI / 智谱 API Key（配置 schedule.zai 后重试）"
-	for _, p := range pools {
-		for _, key := range p.keys {
-			rc, status, ctype, err := upstream.ZaiPostMessages(p.kind, key, anthBody)
-			if err != nil {
-				lastErr = fmt.Sprintf("%s: %v", p.kind, err)
-				// 401/403/402 = 该 key 失效/欠费，换下一把；429 也换（免费并发低）
-				if status == http.StatusUnauthorized || status == http.StatusForbidden ||
-					status == http.StatusPaymentRequired || status == http.StatusTooManyRequests {
-					log.Printf("zai-bridge: %s key 失效/限流 (HTTP %d)", p.kind, status)
-					continue
-				}
-				log.Printf("zai-bridge: %s 请求失败 (HTTP %d): %v", p.kind, status, err)
-				continue
-			}
-			isSSE := strings.Contains(ctype, "text/event-stream")
-			if h.clientWantsStream(body) {
-				if isSSE {
-					h.proxyZaiSSE(w, rc, model)
-				} else {
-					// 上游 JSON：包成单帧 SSE（客户端要流式而上游非流式）
-					h.proxyZaiJSONAsSSE(w, rc, model)
-				}
-			} else {
-				if isSSE {
-					writeJSON(w, http.StatusOK, zaiAggregateSSE(rc, model))
-				} else {
-					defer rc.Close()
-					raw, rerr := io.ReadAll(rc)
-					if rerr != nil {
-						writeOpenAIError(w, http.StatusBadGateway, "upstream_read", rerr.Error())
-						return true
-					}
-					out, terr := upstream.ZaiTranslateOutJSON(raw, model)
-					if terr != nil {
-						writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", terr.Error())
-						return true
-					}
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write(out)
-				}
-			}
-			log.Printf("zai-bridge: kind=%s model=%s 建流成功 ctype=%s", p.kind, model, ctype)
-			return true
+	res, err := h.cfg.Zai.Do(r.Context(), anthBody)
+	if err != nil {
+		h.lastZaiErr = err.Error()
+		log.Printf("zai-bridge: 无可用账号：%v", err)
+		return false
+	}
+	rc := res.Resp.Body
+	ctype := res.Resp.Header.Get("Content-Type")
+	isSSE := strings.Contains(ctype, "text/event-stream")
+
+	channel := "apikey"
+	if res.UsedPlan {
+		channel = "plan"
+	}
+	log.Printf("zai-bridge: 账号=%s 通道=%s model=%s ctype=%s", res.Account.Name, channel, model, ctype)
+
+	if h.clientWantsStream(body) {
+		if isSSE {
+			h.proxyZaiSSE(w, rc, model)
+		} else {
+			// 上游 JSON：包成单帧 SSE（客户端要流式而上游非流式）
+			h.proxyZaiJSONAsSSE(w, rc, model)
+		}
+		return true
+	}
+
+	if isSSE {
+		writeJSON(w, http.StatusOK, zaiAggregateSSE(rc, model))
+		return true
+	}
+	defer rc.Close()
+	raw, rerr := io.ReadAll(rc)
+	if rerr != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_read", rerr.Error())
+		return true
+	}
+	out, terr := upstream.ZaiTranslateOutJSON(raw, model)
+	if terr != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", terr.Error())
+		return true
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
+	return true
+}
+
+// zaiStatusJSON 供面板/状态接口读取的 Z.AI 通道概览。
+func (h *Handler) zaiStatusJSON() map[string]any {
+	if h.cfg.Zai == nil {
+		return map[string]any{"configured": false}
+	}
+	out := map[string]any{
+		"configured": true,
+		"accounts":   h.cfg.Zai.Snapshots(),
+		"pool":       h.cfg.Zai.Stats(),
+	}
+	if h.cfg.ZaiCaptcha != nil {
+		out["captcha"] = map[string]any{
+			"enabled":    h.cfg.ZaiCaptcha.Enabled(),
+			"pool_size":  h.cfg.ZaiCaptcha.PoolSize(),
+			"last_error": h.cfg.ZaiCaptcha.LastError(),
 		}
 	}
-	h.lastZaiErr = lastErr
-	return false
+	if h.lastZaiErr != "" {
+		out["last_error"] = h.lastZaiErr
+	}
+	return out
 }
 
 // proxyZaiSSE 读 Anthropic SSE 事件流 → 转换为 OpenAI chunk 流写出。

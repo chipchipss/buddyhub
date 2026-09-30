@@ -27,6 +27,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/scheduler"
 	"github.com/chipchipss/buddyhub/internal/upstream"
 	"github.com/chipchipss/buddyhub/internal/usage"
+	"github.com/chipchipss/buddyhub/internal/zai"
 )
 
 // Config 面板依赖（main 装配注入）。
@@ -54,8 +55,13 @@ type Config struct {
 	// StickyCount 返回粘性会话绑定数；nil 时报告 0。
 	StickyCount func() int
 
-	// ZaiKeys Z.AI API Key 池（统一账号目录展示用，掩码呈现）。
+	// ZaiKeys Z.AI API Key 池（旧版兼容：账号池为空时由 main 导入为账号；
+	// 统一账号目录展示用，掩码呈现）。
 	ZaiKeys []string
+	// Zai Z.AI / ZCode 账号池（Plan JWT + API Key 回退 + 验证码）。nil = 未启用。
+	Zai *zai.Client
+	// ZaiCaptcha 验证码预解池（面板展示池水位与最近错误）。
+	ZaiCaptcha *zai.CaptchaManager
 	// CodexCount 本机 Codex 登录数（nil 时目录不列 codex 组）。
 	CodexCount func() int
 	// FreeKeysDesc 免费池概览（nil 时不列 free 组）。
@@ -190,6 +196,12 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
 	// 多 API Key 管理（生成/删除/列表；与配置页整表单解耦的原子操作）
 	p.mux.HandleFunc("GET /panel/api/accounts/dir", p.withAuth(p.accountsDir))
+	// Z.AI / ZCode 账号池（Plan JWT + API Key 回退）
+	p.mux.HandleFunc("GET /panel/api/zai/accounts", p.withAuth(p.zaiAccounts))
+	p.mux.HandleFunc("POST /panel/api/zai/accounts", p.withAuth(p.zaiAccountAdd))
+	p.mux.HandleFunc("POST /panel/api/zai/accounts/{id}/remove", p.withAuth(p.zaiAccountRemove))
+	p.mux.HandleFunc("POST /panel/api/zai/accounts/{id}/toggle", p.withAuth(p.zaiAccountToggle))
+	p.mux.HandleFunc("POST /panel/api/zai/accounts/{id}/rotate", p.withAuth(p.zaiAccountRotate))
 	p.mux.HandleFunc("GET /panel/api/apikeys", p.withAuth(p.getAPIKeys))
 	p.mux.HandleFunc("POST /panel/api/apikeys", p.withAuth(p.postAPIKeys))
 	p.mux.HandleFunc("POST /panel/api/apikeys/delete", p.withAuth(p.deleteAPIKeys))

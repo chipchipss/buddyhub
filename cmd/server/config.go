@@ -72,13 +72,39 @@ type Config struct {
 			OpenRouter string `json:"openrouter"`
 		} `json:"free_pool"`
 
-		// Zai Z.AI / 智谱 GLM API Key 池（zai: 前缀模型路由目标）。
-		// ZaiKeys 为 api.z.ai 的 API Key（GLM Coding Plan / 充值 key，x-api-key 鉴权、
-		// 无验证码）；BigModelKeys 为智谱开放平台 key（open.bigmodel.cn 同形端点）。
-		// 两池皆空 = zai: 通道禁用（模型列表不列、请求 404 提示）。
+		// Zai Z.AI / ZCode 账号池（zai: 前缀模型路由目标）。
+		//
+		// 账号本身由 internal/zai 管理（缺省落 data/zai-accounts.json，面板可增删改），
+		// ZaiKeys / BigModelKeys 是**旧版兼容入口**：首次启动且账号池为空时自动导入
+		// 为账号，之后以账号池为准（面板管理）。
+		//
+		// ZaiKeys 为 api.z.ai 的 API Key（回退通道，x-api-key 鉴权、免验证码）；
+		// BigModelKeys 为智谱开放平台 key（open.bigmodel.cn 同形端点）。
+		// 两池皆空且账号池为空 = zai: 通道禁用（模型列表不列、请求 404 提示）。
 		Zai struct {
 			ZaiKeys      []string `json:"zai_keys,omitempty"`
 			BigModelKeys []string `json:"bigmodel_keys,omitempty"`
+
+			// AccountsFile 账号池落盘路径；空 = 与 state_file 同目录的 zai-accounts.json。
+			AccountsFile string `json:"accounts_file,omitempty"`
+			// MaxConcurrency 单账号并发上限（0 = 不限；缺省 2）。
+			MaxConcurrency int `json:"max_concurrency,omitempty"`
+
+			// CaptchaSolver 验证码求解器脚本路径（如 zcode2api 的 captcha_node/solver.js）。
+			// **空 = Plan（JWT）通道不可用**，只走 API Key 回退通道。
+			// 契约：<command> <script> <sceneId> <region> <prefix>，stdout 打 VERIFY_PARAM=<param>。
+			CaptchaSolver string `json:"captcha_solver,omitempty"`
+			// CaptchaCommand 求解器解释器（缺省 node）。
+			CaptchaCommand string `json:"captcha_command,omitempty"`
+			// CaptchaTimeoutSec 单次求解超时秒数（缺省 40）。
+			CaptchaTimeoutSec int `json:"captcha_timeout_sec,omitempty"`
+			// CaptchaPoolMin/Max 预解池水位（缺省 4 / 12）。
+			CaptchaPoolMin int `json:"captcha_pool_min,omitempty"`
+			CaptchaPoolMax int `json:"captcha_pool_max,omitempty"`
+
+			// SystemFile Plan 通道要求的身份块 JSON（官方客户端会前置这段 system，
+			// 缺失会被上游拒为 3012）。本仓库不内嵌该内容，需自行从官方客户端提取。
+			SystemFile string `json:"system_file,omitempty"`
 		} `json:"zai"`
 
 		// 余额后台周期刷新：两次签到时点之间 credits 也能保持新鲜（面板/状态观测用）。

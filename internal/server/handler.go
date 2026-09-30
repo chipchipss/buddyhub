@@ -24,6 +24,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/session"
 	"github.com/chipchipss/buddyhub/internal/upstream"
 	"github.com/chipchipss/buddyhub/internal/usage"
+	"github.com/chipchipss/buddyhub/internal/zai"
 )
 
 // Config handler 依赖。
@@ -42,9 +43,14 @@ type Config struct {
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
 
 	// ZaiKeys / BigModelKeys Z.AI 与智谱 GLM 的 API Key 池（zai: 前缀路由目标；
-	// config schedule.zai 透传）。皆空 = zai 通道禁用。
+	// config schedule.zai 透传）。仅在 Zai 为 nil 时作为兜底，皆空 = zai 通道禁用。
 	ZaiKeys      []string
 	BigModelKeys []string
+	// Zai Z.AI 账号池编排器（Plan JWT + API Key 回退 + 验证码 + 状态机）。
+	// nil = 未启用账号池（回落到 ZaiKeys 直连）。
+	Zai *zai.Client
+	// ZaiCaptcha 验证码预解池（Plan 通道用；nil 或未配置求解器时 Plan 不可用）。
+	ZaiCaptcha *zai.CaptchaManager
 
 	// ExtAccounts 返回外部积分账号快照（Qoder 桥接用）；nil = Qoder 通道禁用。
 	// 由 main 注入闭包（panel.ExtList），避免 server -> panel 的包依赖。
@@ -519,8 +525,12 @@ func (h *Handler) modelList() []map[string]any {
 			out = append(out, entry)
 		}
 	}
-	// Z.AI GLM 家族（zai: 前缀）：有 key 才列出（官方模型名大小写敏感）。
-	if len(h.cfg.ZaiKeys) > 0 || len(h.cfg.BigModelKeys) > 0 {
+	// Z.AI GLM 家族（zai: 前缀）：有账号池或旧版 key 才列出（官方模型名大小写敏感）。
+	zaiReady := len(h.cfg.ZaiKeys) > 0 || len(h.cfg.BigModelKeys) > 0
+	if !zaiReady && h.cfg.Zai != nil {
+		zaiReady = h.cfg.Zai.Count() > 0
+	}
+	if zaiReady {
 		for _, m := range []struct{ id, desc string }{
 			{"GLM-5.3-Flash", "GLM 5.3 Flash（智谱，最快）"},
 			{"GLM-5.3", "GLM 5.3（智谱旗舰）"},
