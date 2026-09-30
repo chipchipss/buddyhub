@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>多平台 Buddy 账号统一积分与网关中心 · OpenAI / Anthropic / Responses API 兼容</b><br>
-  Web 面板 · 账号池轮转 · 工具调用自愈 · Responses API · 定时签到 / 活跃 / 旅行 / 保活 · 成长任务一键完成 · <b>讯飞 Loomy + LobsterAI + 小浣熊 + Qoder + 华为云 积分自动领取 · Z.AI / ZCode · GitHub Copilot · Cline（免费池）· AutoClaw（智谱）· QClaw（腾讯）</b>
+  Web 面板 · 账号池轮转 · 工具调用自愈 · Responses API · 定时签到 / 活跃 / 旅行 / 保活 · 成长任务一键完成 · <b>讯飞 Loomy + LobsterAI + 小浣熊 + Qoder + 华为云 积分自动领取 · Z.AI / ZCode · GitHub Copilot · Cline（免费池）· AutoClaw（智谱）· QClaw（腾讯）· Trae / TraeWork（字节）· Accio（阿里）</b>
 </p>
 
 <p align="center">
@@ -133,6 +133,9 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 |---|---|---|---|---|
 | **小浣熊**（商汤） | `raccoon` | 🟢 **微信扫码登录** | `access_token` · `refresh_token`（**到期自动续期并回写**） | 登录奖励 |
 | **Qoder**（阿里） | `qoder` | 🟢 **设备授权登录** | `access_token` · `machine_id` · `refresh_token` · `security_oauth_token` | 双通道领取（campaigns → activity claim） |
+| **Trae**（字节） | `trae` | 🟢 **本机回调授权** | `access_token` + `refresh_token` + `device_private_pem`（设备绑定） | 无（网关直连通道） |
+| **Accio**（阿里） | `accio` | 🟢 **本机回调授权** | `access_token` + `refresh_token` + `region` | 无（网关直连通道） |
+| **TraeWork**（字节） | `traework` | ⚪ 粘贴客户端凭据 | `access_token` + `refresh_token` + `device_id` | 每日签到 |
 | **QClaw**（腾讯） | `qclaw` | 🟢 **微信扫码登录** | `access_token`（sk key，对话用）+ `refresh_token`（JWT）+ `guid` | 无（网关直连通道） |
 | **AutoClaw**（智谱） | `autoclaw` | 🟢 **手机号短信登录**（国内版） | `token` + `refresh_token`（**单飞续期**）+ `region` | 无（网关直连通道） |
 | **Cline** | `cline` | 🟢 **设备码授权** | `access_token`（含 `workos:` 前缀）+ `refresh_token`（**单飞续期**） | 无（网关直连通道，**含免费池**） |
@@ -330,12 +333,23 @@ Cline 的 `refresh_token` 是**一次性轮换**语义：并发请求同时发�
 
 | 项目 | 值得看的地方 | 我们做了什么 |
 |---|---|---|
-| **[aimod-cc/agent2api](https://github.com/aimod-cc/agent2api)** | 支持的通道最多（WorkBuddy / 小浣熊 / CatPaw / AutoClaw / Qoder / Cline / Accio / CodeArts / Trae）；每家一个 adapter，协议事实写得极细（含「踩空后表现很像没权限」这类口径） | 按它的公开协议**核对并实测**后接入了 **Cline**（含免费池）与 **AutoClaw**（智谱，手机号登录）；续期单飞的做法也来自它的 `refresh_flight` |
-| **[wicm84266964/Buddy2api](https://github.com/wicm84266964/Buddy2api)** | 按它的公开协议接入 **QClaw**（腾讯，微信扫码登录）|
+| **[aimod-cc/agent2api](https://github.com/aimod-cc/agent2api)** | 支持的通道最多（WorkBuddy / 小浣熊 / CatPaw / AutoClaw / Qoder / Cline / Accio / CodeArts / Trae）；每家一个 adapter，协议事实写得极细（含「踩空后表现很像没权限」这类口径） | 按它的公开协议**核对并实测**后接入了 **Cline**（免费池）· **AutoClaw**（智谱，手机号登录）· **Trae**（字节 SOLO）· **Accio**（阿里 ADK 信封）；续期单飞的做法也来自它的 `refresh_flight` |
+| **[wicm84266964/Buddy2api](https://github.com/wicm84266964/Buddy2api)** | 按它的公开协议接入 **QClaw**（腾讯，微信扫码）与 **TraeWork**（字节，会话式协议）|
 | **[wicm84266964/Buddy2api](https://github.com/wicm84266964/Buddy2api)** | QClaw / 千问办公 / TraeWork 三个通道；模型容量发现（`context_window` / `max_output_tokens` + `capacity_source` 标记来源是目录还是兜底）；聚合响应的完整性校验（缺完成标记不当作正常 stop） | 容量发现我们已有（四级查找链 + 探测上限）；`capacity_source` 式「标注数据来源」的思路值得后续补 |
 | **[wangliangdong/loomy2api](https://github.com/wangliangdong/loomy2api)** | Loomy **Web 版**（非桌面客户端）；**额度获取与路由解耦**——定时刷新写缓存，选号只读缓存，绝不在请求路径上打上游额度接口；多客户端会话头的兼容顺序 | 额度刷新与选号本就是分离的；会话键提取的兼容顺序我们已有（`conversation_id` + 内容回退） |
 
-**还没做的**：QClaw / 千问办公 / TraeWork / CatPaw / Accio / Trae 这些通道需要各自的桌面客户端登录态（或 DPAPI 解密），本机没有对应客户端、也没有账号，无从验证；盲目照搬会交付不能用的代码。上表第二列记着入口，将来有环境时可以按 Cline / AutoClaw 的方式（读公开协议 → 本机实测核对 → 写实现 + 测试）逐个补。
+**没做的两个，以及原因**（不是「懒得做」，是这两条各自卡在不同的硬约束上）：
+
+- **QwenWork（千问办公）—— Go 侧做不了。** 它的对话请求体必须由**官方 WASM 模块**编码
+  （`prepareInferRequest` 会重写 URL 加 `Encode=1` 并把 JSON body 换成 WASM 编码的载荷）。
+  要么在网关里嵌一个 WASM 运行时（新增重量级依赖），要么无法实现。这不是「可选路径」，
+  是协议核心。
+- **CatPaw（美团）—— 需要一次专门的实现，不能顺手接。** 它是**有状态会话协议**：
+  一次客户端请求会变成好几个上游请求（round → event → turn → 工具循环 → event），
+  中间要维护 `x-session-id → conversationId` 映射与已同步消息的指纹链。而且它有
+  三条硬约束，违反会让**上游会话卡死**（比如每轮必须回报 `event(completed)`，
+  否则 conversation 停在上游的「执行中」状态，下一轮直接被拒）。半成品实现会把
+  用户的账号卡在清不掉的死会话上——比不做更糟。要做就得把整套状态机搬过来。
 
 > 各项目的许可证不同（agent2api 是 MIT + 附加使用声明，loomy2api 声明「仅供个人学习自用」）。这里**只取协议事实**（端点、头、字段名——事实不受版权保护）与设计思路，实现全部为本仓库自写。
 
@@ -431,6 +445,46 @@ QClaw 的微信授权链接有 **221 字节**，超出原先编码器的上限�
 - **v6+ 是多纠错块**，码字必须交织（v1–5 单块才免交织）
 - **v7+ 有版本信息**（18 位），左下那份的位序与右上**互为转置**
 - **v10+ 的字节模式计数指示符是 16 位**（v1–9 是 8 位）——写死 8 位时前几个码字看着还对，后面全错
+
+## 🧭 其它已接入通道（Trae / Accio / TraeWork）
+
+这三家（字节 ×2、阿里 ×1）都已接入，模型名前缀分别是 `trae:` / `accio:` / `traework:`。
+它们的共同点是**上游不是 OpenAI 协议**，两侧都要完整翻译：
+
+| 通道 | 登录 | 协议要点 |
+|---|---|---|
+| **Trae**（字节） | 本机回调（PKCE + RSA 设备密钥对） | SOLO 信封：出站**白名单重建**（多带字段会被拒），四处变形见下 |
+| **Accio**（阿里） | 本机回调（PKCE） | ADK（Gemini 风格）信封，OpenAI ↔ contents/parts 双向翻译 |
+| **TraeWork**（字节） | 粘贴客户端凭据 | **会话式**：建会话 → 开事件流 → 发消息；事件体形状不稳定，递归收集 |
+
+### 本机回调登录（Trae / Accio）
+
+网关临时监听一个**本机回环端口**，浏览器授权后自动跳回该端口，网关接住回调完成换证——
+**无需人工贴码**。代价是浏览器需与网关同机（面板通常就是本机访问，符合）。
+
+与另外几种入池方式的对比：
+
+| 方式 | 代表 | 用户要做什么 |
+|---|---|---|
+| 本机回调 | Trae / Accio | 点一下，浏览器里完成授权 |
+| 设备码 | Copilot / Cline | 把设备码输进网页 |
+| 扫码 | 小浣熊 / QClaw | 手机扫一下 |
+| 扫码回填 | QClaw | 扫码后还要把 code 贴回来（微信把码回给腾讯自己的域名，网关截不到） |
+| 短信 | AutoClaw（国内版） | 填手机号 + 验证码 |
+| 粘贴凭据 | LobsterAI / CodeArts / TraeWork | 从客户端文件里复制 token |
+
+### 四条只有踩过才知道的口径
+
+- **Trae 的 `tool_choice` 必须是裸字符串**，`tools[].function.parameters` 必须是 **JSON 字符串**
+  （OpenAI 都是对象）；assistant 的 `tool_calls[].function` 要改名 `function_call`；
+  `developer` 角色要降成 `system`（上游不认，实测静默空流）
+- **Trae 的同一个 token 要出现在三个头里**（`Authorization: Cloud-IDE-JWT …` +
+  `X-Cloudide-Token` + `X-Ide-Token`）；`X-Uid` / `X-Machine-Id` / `X-Device-Id`
+  **为空就不发**（发空值会被当成另一个身份）
+- **Accio 的 `tools[].parameters_json` 与 `tool_config` 都是 JSON 字符串**；
+  URL 上的 `sg_k` 是 **request_id 的 MD5**，且必须与 body 里的 request_id 同一个
+- **TraeWork 的事件流必须先于发消息打开**，否则丢开头的帧；事件体没有稳定形状，
+  只能递归收集（写死某条路径必漏）
 
 ## 🆚 与上游的差异
 
@@ -962,6 +1016,9 @@ web/
 | `cline:` | Cline（**带免费池**，池前缀保留在模型名里） | `data/ext-accounts.json`（provider `cline`） | [Cline 通道](#-cline-通道带免费池) |
 | `autoclaw:` | AutoClaw（智谱，国内 / 国际两地区） | `data/ext-accounts.json`（provider `autoclaw`） | [AutoClaw 通道](#-autoclaw-通道智谱-autoglm) |
 | `qclaw:` | QClaw（腾讯） | `data/ext-accounts.json`（provider `qclaw`） | [QClaw 通道](#-qclaw-通道腾讯) |
+| `trae:` | Trae（字节 SOLO） | `data/ext-accounts.json`（provider `trae`） | [其它通道](#-其它已接入通道trae--accio--traework) |
+| `accio:` | Accio（阿里） | `data/ext-accounts.json`（provider `accio`） | 同上 |
+| `traework:` | TraeWork（字节） | `data/ext-accounts.json`（provider `traework`） | 同上 |
 | `qoder:` | Qoder（阿里） | `data/ext-accounts.json`（provider `qoder`） | — |
 | `codex:` | Codex 订阅池 | 本机 `~/.codex*` 凭据 | — |
 | `free:` | 免费 key 池（`free:<provider>/<model>`） | 配置的免费 Key | — |
