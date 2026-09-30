@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chipchipss/buddyhub/internal/extprovider/autoclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
 	"github.com/chipchipss/buddyhub/internal/extprovider/codearts"
 	"github.com/chipchipss/buddyhub/internal/extprovider/copilot"
@@ -37,6 +38,8 @@ const (
 	PCopilot = "copilot"
 	// PCline Cline（cline.bot，WorkOS 设备授权；免费池无需订阅）。
 	PCline = "cline"
+	// PAutoClaw AutoClaw（智谱 autoglm；国内版支持手机短信登录）。
+	PAutoClaw = "autoclaw"
 )
 
 // ExtAccount 一个外部平台账号。
@@ -306,6 +309,10 @@ func (m *Manager) CheckinOne(ctx context.Context, a *ExtAccount) *CheckinResult 
 	case PCline:
 		// Cline 同样没有每日签到；凭据有效性由 ViewOne 续期验证。
 		res.Kind, res.Message = "inactive", "Cline 无需签到（网关直连通道）"
+	case PAutoClaw:
+		// AutoClaw 有每日签到（源实现在 userapi 域），但需额外的活动接口；
+		// 此处先只做凭据有效性验证，避免打未验证的端点。
+		res.Kind, res.Message = "inactive", "AutoClaw 无需签到（网关直连通道）"
 	default:
 		res.Kind, res.Message = "failed", "未知平台: "+a.Provider
 	}
@@ -377,6 +384,29 @@ func (m *Manager) ViewOne(ctx context.Context, a *ExtAccount) *ExtAccountView {
 			} else {
 				v.Note = err.Error()
 			}
+		}
+	case PAutoClaw:
+		// AutoClaw 视图：续期一次验证凭据有效性（服务端会轮换 refresh_token）。
+		var cred autoclaw.Credential
+		if json.Unmarshal(a.Cred, &cred) != nil {
+			v.Note = "凭据解析失败"
+			return v
+		}
+		if cred.NeedsRefresh() && cred.CanRefresh() {
+			if fresh, err := autoclaw.Refresh(ctx, &cred); err == nil {
+				if raw, merr := json.Marshal(fresh); merr == nil {
+					m.replaceCred(a.Provider, a.ID, raw)
+				}
+				cred = *fresh
+			} else {
+				v.Note = err.Error()
+				return v
+			}
+		}
+		v.BalanceOK = cred.Token != ""
+		v.Note = "AutoClaw " + autoclaw.ParseRegion(string(cred.Region)).Label()
+		if cred.PhoneTail != "" {
+			v.Note += " · " + cred.PhoneTail
 		}
 	case PCline:
 		// Cline 视图：续期一次验证凭据有效性，并展示 credit 余额。

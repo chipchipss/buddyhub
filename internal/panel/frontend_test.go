@@ -228,6 +228,9 @@ const WANT = {
   codearts: { fields: 3, login: null },
   copilot: { fields: 0, login: '开始授权' },
   cline: { fields: 0, login: '开始授权' },
+  // 短信登录没有「发起」按钮，直接出表单（发码 → 校验两段同步调用），
+  // 输入框是「手机号 + 验证码」两个，不走「标识框 + N 个字段」那套。
+  autoclaw: { fields: 0, login: '发送验证码', inputs: 2 },
 };
 const problems = [];
 for (const [provider, want] of Object.entries(WANT)) {
@@ -238,8 +241,8 @@ for (const [provider, want] of Object.entries(WANT)) {
   for (const f of sel.listeners.change || []) f({ target: sel });
   const got = walk(panel);
 
-  // Copilot 没有可手填的凭据字段，不该出现空表单
-  const wantInputs = want.fields === 0 ? 0 : want.fields + 1;
+  // Copilot 没有可手填的凭据字段，不该出现空表单；inputs 可显式覆盖
+  const wantInputs = want.inputs != null ? want.inputs : (want.fields === 0 ? 0 : want.fields + 1);
   if (got.inputs !== wantInputs) problems.push(provider + ': 输入框 ' + got.inputs + ' 个，期望 ' + wantInputs);
 
   if (want.login) {

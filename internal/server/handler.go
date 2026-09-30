@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/extprovider/autoclaw"
+	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
 	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
 	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/httpauth"
@@ -126,18 +128,19 @@ type Handler struct {
 	extManager ExtManager
 	// lastQoderErr / lastCodexErr 桥接失败原因（观测用，非并发安全——
 	// 仅同账号串行失败时被写入，读取方在返回错误前立即读，竞态无害）。
-	lastQoderErr   string
-	lastCodexErr   string
-	lastLoomyErr   string
-	lastZaiErr     string
-	lastCopilotErr string
-	lastClineErr   string
+	lastQoderErr    string
+	lastCodexErr    string
+	lastLoomyErr    string
+	lastZaiErr      string
+	lastCopilotErr  string
+	lastClineErr    string
+	lastAutoClawErr string
 
-	// clineRefreshMu/clineRefreshFlight Cline 续期单飞表。
-	// Cline 的 refresh_token 是一次性轮换语义：并发续期会互相作废并把人踢下线，
+	// clineFlights / autoclawFlights 续期单飞表。
+	// 两家的 refresh_token 都是一次性轮换语义：并发续期会互相作废并把人踢下线，
 	// 故同一账号同一时刻只允许一次续期在飞，其余请求复用同一次结果。
-	clineRefreshMu     sync.Mutex
-	clineRefreshFlight map[string]*clineFlight
+	clineFlights    flightGroup[*cline.Credential]
+	autoclawFlights flightGroup[*autoclaw.Credential]
 }
 
 // NewHandler 构建 handler。
@@ -154,10 +157,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{
-		cfg: cfg, mux: http.NewServeMux(),
-		clineRefreshFlight: map[string]*clineFlight{},
-	}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responsesRoundTrip))
 	h.mux.HandleFunc("POST /responses", h.withAuth(h.responsesRoundTrip))
@@ -549,6 +549,23 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		out = append(out, entry)
 	}
+	// AutoClaw 模型名单（autoclaw: 前缀）：有账号时实时拉目录（10 分钟缓存）。
+	// 目录请求必须带 X-Version，否则上游按版本门控只下发 3–4 条。
+	for _, m := range h.autoclawCatalog() {
+		if m.ID == "" {
+			continue
+		}
+		entry := map[string]any{
+			"id":       autoclawModelPrefix + m.ID,
+			"object":   "model",
+			"created":  1753600000,
+			"owned_by": "autoclaw",
+		}
+		if m.Name != "" && m.Name != m.ID {
+			entry["description"] = m.Name
+		}
+		out = append(out, entry)
+	}
 	// Loomy 模型名单（loomy: 前缀）：有可用凭据时实时拉上游目录透出
 	// （原样无别名；上游对未知模型静默回落 deepseek，故客户端应读响应 model 字段）。
 	if mods := h.loomyCatalog(); len(mods) > 0 {
@@ -816,6 +833,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			detail += "；最近失败原因: " + h.lastClineErr
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_cline_account", detail)
+		return
+	}
+
+	// AutoClaw 直连通道（autoclaw: 前缀模型）：走 extstore 里的 AutoClaw 账号。
+	// 账号分属国内/国际两个地区（两套域名），地区随凭据走。
+	if isAutoClawModel(bareModel) {
+		am := strings.TrimPrefix(bareModel, autoclawModelPrefix)
+		bodyAM := body
+		if am != bareModel {
+			bodyAM = rewriteModel(body, am)
+		}
+		if h.autoclawChatStream(w, r, bodyAM, am) {
+			return
+		}
+		detail := "没有可用的 AutoClaw 账号（面板-添加账号-外部平台-AutoClaw 手机号登录后重试）"
+		if h.lastAutoClawErr != "" {
+			detail += "；最近失败原因: " + h.lastAutoClawErr
+		}
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_autoclaw_account", detail)
 		return
 	}
 

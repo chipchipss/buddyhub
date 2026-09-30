@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/extprovider/autoclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
 	"github.com/chipchipss/buddyhub/internal/extprovider/copilot"
 	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
@@ -264,6 +265,13 @@ func main() {
 			log.Printf("[cline] 代理配置无效，本通道将直连：%v", err)
 		} else {
 			log.Printf("[cline] 本通道走代理 %s", proxy)
+		}
+	}
+	if proxy := cfg.Schedule.AutoClaw.Proxy; strings.TrimSpace(proxy) != "" {
+		if err := autoclaw.SetProxy(proxy); err != nil {
+			log.Printf("[autoclaw] 代理配置无效，本通道将直连：%v", err)
+		} else {
+			log.Printf("[autoclaw] 本通道走代理 %s", proxy)
 		}
 	}
 

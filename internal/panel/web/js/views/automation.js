@@ -260,10 +260,10 @@ function loomySeg() {
 }
 
 /* ── 外部平台 ─────────────────────────────────────────────────── */
-const EXT_NAMES = { lobsterai: 'LobsterAI', raccoon: '小浣熊', qoder: 'Qoder', codearts: '华为云', copilot: 'GitHub Copilot', cline: 'Cline' };
+const EXT_NAMES = { lobsterai: 'LobsterAI', raccoon: '小浣熊', qoder: 'Qoder', codearts: '华为云', copilot: 'GitHub Copilot', cline: 'Cline', autoclaw: 'AutoClaw' };
 
 // Copilot 是网关直连通道（无积分、无签到），卡片按「订阅状态」而非「余额」呈现。
-const EXT_NO_CHECKIN = { copilot: true, cline: true };
+const EXT_NO_CHECKIN = { copilot: true, cline: true, autoclaw: true };
 
 async function loadExt(quiet = true) {
   try { ext.set(await api('ext/accounts')); extMsg.set(''); }

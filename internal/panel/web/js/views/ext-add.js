@@ -83,6 +83,12 @@ const PROVIDERS = {
     ],
     tip: '华为云 AK/SK：永久密钥留空 Security Token 即可；临时 STS 凭据才需要填（几小时就过期，不建议入池）。',
   },
+  autoclaw: {
+    name: 'AutoClaw（智谱）',
+    // 手机短信登录：国内版专用（上游已关闭国际版短信入口）
+    login: { kind: 'sms', button: '手机号登录', hint: '国内版支持手机短信登录' },
+    tip: 'AutoClaw 是国内版/国际版两套站点，登录后按账号所属地区转发。模型名用 autoclaw:<模型>。',
+  },
   cline: {
     name: 'Cline',
     // 设备码授权（WorkOS）：免订阅的免费池也能用
@@ -170,6 +176,14 @@ export function extAddPanel(onAdded, opts = {}) {
     const host = h('div', { class: 'stack', style: { gap: '10px' } });
     const statusEl = h('div', { class: 'muted', style: { fontSize: '12px' } });
     const startBtn = h('button', { class: 'btn primary' }, icon('key'), spec.button);
+
+    // 短信登录是两段同步调用（发码 → 校验），没有「发起/轮询」这一步：
+    // 直接出表单，且不参与 activeLogin 那套会话状态。
+    if (spec.kind === 'sms') {
+      renderChallenge(host, spec, {});
+      statusEl.textContent = spec.hint;
+      return h('div', { class: 'stack', style: { gap: '10px' } }, host, statusEl);
+    }
 
     // 把本实例登记为「进行中登录的展示位」：面板被 tick 重建后，新实例接手继续显示。
     loginHost = host;
@@ -293,6 +307,46 @@ export function extAddPanel(onAdded, opts = {}) {
         h('div', { style: { font: '600 26px var(--mono)', letterSpacing: '3px', userSelect: 'all' }, text: d.user_code || '' }),
         h('a', { class: 'link', href: d.verification_uri || 'https://github.com/login/device',
           target: '_blank', rel: 'noreferrer', text: d.verification_uri || 'https://github.com/login/device' }),
+      );
+      return;
+    }
+    if (spec.kind === 'sms') {
+      const phone = h('input', { class: 'input', placeholder: '手机号（国内版）', style: { flex: '1', minWidth: '160px' } });
+      const code = h('input', { class: 'input', placeholder: '6 位短信验证码', style: { flex: '1', minWidth: '120px' } });
+      let deviceId = '';
+      const sendBtn = h('button', { class: 'btn' }, '发送验证码');
+      sendBtn.onclick = async () => {
+        const p = phone.value.trim();
+        if (!p) { toast('请填写手机号', 'fail'); phone.focus(); return; }
+        sendBtn.disabled = true;
+        try {
+          const r = await api('ext/autoclaw/send_code', { method: 'POST', body: JSON.stringify({ phone: p, region: 'cn' }) });
+          deviceId = r.device_id || '';
+          toast('验证码已发送');
+        } catch (e) { toast(e.message, 'fail'); }
+        finally { sendBtn.disabled = false; }
+      };
+      const loginBtn = h('button', { class: 'btn primary' }, '登录并入池');
+      loginBtn.onclick = async () => {
+        const p = phone.value.trim();
+        if (!p) { toast('请填写手机号', 'fail'); return; }
+        if (!deviceId) { toast('请先点「发送验证码」', 'fail'); return; }
+        loginBtn.disabled = true;
+        try {
+          const r = await api('ext/autoclaw/login', {
+            method: 'POST',
+            body: JSON.stringify({ phone: p, code: code.value.trim(), device_id: deviceId, region: 'cn' }),
+          });
+          toast('已入池：' + ((r.account || {}).label || ''));
+          await onAdded?.();
+        } catch (e) { toast(e.message, 'fail'); }
+        finally { loginBtn.disabled = false; }
+      };
+      host.replaceChildren(
+        h('div', { class: 'row wrap', style: { gap: '8px' } }, phone, sendBtn),
+        h('div', { class: 'row wrap', style: { gap: '8px' } }, code, loginBtn),
+        h('div', { class: 'muted', style: { fontSize: '11.5px' },
+          text: '国际版上游已关闭短信入口，需从桌面端导入或手工填写凭据。' }),
       );
       return;
     }

@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>多平台 Buddy 账号统一积分与网关中心 · OpenAI / Anthropic / Responses API 兼容</b><br>
-  Web 面板 · 账号池轮转 · 工具调用自愈 · Responses API · 定时签到 / 活跃 / 旅行 / 保活 · 成长任务一键完成 · <b>讯飞 Loomy + LobsterAI + 小浣熊 + Qoder + 华为云 积分自动领取 · Z.AI / ZCode · GitHub Copilot · Cline（免费池）</b>
+  Web 面板 · 账号池轮转 · 工具调用自愈 · Responses API · 定时签到 / 活跃 / 旅行 / 保活 · 成长任务一键完成 · <b>讯飞 Loomy + LobsterAI + 小浣熊 + Qoder + 华为云 积分自动领取 · Z.AI / ZCode · GitHub Copilot · Cline（免费池）· AutoClaw（智谱）</b>
 </p>
 
 <p align="center">
@@ -133,6 +133,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 |---|---|---|---|---|
 | **小浣熊**（商汤） | `raccoon` | 🟢 **微信扫码登录** | `access_token` · `refresh_token`（**到期自动续期并回写**） | 登录奖励 |
 | **Qoder**（阿里） | `qoder` | 🟢 **设备授权登录** | `access_token` · `machine_id` · `refresh_token` · `security_oauth_token` | 双通道领取（campaigns → activity claim） |
+| **AutoClaw**（智谱） | `autoclaw` | 🟢 **手机号短信登录**（国内版） | `token` + `refresh_token`（**单飞续期**）+ `region` | 无（网关直连通道） |
 | **Cline** | `cline` | 🟢 **设备码授权** | `access_token`（含 `workos:` 前缀）+ `refresh_token`（**单飞续期**） | 无（网关直连通道，**含免费池**） |
 | **GitHub Copilot** | `copilot` | 🟢 **设备码授权** | `github_token` + `copilot_token`（自动续期） | 无（网关直连通道） |
 | **LobsterAI**（有道） | `lobsterai` | ⚪ 手工填写 | `access_token`* · `uuid`* · `refresh_token` · `first_key_from` | 每日签到 |
@@ -150,6 +151,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | **Qoder** | 点「浏览器授权登录」→ 打开 PKCE 授权链接完成登录 → 面板轮询取 token → 自动入池 |
 | **GitHub Copilot** | 点「开始授权」→ 拿到形如 `ABCD-1234` 的设备码 → 在 `github.com/login/device` 输入 → 自动入池 |
 | **Cline** | 点「开始授权」→ 设备码 → 在 `authkit.cline.bot/device` 输入 → 自动入池（**免费池无需订阅**） |
+| **AutoClaw** | 填手机号 → 发验证码 → 填 6 位码 → 自动入池（国内版；国际版上游已关短信入口） |
 
 统一接口（面板 Bearer 鉴权，可脚本化调用）：
 
@@ -326,13 +328,53 @@ Cline 的 `refresh_token` 是**一次性轮换**语义：并发请求同时发�
 
 | 项目 | 值得看的地方 | 我们做了什么 |
 |---|---|---|
-| **[aimod-cc/agent2api](https://github.com/aimod-cc/agent2api)** | 支持的通道最多（WorkBuddy / 小浣熊 / CatPaw / AutoClaw / Qoder / Cline / Accio / CodeArts / Trae）；每家一个 adapter，协议事实写得极细（含「踩空后表现很像没权限」这类口径） | 按它的公开协议**核对并实测**后接入了 **Cline**（含免费池）；续期单飞的做法也来自它的 `refresh_flight` |
+| **[aimod-cc/agent2api](https://github.com/aimod-cc/agent2api)** | 支持的通道最多（WorkBuddy / 小浣熊 / CatPaw / AutoClaw / Qoder / Cline / Accio / CodeArts / Trae）；每家一个 adapter，协议事实写得极细（含「踩空后表现很像没权限」这类口径） | 按它的公开协议**核对并实测**后接入了 **Cline**（含免费池）与 **AutoClaw**（智谱，手机号登录）；续期单飞的做法也来自它的 `refresh_flight` |
 | **[wicm84266964/Buddy2api](https://github.com/wicm84266964/Buddy2api)** | QClaw / 千问办公 / TraeWork 三个通道；模型容量发现（`context_window` / `max_output_tokens` + `capacity_source` 标记来源是目录还是兜底）；聚合响应的完整性校验（缺完成标记不当作正常 stop） | 容量发现我们已有（四级查找链 + 探测上限）；`capacity_source` 式「标注数据来源」的思路值得后续补 |
 | **[wangliangdong/loomy2api](https://github.com/wangliangdong/loomy2api)** | Loomy **Web 版**（非桌面客户端）；**额度获取与路由解耦**——定时刷新写缓存，选号只读缓存，绝不在请求路径上打上游额度接口；多客户端会话头的兼容顺序 | 额度刷新与选号本就是分离的；会话键提取的兼容顺序我们已有（`conversation_id` + 内容回退） |
 
-**没做的**（有意）：QClaw / 千问办公 / TraeWork / CatPaw / AutoClaw / Accio / Trae 这些通道需要各自的桌面客户端登录态或 DPAPI 解密，本机无从验证；盲目照搬会交付不能用的代码。上表第二列记着入口，将来有环境时可以按 Cline 的方式（读公开协议 → 本机实测核对 → 写实现 + 测试）逐个补。
+**还没做的**：QClaw / 千问办公 / TraeWork / CatPaw / Accio / Trae 这些通道需要各自的桌面客户端登录态（或 DPAPI 解密），本机没有对应客户端、也没有账号，无从验证；盲目照搬会交付不能用的代码。上表第二列记着入口，将来有环境时可以按 Cline / AutoClaw 的方式（读公开协议 → 本机实测核对 → 写实现 + 测试）逐个补。
 
 > 各项目的许可证不同（agent2api 是 MIT + 附加使用声明，loomy2api 声明「仅供个人学习自用」）。这里**只取协议事实**（端点、头、字段名——事实不受版权保护）与设计思路，实现全部为本仓库自写。
+
+## 🦞 AutoClaw 通道（智谱 autoglm）
+
+AutoClaw（智谱的桌面 Agent）接进同一个 OpenAI 兼容接口——模型名带 `autoclaw:` 前缀（`autoclaw:glm-5.3` 等）。
+
+### 两个地区，两套域名
+
+同一套客户端代码的两个构建，协议与客户端指纹**逐字相同**，只有站点不同：
+
+| | userapi（账号 / 刷新 / 目录） | LLM 代理 |
+|---|---|---|
+| **国内版** | `autoglm-acceleration-api.zhipuai.cn` | `…/autoclaw-proxy/proxy/autoclaw` |
+| **国际版** | `autoglm-api.autoglm.ai` | 同上路径 |
+
+地区是**凭据的属性**（一个账号只属于一个站点），随凭据持久化，选号时按各自凭据里的地区打对应域名。
+
+### 手机号登录（国内版，全自动）
+
+面板「添加账号 → 外部平台 → AutoClaw」→ 填手机号 → 发验证码 → 填 6 位码 → 入池。
+
+```
+POST {userapi}/userapi/v1/agent-send-code  {"phone","source_id":"autoclaw","device_id"}
+POST {userapi}/userapi/v1/agent-login/     {"phone","code","platform":"web","source_id","device_id"}
+```
+
+`device_id` 由网关生成并在两步之间透传——上游把设备与登录会话绑定，两步用不同的值会登录失败。
+
+> 国际版**上游已关闭短信入口**（主登录是 Zai/Google OAuth，且被阿里云风控验证码挡着）。国际版账号需从桌面端导入或手工填写凭据。
+
+### 三处「踩空后表现很像没权限」的口径
+
+- **`X-Version` 是模型目录的版本门控**：不带它时上游只下发 3–4 条模型（缺 `glm-5.3-flash` 等），看起来像账号没有这些模型
+- **userapi 域要 `X-Harness-Type: zcode`，chat 域不能带**：上游对 `/chat/completions` 上的这个值区别对待（403 pay-view / 406）。两条链路刻意不一致，别「统一」掉
+- **签名 `X-Auth-Sign = MD5("{appId}&{ts}&{appKey}")`，ts 是秒**：签名错时上游回 `code 400002`，网关自动降级到 `agent-refresh`
+
+appId/appKey 是**客户端指纹**而非我们的密钥（内嵌在官方客户端里，两地相同），所以硬编码是正确的——做成可配置只会让签名对不上。
+
+### 续期单飞
+
+与 Cline 同源的问题：AutoClaw 服务端每次刷新会**轮换 `refresh_token`**，并发刷新会互相作废并把人踢下线。两条通道现在共用同一份单飞实现（`internal/server/singleflight.go`）。
 
 ## 🆚 与上游的差异
 
@@ -862,6 +904,7 @@ web/
 | `zai:` | Z.AI / 智谱 GLM（Plan JWT + API Key 双通道） | `data/zai-accounts.json` | [Z.AI 账号池](#-zai--zcode-账号池) |
 | `copilot:` | GitHub Copilot | `data/ext-accounts.json`（provider `copilot`） | [GitHub Copilot 通道](#-github-copilot-通道) |
 | `cline:` | Cline（**带免费池**，池前缀保留在模型名里） | `data/ext-accounts.json`（provider `cline`） | [Cline 通道](#-cline-通道带免费池) |
+| `autoclaw:` | AutoClaw（智谱，国内 / 国际两地区） | `data/ext-accounts.json`（provider `autoclaw`） | [AutoClaw 通道](#-autoclaw-通道智谱-autoglm) |
 | `qoder:` | Qoder（阿里） | `data/ext-accounts.json`（provider `qoder`） | — |
 | `codex:` | Codex 订阅池 | 本机 `~/.codex*` 凭据 | — |
 | `free:` | 免费 key 池（`free:<provider>/<model>`） | 配置的免费 Key | — |

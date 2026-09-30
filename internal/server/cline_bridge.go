@@ -105,42 +105,17 @@ func (h *Handler) clineChatStream(w http.ResponseWriter, r *http.Request, body [
 //
 // 为什么必须单飞：Cline 的 refresh_token 是**一次性轮换**语义，并发的多个请求
 // 同时发现临期时若各自去打一次续期，后到的那次会拿着已作废的 token → 401 →
-// 用户被踢下线。同账号的续期按 ID 串行化，其余请求复用同一次结果。
+// 用户被踢下线。同账号的续期合并成一次，其余请求复用结果。
 func (h *Handler) refreshClineCred(ctx context.Context, accountID string, cred *cline.Credential) (*cline.Credential, error) {
-	h.clineRefreshMu.Lock()
-	if flight, ok := h.clineRefreshFlight[accountID]; ok {
-		h.clineRefreshMu.Unlock()
-		<-flight.done
-		if flight.cred != nil {
-			return flight.cred, nil
-		}
-		return nil, flight.err
-	}
-	flight := &clineFlight{done: make(chan struct{})}
-	h.clineRefreshFlight[accountID] = flight
-	h.clineRefreshMu.Unlock()
-
-	fresh, err := cline.Refresh(ctx, cred)
-	flight.cred, flight.err = fresh, err
-	close(flight.done)
-
-	h.clineRefreshMu.Lock()
-	delete(h.clineRefreshFlight, accountID)
-	h.clineRefreshMu.Unlock()
-
+	fresh, err := h.clineFlights.Do(accountID, func() (*cline.Credential, error) {
+		return cline.Refresh(ctx, cred)
+	})
 	if err == nil && h.extManager != nil {
 		if raw, merr := json.Marshal(fresh); merr == nil {
 			h.extManager.ReplaceCred(extstore.PCline, accountID, raw)
 		}
 	}
 	return fresh, err
-}
-
-// clineFlight 一次在飞的续期。
-type clineFlight struct {
-	done chan struct{}
-	cred *cline.Credential
-	err  error
 }
 
 // passThroughCline 原样透传上游响应（上游即 OpenAI 格式，无需翻译）。

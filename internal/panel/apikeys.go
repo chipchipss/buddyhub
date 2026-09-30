@@ -65,7 +65,7 @@ func (p *Panel) postAPIKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 平台白名单校验（前端下拉来源；写死避免任意串进配置）
-	valid := map[string]bool{"*": true, "workbuddy": true, "loomy": true, "qoder": true, "codex": true, "free": true, "zai": true, "copilot": true, "cline": true}
+	valid := map[string]bool{"*": true, "workbuddy": true, "loomy": true, "qoder": true, "codex": true, "free": true, "zai": true, "copilot": true, "cline": true, "autoclaw": true}
 	for _, plat := range body.Platforms {
 		if !valid[strings.TrimSpace(plat)] {
 			writeErr(w, http.StatusBadRequest, "未知平台: "+plat)

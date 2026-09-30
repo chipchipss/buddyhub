@@ -230,6 +230,9 @@ func (p *Panel) routes() {
 	// 覆盖 小浣熊微信扫码 / Qoder 设备授权 / GitHub Copilot 设备码
 	p.mux.HandleFunc("POST /panel/api/ext/{provider}/login/start", p.withAuth(p.extLoginStart))
 	p.mux.HandleFunc("POST /panel/api/ext/{provider}/login/poll", p.withAuth(p.extLoginPoll))
+	// AutoClaw 手机短信登录（两段同步：发码 → 校验，无会话）
+	p.mux.HandleFunc("POST /panel/api/ext/autoclaw/send_code", p.withAuth(p.extAutoClawSendCode))
+	p.mux.HandleFunc("POST /panel/api/ext/autoclaw/login", p.withAuth(p.extAutoClawLogin))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
