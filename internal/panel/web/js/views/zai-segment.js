@@ -197,91 +197,101 @@ function accountCard(a) {
 }
 
 function addPanel() {
-  if (!addOpen.peek()) {
+  if (!addOpen()) {
     return h('div', { class: 'row' },
       h('button', { class: 'btn primary', onclick: () => addOpen.set(true) }, icon('plus'), '添加 Z.AI 账号'),
     );
   }
-  const flow = oauth();
-  return h('div', { class: 'glass-flat', style: { padding: '14px' } },
-    h('div', { class: 'row wrap', style: { gap: '8px' } },
-      h('select', {
-        class: 'input', style: { width: 'auto' },
-        onchange: ev => addProvider.set(ev.target.value),
-      },
-        h('option', { value: 'zai', selected: addProvider.peek() === 'zai', text: 'Z.AI（支持 JWT / API Key）' }),
-        h('option', { value: 'bigmodel', selected: addProvider.peek() === 'bigmodel', text: '智谱开放平台（API Key）' }),
-      ),
-      h('input', {
-        class: 'input', placeholder: '账号名称（如：主号）', style: { flex: '1', minWidth: '150px' },
-        oninput: ev => addName.set(ev.target.value),
-      }),
-    ),
 
-    // OAuth 免密登录（仅 Z.AI）：授权链接 + 自动轮询，完成后兑换回退 Key 一并入池
-    addProvider.peek() === 'zai'
-      ? h('div', { class: 'stack', style: { marginTop: '12px' } },
-        flow
-          ? h('div', { class: 'stack', style: { gap: '8px' } },
-            flow.url
-              ? h('div', { class: 'url-box', text: flow.url })
-              : null,
-            h('div', { class: 'row wrap', style: { gap: '8px' } },
-              flow.url
-                ? h('button', {
-                  class: 'btn sm', onclick: async () => {
-                    try { await copyText(flow.url); toast('链接已复制'); } catch { toast('复制失败', 'fail'); }
-                  },
-                }, icon('copy'), '复制链接')
-                : null,
-              flow.url
-                ? h('button', { class: 'btn sm primary', onclick: () => window.open(flow.url, '_blank') }, '在浏览器打开')
-                : null,
-              h('button', {
-                class: 'btn sm ghost', onclick: () => { stopOAuthPoll(); oauth.set(null); },
-              }, '取消'),
-            ),
-            h('div', { class: flow.url ? 'busy' : 'muted', style: { fontSize: '12px' }, text: flow.status }),
-          )
-          : h('div', { class: 'row wrap', style: { gap: '8px' } },
-            h('button', { class: 'btn primary', onclick: () => startOAuth() }, icon('plus'), 'OAuth 免密登录'),
-            h('span', { class: 'muted', style: { fontSize: '11.5px', alignSelf: 'center' },
-              text: '浏览器登录 → 自动入池（同时兑换回退 Key）' }),
+  // 整块命令式管理：输入框是非受控的（值在 DOM 里），provider/OAuth 的局部刷新
+  // 走订阅式重绘——避免响应式重渲染把正在输入的名称/密钥清空。
+  const nameInput = h('input', {
+    class: 'input', placeholder: '账号名称（如：主号）', style: { flex: '1', minWidth: '150px' },
+  });
+  const secretInput = h('input', {
+    class: 'input',
+    placeholder: 'Coding Plan JWT（三段点分）或 Z.AI API Key',
+    style: { fontFamily: 'var(--mono)', fontSize: '12px' },
+  });
+  const hintEl = h('div', { class: 'muted', style: { fontSize: '11.5px' } });
+  const providerSel = h('select', { class: 'input', style: { width: 'auto' } },
+    h('option', { value: 'zai', text: 'Z.AI（支持 JWT / API Key）' }),
+    h('option', { value: 'bigmodel', text: '智谱开放平台（API Key）' }),
+  );
+  providerSel.value = addProvider.peek();
+
+  const submitBtn = h('button', {
+    class: 'btn primary',
+    onclick: async ev => {
+      const secret = secretInput.value.trim();
+      if (!secret) { toast('请粘贴 JWT 或 API Key', 'fail'); return; }
+      ev.currentTarget.disabled = true;
+      try {
+        const r = await api('zai/accounts', {
+          method: 'POST',
+          body: JSON.stringify({ name: nameInput.value.trim(), secret, provider: addProvider.peek() }),
+        });
+        const kind = r.mode === 'jwt' ? 'Plan JWT' : 'API Key';
+        toast('已入池（识别为 ' + kind + '）');
+        nameInput.value = ''; secretInput.value = '';
+        addOpen.set(false);
+        await loadZai();
+      } catch (e) { toast(e.message, 'fail'); }
+      finally { ev.currentTarget.disabled = false; }
+    },
+  }, icon('check'), '入池');
+
+  // OAuth 进行中状态（订阅式更新，不依赖响应式重渲染）
+  const flowBox = h('div');
+  const paintFlow = () => {
+    if (!flowBox.isConnected) return;
+    const f = oauth.peek();
+    if (!f) { flowBox.replaceChildren(); return; }
+    flowBox.replaceChildren(
+      f.url
+        ? h('div', { class: 'stack', style: { gap: '8px' } },
+          h('div', { class: 'url-box', text: f.url }),
+          h('div', { class: 'row wrap', style: { gap: '8px' } },
+            h('button', {
+              class: 'btn sm', onclick: async () => {
+                try { await copyText(f.url); toast('链接已复制'); } catch { toast('复制失败', 'fail'); }
+              },
+            }, icon('copy'), '复制链接'),
+            h('button', { class: 'btn sm primary', onclick: () => window.open(f.url, '_blank') }, '在浏览器打开'),
+            h('button', { class: 'btn sm ghost', onclick: () => { stopOAuthPoll(); oauth.set(null); paintFlow(); } }, '取消'),
           ),
-      )
-      : null,
+          h('div', { class: 'busy', text: f.status }),
+        )
+        : h('div', { class: 'muted', style: { fontSize: '12px' }, text: f.status }),
+    );
+  };
+  oauth.subscribe(paintFlow);
 
+  const oauthBtn = h('button', {
+    class: 'btn primary',
+    onclick: () => { startOAuth(); paintFlow(); },
+  }, icon('plus'), 'OAuth 免密登录');
+
+  const paintProvider = () => {
+    const p = addProvider.peek();
+    oauthBtn.hidden = p !== 'zai';
+    hintEl.textContent = p === 'bigmodel'
+      ? '智谱开放平台（open.bigmodel.cn）的 API Key，走 Anthropic 兼容端点。'
+      : 'JWT 走 Plan 通道（消耗订阅额度，需配置验证码求解器）；API Key 走回退通道（免验证码）。';
+  };
+
+  return h('div', { class: 'glass-flat', style: { padding: '14px' } },
+    h('div', { class: 'row wrap', style: { gap: '8px' } }, providerSel, nameInput),
     h('div', { class: 'stack', style: { marginTop: '12px' } },
-      h('input', {
-        class: 'input', placeholder: addProvider.peek() === 'bigmodel'
-          ? '智谱开放平台 API Key'
-          : '或手动粘贴：Coding Plan JWT（三段点分）/ Z.AI API Key',
-        style: { fontFamily: 'var(--mono)', fontSize: '12px' },
-        oninput: ev => addSecret.set(ev.target.value),
-      }),
-      h('div', { class: 'muted', style: { fontSize: '11.5px' },
-        text: addProvider.peek() === 'bigmodel'
-          ? '智谱开放平台（open.bigmodel.cn）的 API Key，走 Anthropic 兼容端点。'
-          : 'JWT 走 Plan 通道（消耗订阅额度，需配置验证码求解器）；API Key 走回退通道（免验证码）。' }),
-      h('div', { class: 'row' },
-        h('button', {
-          class: 'btn primary', onclick: async ev => {
-            const secret = addSecret.peek().trim();
-            if (!secret) { toast('请粘贴 JWT 或 API Key', 'fail'); return; }
-            ev.currentTarget.disabled = true;
-            try {
-              const r = await api('zai/accounts', {
-                method: 'POST',
-                body: JSON.stringify({ name: addName.peek().trim(), secret, provider: addProvider.peek() }),
-              });
-              toast(`已入池（识别为 ${r.mode === 'jwt' ? 'Plan JWT' : 'API Key'}）`);
-              addName.set(''); addSecret.set(''); addOpen.set(false);
-              await loadZai();
-            } catch (e) { toast(e.message, 'fail'); }
-            finally { ev.currentTarget.disabled = false; }
-          },
-        }, icon('check'), '入池'),
-        h('button', { class: 'btn ghost', onclick: () => addOpen.set(false) }, '取消'),
+      h('div', { class: 'row wrap', style: { gap: '8px' } }, oauthBtn,
+        h('span', { class: 'muted', style: { fontSize: '11.5px', alignSelf: 'center' },
+          text: '浏览器登录 → 自动入池（同时兑换回退 Key）' })),
+      flowBox,
+      secretInput,
+      hintEl,
+      h('div', { class: 'row', style: { marginTop: '4px' } },
+        submitBtn,
+        h('button', { class: 'btn ghost', onclick: () => { stopOAuthPoll(); oauth.set(null); addOpen.set(false); } }, '取消'),
       ),
     ),
   );
