@@ -19,6 +19,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
 	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qclaw"
+	"github.com/chipchipss/buddyhub/internal/extprovider/raccoon"
 	"github.com/chipchipss/buddyhub/internal/extprovider/trae"
 	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/httpauth"
@@ -142,6 +143,7 @@ type Handler struct {
 	lastTraeErr     string
 	lastAccioErr    string
 	lastTraeWorkErr string
+	lastRaccoonErr  string
 
 	// clineFlights / autoclawFlights 续期单飞表。
 	// 两家的 refresh_token 都是一次性轮换语义：并发续期会互相作废并把人踢下线，
@@ -151,6 +153,7 @@ type Handler struct {
 	qclawFlights    flightGroup[*qclaw.Credential]
 	traeFlights     flightGroup[*trae.Credential]
 	accioFlights    flightGroup[*accio.Credential]
+	raccoonFlights  flightGroup[*raccoon.Credential]
 }
 
 // NewHandler 构建 handler。
@@ -611,6 +614,26 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		out = append(out, entry)
 	}
+	// 小浣熊模型名单（raccoon: 前缀）：远程目录 10 分钟缓存，失败回落旧缓存
+	// 或静态兜底——目录为空会让整条通道看起来「不存在」。
+	for _, m := range h.raccoonCatalog() {
+		if m.ID == "" {
+			continue
+		}
+		entry := map[string]any{
+			"id":       raccoonModelPrefix + m.ID,
+			"object":   "model",
+			"created":  1753600000,
+			"owned_by": "raccoon",
+		}
+		if m.Name != "" && m.Name != m.ID {
+			entry["description"] = m.Name
+		}
+		if m.ContextMax > 0 {
+			entry["context_window"] = m.ContextMax
+		}
+		out = append(out, entry)
+	}
 	// Accio 模型名单（accio: 前缀）：有账号时实时拉（10 分钟缓存）。
 	for _, m := range h.accioCatalog() {
 		if m.ID == "" {
@@ -967,6 +990,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			detail += "；最近失败原因: " + h.lastTraeErr
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_trae_account", detail)
+		return
+	}
+
+	// 小浣熊直连通道（raccoon: 前缀模型）：上游本身就是 OpenAI 兼容，
+	// body 原样透传、SSE 标准 chunk，只有响应帧里的 model 要回写。
+	if isRaccoonModel(bareModel) {
+		rm := strings.TrimPrefix(bareModel, raccoonModelPrefix)
+		bodyRM := body
+		if rm != bareModel {
+			bodyRM = rewriteModel(body, rm)
+		}
+		if h.raccoonChatStream(w, r, bodyRM, rm) {
+			return
+		}
+		detail := "没有可用的小浣熊账号（面板-添加账号-外部平台-小浣熊 微信扫码后重试）"
+		if h.lastRaccoonErr != "" {
+			detail += "；最近失败原因: " + h.lastRaccoonErr
+		}
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_raccoon_account", detail)
 		return
 	}
 

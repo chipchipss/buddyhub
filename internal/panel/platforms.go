@@ -80,10 +80,10 @@ var platforms = []Platform{
 		Note: "浏览器授权（本机回调）"},
 	{ID: "traework", Name: "TraeWork（字节）", Group: GroupGateway, Prefix: "traework:", Login: LoginManual,
 		Checkin: true, Note: "粘贴客户端凭据（含每日签到）"},
+	{ID: "raccoon", Name: "小浣熊（商汤）", Group: GroupGateway, Prefix: "raccoon:", Login: LoginQR,
+		Checkin: true, Note: "微信扫码登录（OpenAI 兼容直连）"},
 
 	// ── 积分 / 签到平台（无对话 API）──
-	{ID: "raccoon", Name: "小浣熊（商汤）", Group: GroupPoints, Login: LoginQR,
-		Checkin: true, Note: "微信扫码登录"},
 	{ID: "lobsterai", Name: "LobsterAI（有道）", Group: GroupPoints, Login: LoginManual,
 		Checkin: true, Note: "从客户端凭据文件复制"},
 	{ID: "codearts", Name: "CodeArts（华为云）", Group: GroupPoints, Login: LoginManual,

@@ -337,11 +337,16 @@ func (c *Client) FetchBalance(ctx context.Context, cred *Credential) (*CreditBal
 }
 
 // Refresh 续期 access_token（refresh_token 轮换）。
+//
+// 路径是 `/refresh`，**不是** `/refresh_token` —— 实测后者恒 404（网关日志里
+// 连续 40 小时 `续期失败: 响应不是 JSON（HTTP 404）`，账号 token 一到期就再也
+// 续不上）。前者对假 token 回 `400 param payload iss invalid`，说明路由与
+// 字段名 `refresh_token` 都是对的。
 func (c *Client) Refresh(ctx context.Context, cred *Credential) (*Credential, error) {
 	if cred.RefreshToken == "" {
 		return nil, fmt.Errorf("无 refresh_token，需重新登录")
 	}
-	data, err := c.do(ctx, http.MethodPost, APIBase+AuthPrefix+"/refresh_token", nil, map[string]any{
+	data, err := c.do(ctx, http.MethodPost, APIBase+AuthPrefix+"/refresh", nil, map[string]any{
 		"refresh_token": cred.RefreshToken,
 	})
 	if err != nil {

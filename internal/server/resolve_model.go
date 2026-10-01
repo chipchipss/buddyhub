@@ -5,6 +5,10 @@ import "strings"
 // zaiModelPrefix Z.AI（GLM Coding Plan API Key 通道）路由前缀。
 const zaiModelPrefix = "zai:"
 
+// isZaiModel 判据。此前分发链里是内联的 strings.HasPrefix，抽出来是为了让
+// 每条桥接都有同一个形状的判据，好被 gatewayRoutes 表统一核对。
+func isZaiModel(bare string) bool { return strings.HasPrefix(bare, zaiModelPrefix) }
+
 // resolveModel 解析模型名协议（PLAN D6）：
 //
 //	分布式前缀： "[realm:]model"
@@ -45,6 +49,7 @@ func PlatformOf(bare string) string {
 		{freeModelPrefix, "free"},
 		{loomyModelPrefix, "loomy"},
 		{zaiModelPrefix, "zai"},
+		{raccoonModelPrefix, "raccoon"},
 	} {
 		if strings.HasPrefix(bare, p.prefix) {
 			return p.name

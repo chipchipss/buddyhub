@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/chipchipss/buddyhub/internal/server"
 )
 
 // 注册表本身的完整性：id 唯一、展示名非空、分组合法、login 合法。
@@ -46,32 +48,43 @@ func TestPlatformRegistryIsWellFormed(t *testing.T) {
 	}
 }
 
-// 每个有前缀的平台都必须真的在路由里可达——注册表写了前缀但 PlatformOf
-// 不认，界面上会显示这个平台、请求却打到腾讯池（静默错路由）。
+// TestEveryGatewayPrefixIsRoutable 注册表声明的每个网关前缀，**都必须真的有桥接**。
+//
+// 这条测试曾是**空转的**：原先的 platformOfInPanel 遍历的就是下面这个 platforms
+// 切片本身——拿注册表验证注册表，恒真。于是「注册表加了 prefix、桥接没写」
+// 这种遗漏没有任何测试能抓到，运行时静默掉进腾讯池报「模型不存在」。
+//
+// 现在改成交叉校验：面板声明的前缀 → 必须出现在 server 的路由表里 →
+// 且 server.PlatformOf 认识它（否则带平台授权的 API key 会 403）。
+//
+// 面板 import server 只发生在 _test.go 里，两者生产代码互不依赖，不构成环。
 func TestEveryGatewayPrefixIsRoutable(t *testing.T) {
+	routable := map[string]bool{}
+	for _, p := range server.GatewayPrefixes() {
+		routable[p] = true
+	}
+
 	for _, p := range platforms {
 		if p.Prefix == "" {
 			continue
 		}
-		// workbuddy 的前缀是 cn:/global:（realm 前缀，由 resolveModel 处理）
+		// workbuddy 的 cn:/global: 是 realm 前缀（由 resolveModel 处理），
+		// 不走对话桥接，不在路由表里是正常的。
 		if p.ID == "workbuddy" {
 			continue
 		}
-		if got := platformOfInPanel(p.Prefix + "some-model"); got == "" {
-			t.Errorf("%s: 前缀 %q 没有对应的路由（PlatformOf 不认）", p.ID, p.Prefix)
+		if !routable[p.Prefix] {
+			t.Errorf("%s: 注册表声明前缀 %q，但 server 没有对应的对话桥接 —— "+
+				"运行时会静默掉进腾讯池（gatewayRoutes 见 internal/server/gateways.go）",
+				p.ID, p.Prefix)
+			continue
+		}
+		// 两个都要过：有桥接不代表 PlatformOf 认识它（漏了会让带平台授权的
+		// API key 对所有这个前缀的模型返回 403）。
+		if got := server.PlatformOf(p.Prefix + "some-model"); got != p.ID {
+			t.Errorf("%s: PlatformOf(%q) = %q，期望 %q", p.ID, p.Prefix+"some-model", got, p.ID)
 		}
 	}
-}
-
-// platformOfInPanel 与 server.PlatformOf 同口径的最小副本。
-// 面板不 import server（会成环），所以这里按注册表自查一遍前缀声明。
-func platformOfInPanel(model string) string {
-	for _, p := range platforms {
-		if p.Prefix != "" && strings.HasPrefix(model, p.Prefix) {
-			return p.ID
-		}
-	}
-	return ""
 }
 
 // authedGet 带测试 key 打面板接口（对启用鉴权的面板；无鉴权时多余但无害）。
