@@ -57,12 +57,17 @@ const (
 
 // ExtAccount 一个外部平台账号。
 type ExtAccount struct {
-	Provider string          `json:"provider"` // lobsterai | raccoon | qoder | codearts
-	ID       string          `json:"id"`       // 账号标识（uid / user_id / 昵称派生）
-	Label    string          `json:"label"`    // 展示名
-	AddedAt  string          `json:"added_at"`
-	Disabled bool            `json:"disabled,omitempty"`
-	Cred     json.RawMessage `json:"cred"` // 平台各自凭据 JSON
+	Provider string `json:"provider"` // lobsterai | raccoon | qoder | codearts
+	ID       string `json:"id"`       // 账号标识（uid / user_id / 昵称派生）
+	Label    string `json:"label"`    // 展示名
+	AddedAt  string `json:"added_at"`
+	Disabled bool   `json:"disabled,omitempty"`
+	// LastCheckin 最后一次**执行过签到动作**的日期（YYYY-MM-DD）。
+	// 任务中心的「今日待办」靠它判——扫描是只读操作，不能再打一次上游状态
+	// （那等于每次扫描都对每个平台发请求）。`claimed` 与 `already-claimed`
+	// 都算已跑过；`failed` 不记，留在待办里重试。
+	LastCheckin string          `json:"last_checkin,omitempty"`
+	Cred        json.RawMessage `json:"cred"` // 平台各自凭据 JSON
 }
 
 // store 持久化文件结构。
@@ -190,6 +195,43 @@ func (m *Manager) SetDisabled(provider, id string, disabled bool) error {
 }
 
 // replaceCred 更新凭据（refresh 轮换后回写）。
+// markCheckedIn 记下「今天跑过了」，任务中心据此把它从待办里摘掉。
+//
+// 失败**不记**：留着待办才有重试机会，记了等于把失败当成功吞掉。
+func (m *Manager) markCheckedIn(provider, id string) {
+	today := time.Now().Format("2006-01-02")
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, a := range m.accounts {
+		if a.Provider == provider && a.ID == id {
+			if a.LastCheckin == today {
+				return
+			}
+			a.LastCheckin = today
+			_ = m.saveLocked()
+			return
+		}
+	}
+}
+
+// ExtPendingOne 判断该账号**今天是否还有待办**（只读，不打上游）。
+//
+// 扫描若每次都要去问上游，就是「每点一次扫描 → 对每个平台发一次请求」，
+// 而签到本身是幂等的、本地就能判——所以靠 LastCheckin 判。
+// 判据：停用 / 平台无签到能力 / 今天跑过 → 不是待办；其余 → 是待办。
+func (m *Manager) ExtPendingOne(a *ExtAccount) (bool, string) {
+	if a == nil || a.Disabled {
+		return false, ""
+	}
+	if !checkinCapable[a.Provider] {
+		return false, ""
+	}
+	if a.LastCheckin == time.Now().Format("2006-01-02") {
+		return false, ""
+	}
+	return true, "今日待签到"
+}
+
 func (m *Manager) replaceCred(provider, id string, cred json.RawMessage) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -214,6 +256,36 @@ type ExtAccountView struct {
 }
 
 // CheckinResult 统一签到结果。
+// checkinCapable 该平台是否有每日签到能力。
+//
+// 与面板注册表的 Checkin 字段是**同一份事实的两个投影**（那份驱动按钮、
+// 这份驱动待办判定）。extstore 不 import panel（会成环），只能各自声明——
+// platforms_test.go 的注册表一致性测试兜住它们漂移。
+// CheckinCapable 导出的签到能力查询——面板包拿它与注册表的 Checkin 字段
+// 做一致性断言（注册表驱动按钮，这张表驱动待办判定，漂移了就会出现
+// 「待办里有却按不了」或反过来的不一致）。
+func CheckinCapable(provider string) bool { return checkinCapable[provider] }
+
+// CheckinCapableProviders 枚举有签到能力的平台（给跨包一致性断言用）。
+func CheckinCapableProviders() []string {
+	out := make([]string, 0, len(checkinCapable))
+	for id := range checkinCapable {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+var checkinCapable = map[string]bool{
+	PLogsterAI: true,
+	PRaccoon:   true,
+	PQoder:     true,
+	PCodeArts:  true,
+	PLoomyCLI:  true,
+	PTraeWork:  true,
+	PAutoClaw:  true,
+}
+
 type CheckinResult struct {
 	Provider string  `json:"provider"`
 	ID       string  `json:"id"`
@@ -372,6 +444,11 @@ func (m *Manager) CheckinOne(ctx context.Context, a *ExtAccount) *CheckinResult 
 		res.Kind, res.Credit, res.Message = r.Kind, r.Credit, r.Message
 	default:
 		res.Kind, res.Message = "failed", "未知平台: "+a.Provider
+	}
+	// 只有真跑过（成功 / 今天已领）才记日期——失败留着待办才有重试机会。
+	// 这条是任务中心「今日待办」的反向依赖：不记，扫描就会把已完成的一直列出来。
+	if res.Kind == "claimed" || res.Kind == "already-claimed" {
+		m.markCheckedIn(a.Provider, a.ID)
 	}
 	return res
 }

@@ -10,6 +10,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/upstream"
 )
 
@@ -32,6 +34,18 @@ type scanAccountItem struct {
 	Nickname  string          `json:"nickname"`
 	Growth    []upstream.Task `json:"growth,omitempty"`
 	GrowthErr string          `json:"growth_error,omitempty"`
+}
+
+// extPendingItem 外部平台的待办项（签到 / 领奖类，一账号一条）。
+//
+// 与成长任务是**两套语义**：成长任务有 task_code + 进度 + 自动化动作表，
+// 外部平台只有「今天跑没跑过」。所以它们在响应里是**平级的两个字段**，
+// 不往 scanAccountItem 里塞——塞进去就得给外部项伪造 UID / TaskCode。
+type extPendingItem struct {
+	Provider string `json:"provider"`
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Note     string `json:"note,omitempty"`
 }
 
 // growthPending 任务是否"未完成且可自动化"。
@@ -101,12 +115,27 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 		}(i, st.UID)
 	}
 	wg.Wait()
-	pending := 0
+
+	// 外部平台待办（只读：判据是「今天跑没跑过」，不打上游）。
+	// 这一段此前完全缺失——7 个外部账号 0 个进待办，任务中心实际只覆盖腾讯池。
+	var extPending []extPendingItem
+	for _, a := range p.extManager().List() {
+		if ok, note := p.extManager().ExtPendingOne(a); ok {
+			extPending = append(extPending, extPendingItem{
+				Provider: a.Provider, ID: a.ID, Label: a.Label, Note: note,
+			})
+		}
+	}
+
+	pending := len(extPending)
 	for _, it := range items {
 		pending += len(it.Growth)
 	}
-	log.Printf("panel: 队列扫描完成：全部账号待办 %d 项", pending)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": items, "pending_count": pending})
+	log.Printf("panel: 队列扫描完成：全部账号待办 %d 项（腾讯 %d · 外部 %d）",
+		pending, pending-len(extPending), len(extPending))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "accounts": items, "ext": extPending, "pending_count": pending,
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -246,15 +275,32 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 	}
 	wg.Wait()
 
+	// 外部平台待办：本地判定（今天跑没跑过），不打上游，所以不用并发扫。
+	// 这一段此前完全缺失——外部账号只在 10:00 的 ExtHook 里被无条件跑一次，
+	// 结果还不落队列，任务中心看不到、也点不动。
+	for _, a := range p.extManager().List() {
+		if pending, _ := p.extManager().ExtPendingOne(a); pending {
+			extAcct := *a // List 已是快照，复制一份避免与 extstore 内部指针共享
+			accts = append(accts, queueAccount{ext: &extAcct})
+		}
+	}
+
 	// 组装队列（账号分组，保持顺序）。
 	var items []queueItem
 	for _, one := range accts {
+		if one.ext != nil {
+			items = append(items, queueItem{
+				UID: one.key(), Nickname: one.ext.Label, Kind: "ext",
+				Code: one.ext.Provider + "/" + one.ext.ID, Status: "pending",
+			})
+			continue
+		}
 		for _, t := range one.grow {
-			items = append(items, queueItem{UID: one.a.UID, Nickname: one.a.Nickname, Kind: "growth", Code: t.TaskCode, Status: "pending"})
+			items = append(items, queueItem{UID: one.key(), Nickname: one.a.Nickname, Kind: "growth", Code: t.TaskCode, Status: "pending"})
 		}
 	}
 	if len(items) == 0 {
-		log.Printf("panel: 队列启动：无可执行待办（全部账号任务已完成）")
+		log.Printf("panel: 队列启动：无可执行待办（腾讯任务与外部签到均已完成）")
 		return false, 0, 0, "全部账号没有待办任务"
 	}
 
@@ -302,23 +348,28 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			key := one.key()
 			// per-account 互斥：与单任务/一键完成共用一把锁。
-			if !p.tryLockAccount(one.a.UID) {
-				p.queueSet(q, one.a.UID, func(it *queueItem) {
+			// 外部账号走 "ext:provider/id" 这个命名空间，不与腾讯 uid 撞车。
+			if !p.tryLockAccount(key) {
+				p.queueSet(q, key, func(it *queueItem) {
 					it.Status, it.Message = "skipped", "该账号有其它任务动作在执行，跳过"
 				})
 				return
 			}
-			defer p.unlockAccount(one.a.UID)
+			defer p.unlockAccount(key)
 			// 前置：批量接受尚未接受的任务。上游对 not_accepted 的任务不计数——
 			// 面板「一键完成」一直有这步，队列路径此前漏了（表现为上报 200 但进度
 			// 一直 not_accepted、无法领奖）。失败不阻塞（行为事件才是进度判据）。
-			if accepted := p.acceptPendingTasks(one.a); accepted > 0 {
-				time.Sleep(reportGap) // 给上游状态流转留时间
+			// 这是**腾讯成长任务专属**的前置，外部平台没有 accept 概念。
+			if one.ext == nil {
+				if accepted := p.acceptPendingTasks(one.a); accepted > 0 {
+					time.Sleep(reportGap) // 给上游状态流转留时间
+				}
 			}
 			for i := range q.items {
 				uid, kind, code := q.snapshotAt(i)
-				if uid != one.a.UID {
+				if uid != key {
 					continue
 				}
 				p.queueMarkAt(i, "running", "")
@@ -327,6 +378,8 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 				switch kind {
 				case "growth":
 					msg, err = p.runGrowthQueued(one.a, code)
+				case "ext":
+					msg, err = p.runExtQueued(one.ext, code)
 				}
 				if err != nil {
 					p.queueMarkAt(i, "error", err.Error())
@@ -341,9 +394,25 @@ func (p *Panel) runQueueItems(accts []queueAccount, items []queueItem, concurren
 }
 
 // queueAccount 队列执行的账号单元（runQueueItems 参数）。
+//
+// 二选一：`a` 非空是腾讯账号（跑成长任务），`ext` 非空是外部平台账号
+// （跑签到）。key() 给出两者统一的分组键，外部的加 `ext:` 前缀避免与
+// 腾讯 uid 命名空间撞车。
 type queueAccount struct {
 	a    *auth.Auth
 	grow []upstream.Task
+	ext  *extstore.ExtAccount
+}
+
+// key 该单元在队列条目里的 UID 字段值。
+func (q queueAccount) key() string {
+	if q.ext != nil {
+		return "ext:" + q.ext.Provider + "/" + q.ext.ID
+	}
+	if q.a == nil {
+		return ""
+	}
+	return q.a.UID
 }
 
 // snapshotAt 锁内读条目三元组（避免锁外持有指针）。
@@ -397,6 +466,34 @@ func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 
 // runGrowthQueued 执行单个成长任务（动作 + 回读 + 自动领奖；与
 // accountTaskAuto 同语义，结果以文字返回）。
+// runExtQueued 执行一条外部平台待办（签到 / 领奖）。
+//
+// 与腾讯成长任务的差别：外部平台**没有任务码、没有进度、没有自动化动作表**，
+// 一个账号就是一个动作，所以 code 参数只用于展示（Form 里显示的是它）。
+// 「今天已领过」是**成功**而不是错误——上游按天幂等，把它当失败会让队列
+// 每次都报红。
+func (p *Panel) runExtQueued(a *extstore.ExtAccount, code string) (string, error) {
+	if a == nil {
+		return "", fmt.Errorf("外部账号不存在")
+	}
+	res := p.extManager().CheckinOne(context.Background(), a)
+	msg := res.Message
+	if msg == "" {
+		msg = "完成"
+	}
+	switch res.Kind {
+	case "claimed":
+		if res.Credit > 0 {
+			msg = fmt.Sprintf("%s（+%g）", msg, res.Credit)
+		}
+		return msg, nil
+	case "already-claimed", "inactive":
+		return msg, nil // 幂等 / 无需签到：都不是失败
+	default:
+		return "", fmt.Errorf("%s", msg)
+	}
+}
+
 func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	act := autoActionFor(code)
 	if act == nil {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/server"
 )
 
@@ -188,6 +189,30 @@ func TestGetPlatformsEndpoint(t *testing.T) {
 	for _, pl := range doc.Platforms {
 		if pl.ID == "" || pl.Name == "" || pl.Group == "" {
 			t.Errorf("下发的平台字段不全: %+v", pl)
+		}
+	}
+}
+
+// 注册表的 Checkin 字段与 extstore 的签到能力是**同一份事实的两个投影**：
+// 前者驱动界面上的签到按钮，后者驱动任务中心的「今日待办」判定。
+// 两者各写各的就会漂移——最典型的症状是「待办里列出来了却点不了签到」，
+// 或者反过来「按钮能点但待办里永远没有它」，且两边的测试各绿各的。
+//
+// extstore 不 import panel（会成环），所以只能在面板侧做单向断言：
+// **extstore 认为有签到能力的，注册表必须也标了 Checkin**。
+func TestRegistryMarksEveryExtstoreCheckinPlatform(t *testing.T) {
+	for _, id := range extstore.CheckinCapableProviders() {
+		p, ok := platformByID(id)
+		if !ok {
+			t.Errorf("extstore 有 %s 的签到能力，注册表里却没有这个平台（账号目录会缺一块）", id)
+			continue
+		}
+		if !p.Checkin {
+			t.Errorf("%s: extstore 认为有每日签到，注册表却 Checkin=false —— "+
+				"界面不会出签到按钮，任务中心也列不出来", id)
+		}
+		if !platformUsesExtstore(id) {
+			t.Errorf("%s: 有签到能力但不走外部账号表，语义对不上", id)
 		}
 	}
 }

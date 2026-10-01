@@ -87,6 +87,8 @@ var platforms = []Platform{
 		Checkin: true, Note: "永久 AK/SK（建议）"},
 
 	// ── 积分 / 签到平台（无对话 API）──
+	{ID: "loomy-cli", Name: "Loomy（讯飞，密钥/短信）", Group: GroupPoints, Login: LoginManual,
+		Checkin: true, Note: "区别于上面的 loomy：密码/短信登录的账号落 extstore"},
 	{ID: "lobsterai", Name: "LobsterAI（有道）", Group: GroupPoints, Login: LoginManual,
 		Checkin: true, Note: "从客户端凭据文件复制"},
 

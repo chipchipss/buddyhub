@@ -49,6 +49,16 @@ function groupScanned(d) {
     }
     if (rows.length) groups.push({ uid: a.uid, nick: a.nickname, rows });
   }
+  // 外部平台待办（签到 / 领奖类，一账号一条）。
+  // uid 必须与队列项一致（"ext:provider/id"），否则扫描结果与执行进度
+  // 会分到两个组里、对不上。
+  for (const e of (d.ext || [])) {
+    groups.push({
+      uid: 'ext:' + e.provider + '/' + e.id,
+      nick: platName(e.provider) + ' · ' + (e.label || e.id),
+      rows: [{ kind: 'ext', code: e.provider, prog: '—', status: 'scan', note: e.note }],
+    });
+  }
   return groups;
 }
 
@@ -102,12 +112,16 @@ const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skippe
 const DOT_CLS = { done: 'dot', running: 'dot ring', error: 'dot off', skipped: 'dot off', pending: 'dot ring', scan: 'dot ring' };
 
 function queueRow(it) {
-  const title = it.kind === 'school' ? '开学季闭环' : (GROWTH_TITLES[it.code] || it.code);
+  const isExt = it.kind === 'ext';
+  const title = it.kind === 'school' ? '开学季闭环'
+    : isExt ? '每日签到 / 领奖'
+    : (GROWTH_TITLES[it.code] || it.code);
   const st = it.status === 'scan' ? '待执行' : (ST_WORDS[it.status] || it.status);
-  return h('div', { class: 'qrow', title: it.message || '' },
+  return h('div', { class: 'qrow', title: it.message || it.note || '' },
     h('span', { class: 'code', text: it.code }),
     h('span', { class: 'name' }, h('span', { class: 't', text: title }),
-      it.kind === 'school' ? h('span', { class: 'chip faint', text: '开学季' }) : null),
+      it.kind === 'school' ? h('span', { class: 'chip faint', text: '开学季' }) : null,
+      isExt ? h('span', { class: 'chip faint', text: platName(String(it.code).split('/')[0]) }) : null),
     h('span', { class: 'prog', text: it.prog || '' }),
     h('span', { class: 'st' }, h('i', { class: DOT_CLS[it.status] || 'dot ring' }), st),
     h('span', { class: 'msg', text: it.message || '' }),
@@ -153,7 +167,7 @@ function tencentSeg() {
         )))
         : h('div', { class: 'body' }, h('div', { class: 'empty' }, icon('automation'),
           h('div', { class: 't', text: '还没有扫描过' }),
-          h('div', { class: 'd', text: '扫描所有账号的成长任务与开学季待办，把没做的排成一列，一键执行。' }))),
+          h('div', { class: 'd', text: '扫描腾讯账号的成长任务与开学季待办，以及外部平台的每日签到，把没做的排成一列，一键执行。' }))),
     ),
   );
 }
