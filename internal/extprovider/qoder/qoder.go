@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -374,50 +375,96 @@ func (c *Client) Poll(ctx context.Context, s *DeviceSession) (*Credential, strin
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, "", fmt.Errorf("poll HTTP %d", resp.StatusCode)
 	}
-	var parsed struct {
-		// Token deviceToken/poll 的**实际字段**（响应形如
-		// {"id":…,"token":"dt-…","user_id":…}）。只读 access_token 会永远取不到，
-		// 表现为「授权完了却一直 pending」——实测踩过。
-		Token              string `json:"token"`
-		AccessToken        string `json:"access_token"`
-		DeviceToken        string `json:"device_token"`
-		SecurityOAuthToken string `json:"security_oauth_token"`
-		RefreshToken       string `json:"refresh_token"`
-		ExpireTime         int64  `json:"expire_time"`
-		RefreshExpireTime  int64  `json:"refresh_token_expire_time"`
-		UserID             string `json:"user_id"`
-		UserName           string `json:"user_name"`
-		// ExpiresAt 上游两条链路给的键名不一致（参考实现读的是 expires_at，
-		// 本地结构用 expire_time）。缺了它 NeedRefresh 就永远判「不临期」，
-		// 令牌过期才被动失败。
-		ExpiresAt        int64 `json:"expires_at"`
-		RefreshExpiresAt int64 `json:"refresh_token_expire_at"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
+	// **宽容解析**：这族上游的字段类型会变（实测 `expires_at` 是字符串，
+	// 参考实现直接当字符串存进库），用强类型 struct 会让「一个字段类型不符」
+	// 拖垮整份回执——授权其实已经成功了，却报成解析失败，日志里就是
+	// 「cannot unmarshal string into Go struct field .expires_at of type int64」。
+	// 所以先解成 map，再逐字段做类型收敛。
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, "", fmt.Errorf("poll 响应解析失败: %w", err)
 	}
-	token := firstNonEmpty(parsed.AccessToken, parsed.Token, parsed.DeviceToken, parsed.SecurityOAuthToken)
+	// deviceToken/poll 的实际字段是 `token`（响应形如
+	// {"id":…,"token":"dt-…","user_id":…}）；只读 access_token 会永远取不到，
+	// 表现为「授权完了却一直 pending」——实测踩过。其余几个是不同链路的别名。
+	token := firstNonEmpty(
+		strAt(doc, "token"), strAt(doc, "access_token"),
+		strAt(doc, "device_token"), strAt(doc, "security_oauth_token"),
+	)
 	if token == "" {
 		// 200 却没有 token —— 上游给了个空壳回执，把原文截一段出来供排障
-		return nil, "200 但无 access_token：" + truncate(raw, 120), nil
-	}
-	// 秒 / 毫秒两种形态（秒级时间戳在毫秒字段上会判成"早已过期"）
-	expireAt := parsed.ExpireTime
-	if expireAt == 0 {
-		expireAt = parsed.ExpiresAt
-	}
-	if expireAt > 0 && expireAt < 1e12 {
-		expireAt *= 1000
+		return nil, "200 但无 token 字段：" + truncate(raw, 160), nil
 	}
 	cred := &Credential{
 		AccessToken:        token,
-		SecurityOAuthToken: token, // 双写同值
-		RefreshToken:       parsed.RefreshToken,
-		ExpireTime:         expireAt,
-		RefreshExpireTime:  parsed.RefreshExpireTime,
+		SecurityOAuthToken: token, // 双写同值：服务端取用顺序是 security_oauth_token ?? access_token
+		RefreshToken:       strAt(doc, "refresh_token"),
+		ExpireTime:         timeMillisAt(doc, "expire_time", "expires_at"),
+		RefreshExpireTime:  timeMillisAt(doc, "refresh_token_expire_time", "refresh_token_expire_at"),
 		MachineID:          s.MachineID,
-		UID:                parsed.UserID,
-		Nickname:           parsed.UserName,
+		UID:                strAt(doc, "user_id", "uid"),
+		Nickname:           strAt(doc, "user_name", "nickname"),
 	}
 	return cred, "ok", nil
+}
+
+// strAt 按优先级取串值（多个候选键）。同一个语义的字段上游可能给字符串
+// 也可能给数字，统一收敛成串——强类型 struct 遇到类型不符会让整份回执解析失败。
+func strAt(doc map[string]any, keys ...string) string {
+	for _, key := range keys {
+		switch v := doc[key].(type) {
+		case string:
+			if s := strings.TrimSpace(v); s != "" {
+				return s
+			}
+		case float64:
+			return strconv.FormatInt(int64(v), 10)
+		}
+	}
+	return ""
+}
+
+// timeMillisAt 取时间字段为**毫秒**。上游三种形态都见过：
+//
+//	数字秒     1790835411
+//	数字毫秒   1790835411267
+//	字符串     "2026-10-02T00:00:00Z" 或 "1790835411"
+//
+// 形态判据是数值量级（<1e12 视为秒）——漏了换算会把「还没到期」判成
+// 「早已过期」，或者反过来导致令牌过期了还不续期。
+func timeMillisAt(doc map[string]any, keys ...string) int64 {
+	toMillis := func(n int64) int64 {
+		if n <= 0 {
+			return 0
+		}
+		if n < 1e12 {
+			n *= 1000
+		}
+		return n
+	}
+	for _, k := range keys {
+		switch v := doc[k].(type) {
+		case float64:
+			if n := toMillis(int64(v)); n != 0 {
+				return n
+			}
+		case string:
+			s := strings.TrimSpace(v)
+			if s == "" {
+				continue
+			}
+			if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+				if m := toMillis(n); m != 0 {
+					return m
+				}
+				continue
+			}
+			for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05"} {
+				if t, err := time.Parse(layout, s); err == nil {
+					return t.UnixMilli()
+				}
+			}
+		}
+	}
+	return 0
 }
