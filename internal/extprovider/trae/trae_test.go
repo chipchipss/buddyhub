@@ -707,21 +707,33 @@ func TestSetProxy(t *testing.T) {
 
 // 实测踩的坑：GetLoginGuidance 回的 LoginHost 是 www.trae.cn（网页域），
 // 直接拿它换证会 POST 到网页，拿回一坨 HTML（字节的 JS 挑战页），
-// 表现是「换证回执解析失败：invalid character '<'」。换证必须走 API 域。
-func TestExchangeHostIsAPIHostNotWebHost(t *testing.T) {
-	cases := map[string]string{
-		"www.trae.cn":         "https://api.trae.cn",
-		"https://www.trae.cn": "https://api.trae.cn",
-		"api.trae.cn":         "https://api.trae.cn",
-		"www.trae.ai":         "https://api.trae.ai",
-		"":                    DefaultLoginHost,
-		"trae.cn":             DefaultLoginHost, // 既非 www 也非 api：不猜
-		"://bad":              DefaultLoginHost,
-	}
-	for in, want := range cases {
-		if got := apiHostFor(in); got != want {
-			t.Errorf("apiHostFor(%q) = %q，期望 %q", in, got, want)
+// 表现是「换证回执解析失败：invalid character '<'」。换证必须走 API 域，
+// 且两个官方 API 域互为备份、依次重试。
+func TestExchangeHostCandidates(t *testing.T) {
+	// 两个官方域钉在最前，与 login_host 无关
+	for _, in := range []string{"", "www.trae.cn", "api.trae.cn", "www.trae.ai"} {
+		hosts := apiHostsFor(in)
+		if len(hosts) < 2 || hosts[0] != "https://api.trae.cn" || hosts[1] != "https://api.trae.com.cn" {
+			t.Errorf("apiHostsFor(%q) = %v，前两位应是两个官方 API 域", in, hosts)
 		}
+		// 任何候选都不能是网页域（会回 HTML）
+		for _, h := range hosts {
+			if strings.Contains(h, "www.") {
+				t.Errorf("apiHostsFor(%q) 含网页域 %q（会回 HTML）", in, h)
+			}
+		}
+	}
+	// 派生的 API 域要排在官方域之后当兜底，且不重复
+	hosts := apiHostsFor("www.trae.cn")
+	seen := map[string]int{}
+	for _, h := range hosts {
+		seen[h]++
+		if seen[h] > 1 {
+			t.Errorf("候选重复: %q in %v", h, hosts)
+		}
+	}
+	if apiHostFor("") != "https://api.trae.cn" {
+		t.Errorf("apiHostFor 应返回第一个候选，得到 %q", apiHostFor(""))
 	}
 }
 

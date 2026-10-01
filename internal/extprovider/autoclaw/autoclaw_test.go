@@ -450,9 +450,30 @@ func TestSendCodeNormalizesPhone(t *testing.T) {
 	}
 }
 
-// 上游对「验证码不对」「请求体缺字段」回的都是笼统的 400001，
-// 原文「请求数据有问题」没法行动——网关要把它翻译成用户能照做的话。
-// 但仍然要能回对码本身，否则排障时无从下手。
+// ⚠️ 上游要求 body 里的 `code` 是 **JSON 数字**：传字符串回
+// `400001 请求数据有问题`（参数错误），传数字才进入业务判断
+// （630201 已过期 / 630202 不正确）。这个类型错会让用户拿着**正确**的
+// 验证码也永远登不上，且错误文案被误译成「验证码不正确」，把排查方向带偏。
+func TestLoginCodeIsJSONNumber(t *testing.T) {
+	var raw string
+	withMock(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		raw = string(b)
+		writeJSON(w, map[string]any{"code": 630202, "msg": "验证码错误"})
+	})
+	_, _ = LoginWithCode(context.Background(), RegionCN, "13800000000", "123456", "dev")
+
+	// 直接看原始 JSON：`"code":123456` 合法，`"code":"123456"` 不合法
+	if !strings.Contains(raw, `"code":123456`) {
+		t.Fatalf("code 必须是 JSON 数字，实际发出的是: %s", raw)
+	}
+	if strings.Contains(raw, `"code":"`) {
+		t.Fatalf("code 被序列化成了字符串（上游会回 400001）: %s", raw)
+	}
+}
+
+// 400001 是**参数错误**（请求没被受理），不是验证码错误 —— 文案不能把用户
+// 引去反复重发验证码；630xxx 才是真的在讨论验证码。
 func TestLoginErrorIsActionable(t *testing.T) {
 	withMock(t, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"code": 400001, "msg": "请求数据有问题,请检查后重试"})
@@ -468,7 +489,16 @@ func TestLoginErrorIsActionable(t *testing.T) {
 	if strings.Contains(msg, "请求数据有问题,请检查后重试") {
 		t.Errorf("别把上游原样那句没法行动的话抛给用户: %q", msg)
 	}
-	if !strings.Contains(msg, "验证码") {
-		t.Errorf("应指向最可能的原因（验证码），得到: %q", msg)
+	if strings.Contains(msg, "重发") || strings.Contains(msg, "重新发送") {
+		t.Errorf("400001 是参数错误，不该让用户去重发验证码: %q", msg)
+	}
+
+	// 对照：630202 才是验证码错，文案要给出可行动的方向
+	withMock(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"code": 630202, "msg": "抱歉,验证码错误，请输入正确验证码！"})
+	})
+	_, err = LoginWithCode(context.Background(), RegionCN, "13800000000", "123456", "dev")
+	if err == nil || !strings.Contains(err.Error(), "验证码不正确") {
+		t.Errorf("630202 应译成验证码不正确，得到: %v", err)
 	}
 }

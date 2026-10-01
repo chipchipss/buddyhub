@@ -21,6 +21,9 @@
 //	POST {userapi}/userapi/v1/agent-send-code  {"phone","source_id":"autoclaw","device_id"}
 //	POST {userapi}/userapi/v1/agent-login       {"phone","code","platform":"web","source_id","device_id"}
 //
+// ⚠️ 登录里的 `code` 必须是 **JSON 数字**（`123456`），传字符串会得到
+// `400001 请求数据有问题` —— 一个与验证码无关的参数错误，见 LoginWithCode 注释。
+//
 // 国际版**没有短信**（上游只在国际版关了短信入口），主登录是 Zai/Google OAuth，
 // 且被阿里云风控验证码挡着；本包不实现那条链路，国际版账号需从桌面端导入或
 // 手工填凭据。
@@ -297,11 +300,26 @@ func LoginWithCode(ctx context.Context, region Region, phone, code, deviceID str
 	if len(code) != 6 {
 		return nil, fmt.Errorf("请填写 6 位数字验证码")
 	}
+	codeNum, aerr := strconv.Atoi(code)
+	if aerr != nil {
+		return nil, fmt.Errorf("请填写 6 位数字验证码")
+	}
 	if deviceID == "" {
 		deviceID = newDeviceID()
 	}
-	body, _ := json.Marshal(map[string]string{
-		"phone": phone, "code": code, "platform": "web",
+	// ⚠️ `code` 必须是 **JSON 数字**，不能是字符串。
+	//
+	// 传字符串上游回 `400001 请求数据有问题`——一个与验证码完全无关的参数错误，
+	// 会把排查方向整个带偏（看着像「请求体形状不对」，实际只是类型错）。实测
+	// （同一手机号同一时刻，2026-10-01）：
+	//
+	//	code 字符串 "123456" → 400001 请求数据有问题
+	//	code 数字   123456   → 630201 验证码已过期 / 630202 验证码错误
+	//
+	// 也就是说：拿到 400001 说明**请求根本没被受理**，只有拿到 630xxx 才是
+	// 真的在讨论验证码。所以这里用 map[string]any 而不是 map[string]string。
+	body, _ := json.Marshal(map[string]any{
+		"phone": phone, "code": codeNum, "platform": "web",
 		"source_id": SourceID, "device_id": deviceID,
 	})
 	raw, err := postJSON(ctx, region.UserAPI()+loginPath, body, userAPIHeaders(""))
@@ -382,15 +400,28 @@ func MaskPhone(phone string) string {
 // describeLoginError 把上游业务码翻成人话（源实现的对照表）。
 func describeLoginError(code int, upstreamMsg string) string {
 	base := map[int]string{
+		// 630xxx 一族才是「在讨论验证码」：说明请求已被受理。
+		630201: "验证码已过期，请重新发送验证码",
+		630202: "验证码不正确，请检查后重试",
+		630101: "获取验证码过于频繁，请稍后再试",
+		// 400001 是**参数错误**，不是验证码错误 —— 实测 code 传字符串（而非
+		// JSON 数字）时就是它。所以这条文案要指向「请求没被受理」，别让用户
+		// 去反复重发验证码。
+		400001: "请求未被上游受理（上游 code 400001 参数错误）",
+		400002: "请求签名校验失败（本机时钟可能有偏差），请校准系统时间后重试",
+		400000: "登录态已失效，请重新登录",
+		410000: "登录态已失效，请重新登录",
+		// 631002 原文是「当前版本已停止服务，请前往官网下载最新版」——不是版本
+		// 问题，而是**缺少风控验证**（换任何 X-Version 都是这个码）。直译会把
+		// 用户引向「升级客户端」这个错误方向。
+		631002: "上游要求过风控验证，本次登录无法完成；请改用「手动填写凭据」",
+		630014: "风控验证未通过，请稍后重试；若持续失败请改用「手动填写凭据」",
+		// 旧的兜底码（保留：上游偶发改码表时仍能给出可读提示）
 		1001: "手机号格式不正确",
 		1002: "验证码错误或已过期",
 		1003: "验证码发送过于频繁，请稍后再试",
 		1004: "该手机号今日验证码次数已达上限",
 		429:  "请求过于频繁，请稍后再试",
-		// 400001 上游对「验证码不对」「验证码过期」「请求体缺字段」回的都是它，
-		// 实测改遍请求体形状都还是 400001——所以按最可能的原因给用户指路，
-		// 而不是把「请求数据有问题」原样抛出去（那句话没法行动）。
-		400001: "验证码不正确或已过期（上游 code 400001，重新发送验证码后再试）",
 	}[code]
 	if base == "" {
 		base = fmt.Sprintf("登录失败（上游 code %d）", code)

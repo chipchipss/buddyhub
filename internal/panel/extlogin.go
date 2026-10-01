@@ -62,6 +62,9 @@ type extLoginSession struct {
 	// errStreak 连续轮询失败次数：单次网络抖动继续轮询，连续失败才判定终态
 	// ——否则用户看到的是永远转圈，永远不知道错在哪。
 	errStreak int
+	// lastNote 上一次轮询报出的中间态。只记状态**变化**，否则每 2–5 秒一条
+	// 日志会把整个日志文件淹掉（pending 是常态，本来就不记）。
+	lastNote string
 	// raccoon
 	qrCode string
 	// qoder
@@ -152,11 +155,23 @@ func putExtLoginSession(s *extLoginSession) string {
 	return id
 }
 
+// startFail 记一行日志再回错误。
+//
+// 发起阶段的失败（代理不可达、上游拒绝签发设备码、回环端口占用）如果只回 HTTP
+// 给前端，**日志里什么都看不到**——事后完全无法定位「用户点了没反应」是卡在哪
+// 一步。这类失败本来就低频，逐条留痕的代价可以忽略。
+func startFail(w http.ResponseWriter, provider string, status int, msg string) {
+	log.Printf("panel: %s 发起登录失败：%s", provider, msg)
+	writeErr(w, status, msg)
+}
+
 // extLoginStart POST /panel/api/ext/{provider}/login/start —— 发起登录。
 func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 	provider := r.PathValue("provider")
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
+	// 每个平台的发起都留一行：用户报「点了没反应」时，先要能确认这一步到底有没有到。
+	log.Printf("panel: %s 发起登录", provider)
 
 	switch provider {
 	case extstore.PRaccoon:
@@ -178,7 +193,7 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 		// 必须持久化，否则续期会失败。
 		sess, err := qoder.NewDeviceSession("")
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "生成设备会话失败："+err.Error())
+			startFail(w, provider, http.StatusInternalServerError, "生成设备会话失败："+err.Error())
 			return
 		}
 		id := putExtLoginSession(&extLoginSession{
@@ -196,7 +211,7 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 	case extstore.PCopilot:
 		flow, err := copilot.StartDeviceFlow(ctx)
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
+			startFail(w, provider, http.StatusBadGateway, err.Error())
 			return
 		}
 		id := putExtLoginSession(&extLoginSession{
@@ -216,7 +231,7 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 	case extstore.PCline:
 		flow, err := cline.StartDeviceFlow(ctx)
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
+			startFail(w, provider, http.StatusBadGateway, err.Error())
 			return
 		}
 		id := putExtLoginSession(&extLoginSession{
@@ -237,7 +252,7 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 	case extstore.PQClaw:
 		flow, err := qclaw.StartLogin(ctx, "")
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
+			startFail(w, provider, http.StatusBadGateway, err.Error())
 			return
 		}
 		id := putExtLoginSession(&extLoginSession{
@@ -255,7 +270,7 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 	case extstore.PTrae:
 		lctx, ln, err := trae.NewLogin(ctx)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			startFail(w, provider, http.StatusInternalServerError, err.Error())
 			return
 		}
 		sess := &extLoginSession{
@@ -286,7 +301,7 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 	case extstore.PAccio:
 		lctx, ln, err := accio.NewLogin(accio.RegionCN)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			startFail(w, provider, http.StatusInternalServerError, err.Error())
 			return
 		}
 		sess := &extLoginSession{
@@ -314,7 +329,7 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 		})
 
 	default:
-		writeErr(w, http.StatusBadRequest, "该平台暂不支持登录入池："+provider)
+		startFail(w, provider, http.StatusBadRequest, "该平台暂不支持登录入池："+provider)
 	}
 }
 
@@ -368,10 +383,19 @@ func (p *Panel) extLoginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !done {
+		// pending 是常态（前端每 2–5 秒轮一次），只在状态**变化**时记一行——
+		// 「已扫码待确认」「上游瞬时错误」这类中间态是排障时仅有的线索，
+		// 而每次都记会把日志淹掉。
+		if note != "pending" && note != sess.lastNote {
+			sess.lastNote = note
+			log.Printf("panel: %s 登录进行中：%s", provider, note)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "done": false, "status": note})
 		return
 	}
 	if cred == nil {
+		// 终态失败：这是「授权完了却没入池」最该看到的一条日志。
+		log.Printf("panel: %s 登录失败（会话 %s）：%s", provider, shortID(body.Session), note)
 		dropExtLoginSession(body.Session)
 		writeErr(w, http.StatusBadRequest, note)
 		return

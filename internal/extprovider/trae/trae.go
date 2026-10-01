@@ -366,35 +366,53 @@ func ParseCallback(query url.Values) *Callback {
 	}
 }
 
-// apiHostFor 把「浏览器登录页域」映射到「API 域」。
+// apiHostsFor 换证要依次试的 API 域候选（顺序即优先级）。
 //
-// GetLoginGuidance 回的 LoginHost 是**给人看的网页域**（实测 www.trae.cn），
-// 而 ExchangeToken 是 API——两者不同域：往网页域 POST 会拿到一坨 HTML
-// （字节的 JS 挑战页），解析必然失败在「回执解析失败：invalid character '<'」。
-// 所以换证一律走 API 域。
+// 两把官方账号 API 源**钉在最前**，再接从登录 host 派生的候选——顺序是语义：
+// `www.*` 那类 host 会回一整页 HTML（字节的 JS 挑战页），只能垫在后面当兜底。
+// 实测两个官方域都返回正常 JSON（同一个 `Invalid client` 业务错误），
+// 而 www.trae.cn 返回 HTML。
 //
-// 同族域做 www.→api. 替换（国际版 www.trae.ai → api.trae.ai 也能对上），
-// 对不上就不猜，用已知能换证的域兜底。
-func apiHostFor(loginHost string) string {
+// 逐个试而不是只试一个：两个官方域互为备份，某个区域不可达时仍能走通。
+func apiHostsFor(loginHost string) []string {
+	out := []string{"https://api.trae.cn", "https://api.trae.com.cn"}
 	host := strings.TrimSpace(loginHost)
-	if host == "" {
+	if host != "" {
+		if !strings.HasPrefix(host, "http://") && !strings.HasPrefix(host, "https://") {
+			host = "https://" + host
+		}
+		if u, err := url.Parse(host); err == nil && u.Host != "" {
+			derived := ""
+			switch {
+			case strings.HasPrefix(u.Host, "www."):
+				derived = u.Scheme + "://api." + strings.TrimPrefix(u.Host, "www.")
+			case strings.HasPrefix(u.Host, "api."):
+				derived = u.Scheme + "://" + u.Host
+			}
+			if derived != "" {
+				out = append(out, derived)
+			}
+		}
+	}
+	// 去重保序
+	seen := map[string]bool{}
+	uniq := out[:0]
+	for _, u := range out {
+		if !seen[u] {
+			seen[u] = true
+			uniq = append(uniq, u)
+		}
+	}
+	return uniq
+}
+
+// apiHostFor 单个换证域（保留给只需要一个地址的调用方 / 测试）。
+func apiHostFor(loginHost string) string {
+	hosts := apiHostsFor(loginHost)
+	if len(hosts) == 0 {
 		return DefaultLoginHost
 	}
-	if !strings.HasPrefix(host, "http://") && !strings.HasPrefix(host, "https://") {
-		host = "https://" + host
-	}
-	u, err := url.Parse(host)
-	if err != nil || u.Host == "" {
-		return DefaultLoginHost
-	}
-	switch {
-	case strings.HasPrefix(u.Host, "www."):
-		return u.Scheme + "://api." + strings.TrimPrefix(u.Host, "www.")
-	case strings.HasPrefix(u.Host, "api."):
-		return u.Scheme + "://" + u.Host
-	default:
-		return DefaultLoginHost
-	}
+	return hosts[0]
 }
 
 // Complete 用回调内容换凭据。
@@ -405,8 +423,6 @@ func Complete(ctx context.Context, c *LoginContext, cb *Callback) (*Credential, 
 	if cb.AuthCode == "" && cb.RefreshToken == "" {
 		return nil, fmt.Errorf("回调里没有授权码也没有续期串")
 	}
-	// 注意：回调里的 login_host 是**网页域**，只能用来定位 API 域，不能直接当端点。
-	host := apiHostFor(firstNonEmptyStr(cb.LoginHost, c.LoginHost))
 
 	body, _ := json.Marshal(map[string]any{
 		"ClientID":     ClientIDSolo,
@@ -415,6 +431,21 @@ func Complete(ctx context.Context, c *LoginContext, cb *Callback) (*Credential, 
 		"IDEVersion":   IDEVersion,
 		"DeviceInfo":   deviceInfo(c),
 	})
+
+	// 依次试候选域：回调里的 login_host 是**网页域**，只能用来定位 API 域。
+	var errs []string
+	for _, host := range apiHostsFor(firstNonEmptyStr(cb.LoginHost, c.LoginHost)) {
+		cred, err := exchangeAt(ctx, host, body, c)
+		if err == nil {
+			return cred, nil
+		}
+		errs = append(errs, host+"："+err.Error())
+	}
+	return nil, fmt.Errorf("换证失败（%s）", strings.Join(errs, "；"))
+}
+
+// exchangeAt 向单个域换证。
+func exchangeAt(ctx context.Context, host string, body []byte, c *LoginContext) (*Credential, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, host+ExchangePath, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -425,12 +456,12 @@ func Complete(ctx context.Context, c *LoginContext, cb *Callback) (*Credential, 
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("换证失败：%w", err)
+		return nil, fmt.Errorf("请求失败：%w", err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("换证被拒（HTTP %d）：%s", resp.StatusCode, truncate(string(raw), 200))
+		return nil, fmt.Errorf("HTTP %d：%s", resp.StatusCode, truncate(string(raw), 200))
 	}
 	return parseTokenResponse(raw, c)
 }
