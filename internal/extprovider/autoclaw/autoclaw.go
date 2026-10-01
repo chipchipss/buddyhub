@@ -189,6 +189,22 @@ func SetProxy(rawURL string) error {
 
 /* ── 客户端指纹头 ────────────────────────────────────────────── */
 
+// stripBearer 去掉 `Bearer ` 前缀。
+//
+// 上游登录回执里的 `token` 自带这个前缀，手工粘贴凭据的用户也常把
+// `Bearer xxx` 整段粘进来——而 header 构造时还要再加一次，拼成
+// `Bearer Bearer xxx` 就会被上游判成 Invalid token。在构造头的地方统一剥，
+// 比要求每个调用方都记住「别带前缀」可靠。
+func stripBearer(v string) string {
+	v = strings.TrimSpace(v)
+	for _, p := range []string{"bearer ", "Bearer ", "BEARER "} {
+		if strings.HasPrefix(v, p) {
+			return strings.TrimSpace(v[len(p):])
+		}
+	}
+	return v
+}
+
 // userAPIHeaders userapi 域的请求头（刷新 / 目录 / 余额 / 签到）。
 //
 // 与 brandHeaders 的**唯一差别**是这里带 `X-Harness-Type: zcode`——上游对
@@ -212,13 +228,14 @@ func userAPIHeaders(token string) map[string]string {
 		"X-Trace-Id":       newRequestID(),
 	}
 	if token != "" {
-		h["authorization"] = "Bearer " + token
+		h["authorization"] = "Bearer " + stripBearer(token)
 	}
 	return h
 }
 
 // chatHeaders chat 域的请求头（**不带** X-Harness-Type）。
 func chatHeaders(token, model string) map[string]string {
+	token = stripBearer(token)
 	return map[string]string{
 		"Content-Type":    "application/json",
 		"Accept":          "*/*",
@@ -343,7 +360,10 @@ func LoginWithCode(ctx context.Context, region Region, phone, code, deviceID str
 	if doc.Code != 0 {
 		return nil, fmt.Errorf("%s", describeLoginError(doc.Code, doc.Msg))
 	}
-	token := firstNonEmpty(doc.Data.Token, doc.Data.AccessToken)
+	// 上游同时给 `token` 与 `access_token`，**权威的是 access_token**（源实现
+	// 也只读它）：`token` 那份带着 `Bearer ` 前缀，拿去请求目录/对话接口会得到
+	// `401 Invalid token`（header 又前缀一次，变成 `Bearer Bearer eyJ…`）。
+	token := stripBearer(firstNonEmpty(doc.Data.AccessToken, doc.Data.Token))
 	if token == "" {
 		return nil, fmt.Errorf("登录回执不含 token")
 	}

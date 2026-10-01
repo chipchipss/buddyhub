@@ -502,3 +502,64 @@ func TestLoginErrorIsActionable(t *testing.T) {
 		t.Errorf("630202 应译成验证码不正确，得到: %v", err)
 	}
 }
+
+/* ── token 前缀（实测踩过：401 Invalid token） ──────────────────── */
+
+func TestStripBearer(t *testing.T) {
+	cases := map[string]string{
+		"Bearer eyJhbGciOi": "eyJhbGciOi",
+		"bearer eyJhbGciOi": "eyJhbGciOi",
+		"BEARER eyJhbGciOi": "eyJhbGciOi",
+		"  Bearer  eyJ  ":   "eyJ",
+		"eyJhbGciOi":        "eyJhbGciOi",
+		"":                  "",
+	}
+	for in, want := range cases {
+		if got := stripBearer(in); got != want {
+			t.Errorf("stripBearer(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+}
+
+// 上游登录回执的 `token` 带 `Bearer ` 前缀、`access_token` 不带。
+// 取错字段 → 构造头时再加一次 → `Bearer Bearer …` → 上游 401 Invalid token。
+func TestLoginPrefersAccessTokenAndStripsPrefix(t *testing.T) {
+	_ = withMock(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"code": 0, "data": map[string]any{
+			"token": "Bearer tok-with-prefix", "access_token": "tok-clean",
+			"refresh_token": "rt-1", "user_id": "u-1",
+		}})
+	})
+	cred, err := LoginWithCode(context.Background(), RegionCN, "13800000000", "123456", "dev")
+	if err != nil {
+		t.Fatalf("LoginWithCode: %v", err)
+	}
+	if cred.Token != "tok-clean" {
+		t.Fatalf("应优先取 access_token，得到 %q", cred.Token)
+	}
+
+	// 再发一个接口，检查 header 里只前缀一次
+	rec2 := withMock(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"models": []map[string]any{}})
+	})
+	if _, err := ListModels(context.Background(), RegionCN, "Bearer tok-raw"); err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if rec2.last() == nil {
+		t.Fatal("目录请求没发出")
+	}
+	if got := rec2.last().Header.Get("authorization"); got != "Bearer tok-raw" {
+		t.Fatalf("authorization 头重复前缀: %q", got)
+	}
+}
+
+// chat 域同理：X-Authorization 也不能拼成 Bearer Bearer …
+func TestChatHeadersStripBearer(t *testing.T) {
+	h := chatHeaders("Bearer  abc", "glm-5.3")
+	if got := h["X-Authorization"]; got != "Bearer abc" {
+		t.Fatalf("X-Authorization = %q，期望一次前缀", got)
+	}
+	if h["X-Harness-Type"] != "" {
+		t.Error("chat 域不该带 X-Harness-Type")
+	}
+}
