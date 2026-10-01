@@ -218,6 +218,24 @@ func (m *Manager) ChatHealth(provider string) []HealthSnapshot {
 	return out
 }
 
+// ChatHealthOne 单账号的失败档位与剩余冷却秒数。
+//
+// 给 ViewOne 用：面板账号卡要能显示「冷却中 · 剩 47s」——没有这个出口，
+// 某个号被自动退避时用户只看到它**莫名不被选中**，没有任何线索。
+func (m *Manager) ChatHealthOne(provider, id string) (fails, cooldownSec int) {
+	if provider == "" || id == "" {
+		return 0, 0
+	}
+	s := m.selState()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := s.acc[provider+"/"+id]
+	if c := h.until.Sub(time.Now()); c > 0 {
+		cooldownSec = int(c.Seconds())
+	}
+	return h.fails, cooldownSec
+}
+
 func splitProvider(key string) string {
 	for i := 0; i < len(key); i++ {
 		if key[i] == '/' {

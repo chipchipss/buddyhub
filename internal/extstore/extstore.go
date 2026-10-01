@@ -259,6 +259,12 @@ type ExtAccountView struct {
 	Balance   float64 `json:"balance,omitempty"`
 	BalanceOK bool    `json:"balance_ok"`
 	Note      string  `json:"note,omitempty"`
+	// FailStreak / CooldownSec 对话侧的退避状态（select.go）。
+	// 与 Note 是**两件独立的事**：Note 记的是这次查余额/查状态的结果，
+	// 这两个记的是上一次**对话**失败过几次、还要多久才被重新考虑。
+	// 没有它们的话，某个号被自动退避时界面上只表现为「莫名不被选中」。
+	FailStreak  int `json:"fail_streak,omitempty"`
+	CooldownSec int `json:"cooldown_sec,omitempty"`
 }
 
 // CheckinResult 统一签到结果。
@@ -471,6 +477,11 @@ func (m *Manager) CheckinAll(ctx context.Context) []*CheckinResult {
 // ViewOne 单账号余额视图。
 func (m *Manager) ViewOne(ctx context.Context, a *ExtAccount) *ExtAccountView {
 	v := &ExtAccountView{Provider: a.Provider, ID: a.ID, Label: a.Label, Disabled: a.Disabled}
+	// 退避状态**先填**：停用账号也该显示（否则用户看不出"停用了"与
+	// "还在冷却中"是两回事），且这段不发任何网络请求。
+	if f, c := m.ChatHealthOne(a.Provider, a.ID); f > 0 || c > 0 {
+		v.FailStreak, v.CooldownSec = f, c
+	}
 	if a.Disabled {
 		v.Note = "已停用"
 		return v

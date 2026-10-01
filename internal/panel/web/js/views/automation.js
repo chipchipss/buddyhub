@@ -39,6 +39,12 @@ async function scanAll(ev) {
 
 const scannedGroups = signal(null);
 
+/** fmtCool 把冷却秒数压成短文案（47s / 3m / 30m）。 */
+function fmtCool(sec) {
+  if (sec >= 60) return Math.round(sec / 60) + 'm';
+  return Math.max(1, Math.round(sec)) + 's';
+}
+
 function groupScanned(d) {
   const groups = [];
   for (const a of (d.accounts || [])) {
@@ -335,6 +341,13 @@ function extSeg() {
                 h('div', { class: 'id', text: a.id }),
               ),
               h('span', { class: 'chip' + (a.disabled ? ' faint' : '') }, h('i', { class: a.disabled ? 'dot off' : 'dot' }), a.disabled ? '已停用' : '启用中'),
+              // 对话侧自动退避。不显示的话，某个号被退避时界面上只表现为
+              // 「莫名不被选中」——用户没有任何线索，也不知道等多久会自己恢复。
+              a.cooldown_sec > 0
+                ? h('span', {
+                  class: 'chip', title: `对话侧自动退避：连续失败 ${a.fail_streak || 1} 次，恢复后重新参与轮换`,
+                }, h('i', { class: 'dot off' }), `冷却 ${fmtCool(a.cooldown_sec)}`)
+                : null,
             ),
             h('div', { class: 'credits' },
               h('div', { class: 'line' },
