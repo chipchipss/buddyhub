@@ -17,8 +17,9 @@ package server
 //
 // ── 构建时机：**只在首选平台失败之后** ───────────────────────────────
 // 各平台目录是 10 分钟缓存的网络调用（冷缓存单个 15–20s），`codex` 每次扫
-// 文件系统，`loomy` 甚至**没有缓存**。放在请求热路径上会把一次成功请求拖慢
-// 到分钟级，所以索引懒构建 + TTL——失败已经发生了，多等一秒可接受。
+// 文件系统。放在请求热路径上会把一次成功请求拖慢到分钟级，所以索引懒构建
+// + TTL——失败已经发生了，多等一秒可接受。
+// （`loomyCatalog` 曾经没有缓存、每次调用都打网络，已补；见 loomy_bridge.go。）
 //
 // ⚠️ 不要图省事改用 `modelList()`：它除了目录还会调
 // `ContextWindowListingV4` / `EffortListing`（**打 models.dev 的网络请求**），
@@ -184,9 +185,9 @@ func (h *Handler) platformModelIDs() []string {
 	for _, m := range h.codeartsCatalog() {
 		add(codeartsModelPrefix, m.ID)
 	}
-	// ⚠️ loomyCatalog 目前**没有缓存**（注释写着"10 分钟"但实现是每次打网络）。
-	// 索引本身有 TTL，所以这里的代价是"每 10 分钟一次"而不是"每次请求"，
-	// 可接受——但顺手该给 loomyBridge 补上缓存（见该文件）。
+	// loomyCatalog 曾经**没有缓存**（注释写"10 分钟"实现却每次打网络），
+	// 已在 loomy_bridge.go 补上——本索引会遍历全部平台的目录，没缓存就等于
+	// 每 10 分钟白打一发外网。其余平台此前就是 10 分钟缓存。
 	for _, m := range h.loomyCatalog() {
 		id, _ := m["id"].(string)
 		add(loomyModelPrefix, id)

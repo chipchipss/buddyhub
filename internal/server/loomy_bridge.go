@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/extprovider/loomy"
@@ -220,7 +221,28 @@ func (h *Handler) proxyLoomyAggregate(w http.ResponseWriter, rc io.ReadCloser) {
 }
 
 // loomyCatalog 透出上游模型目录（有可用凭据时调用一次并缓存 10 分钟）。
+// loomyCatalog 的缓存（与其它桥接同形：锁 + 时刻 + 快照）。
+var (
+	loomyCatMu   sync.Mutex
+	loomyCatAt   time.Time
+	loomyCatMods []map[string]any
+)
+
+// loomyCatalog 模型目录（10 分钟缓存）。
+//
+// **此前没有缓存**：注释一直写着"缓存 10 分钟"但实现每次调用都打网络——
+// 别的平台都是 mutex 读，只有它每次都发请求。跨平台降级的候选索引会遍历
+// 所有平台的目录，没缓存等于每 10 分钟白打一发外网；对话路径拿目录也一样。
+// 失败保留旧缓存（与其它桥接同口径）。
 func (h *Handler) loomyCatalog() []map[string]any {
+	loomyCatMu.Lock()
+	if time.Since(loomyCatAt) < 10*time.Minute && loomyCatMods != nil {
+		mods := loomyCatMods
+		loomyCatMu.Unlock()
+		return mods
+	}
+	loomyCatMu.Unlock()
+
 	accounts := loomyAccounts(h)
 	if len(accounts) == 0 {
 		return nil
@@ -228,8 +250,17 @@ func (h *Handler) loomyCatalog() []map[string]any {
 	mods, err := upstream.LoomyModels(accounts[0].Session)
 	if err != nil {
 		log.Printf("loomy-bridge: 模型目录拉取失败: %v", err)
+		loomyCatMu.Lock()
+		prev := loomyCatMods
+		loomyCatMu.Unlock()
+		return prev
+	}
+	if len(mods) == 0 {
 		return nil
 	}
+	loomyCatMu.Lock()
+	loomyCatMods, loomyCatAt = mods, time.Now()
+	loomyCatMu.Unlock()
 	return mods
 }
 
