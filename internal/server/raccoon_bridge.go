@@ -107,7 +107,19 @@ func (h *Handler) forwardRaccoon(w http.ResponseWriter, resp *http.Response, req
 	defer resp.Body.Close()
 
 	if !h.clientWantsStream(reqBody) {
-		doc, err := upstream.Aggregate(resp.Body)
+		// 上游两种形态都要接：`stream:false` 时它**直接回纯 JSON**，
+		// 而 Aggregate 只认 SSE——拿 JSON 去 Aggregate 会得到
+		// 「upstream stream contained no valid data events」。先探首字节。
+		br := bufio.NewReader(resp.Body)
+		if first, err := br.Peek(1); err == nil && len(first) > 0 && first[0] == '{' {
+			raw, _ := io.ReadAll(br)
+			out := rewriteJSONObject(string(raw), "model", model)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, out)
+			return
+		}
+		doc, err := upstream.Aggregate(br)
 		if err != nil {
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			return
