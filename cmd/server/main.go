@@ -46,10 +46,13 @@ func usagePathFor(stateFile string) string { return stateSibling(stateFile, "usa
 
 // stateSibling 返回与 state 文件同目录的指定文件名路径（相对路径场景回落当前目录）。
 // usage.json（用量记录）与 output_probes.json（模型上限探测）共用本规则。
-// bridgeManager server.ExtManager 的最小适配器（回写刷新后的凭据 + 上报对话结果）。
+// bridgeManager server.ExtManager 的最小适配器
+// （回写刷新后的凭据 + 上报对话结果与余额观测 + 免网络读余额）。
 type bridgeManager struct {
-	repl func(provider, id string, cred json.RawMessage)
-	note func(provider, id string, err error)
+	repl   func(provider, id string, cred json.RawMessage)
+	note   func(provider, id string, err error)
+	balIn  func(provider, id string, balance float64, ok bool)
+	balOut func(provider string) (float64, bool)
 }
 
 func (b bridgeManager) ReplaceCred(provider, id string, cred json.RawMessage) {
@@ -61,6 +64,20 @@ func (b bridgeManager) NoteChatResult(provider, id string, err error) {
 		return
 	}
 	b.note(provider, id, err)
+}
+
+func (b bridgeManager) NoteBalance(provider, id string, balance float64, ok bool) {
+	if b.balIn == nil {
+		return
+	}
+	b.balIn(provider, id, balance, ok)
+}
+
+func (b bridgeManager) CachedBalance(provider string) (float64, bool) {
+	if b.balOut == nil {
+		return 0, false
+	}
+	return b.balOut(provider)
 }
 
 func stateSibling(stateFile, name string) string {
@@ -387,8 +404,10 @@ func main() {
 	})
 	// Qoder 桥接的凭据回写通道：server 包经闭包调 panel 的 extManager。
 	h.ExtSetManager(bridgeManager{
-		repl: pn.ExtManagerReplaceCred,
-		note: pn.ExtManagerNoteChatResult,
+		repl:   pn.ExtManagerReplaceCred,
+		note:   pn.ExtManagerNoteChatResult,
+		balIn:  pn.ExtManagerNoteBalance,
+		balOut: pn.ExtManagerCachedBalance,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

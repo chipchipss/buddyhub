@@ -52,6 +52,63 @@ type selectState struct {
 	mu  sync.Mutex
 	rr  map[string]uint64 // provider → 轮转计数
 	acc map[string]health // "provider/id" → 健康
+	bal map[string]balEntry
+}
+
+// balEntry 最近一次观测到的余额。
+//
+// **必须缓存**：`ViewOne` 每次都要 30s 的网络往返，而候选排序发生在**每次
+// 失败的请求**上——不缓存就是每失败一次就对所有平台各发一轮请求，
+// 在"上游额度耗尽"这个高频场景里等于自造 DoS。
+// 刷新来源是已有的 5 分钟 `RunExtBalanceRefresh`（它本来就拿到这些数，只是
+// 之前丢掉了）。
+type balEntry struct {
+	balance float64
+	ok      bool
+	at      time.Time
+}
+
+// NoteBalance 记一次余额观测（`RunExtBalanceRefresh` 每 5 分钟喂一次）。
+// ok=false 表示这次没查到（平台无余额端点 / 请求失败）——**要记**，
+// 否则一个永远查不到的平台会被反复当成"未知"而与"可用"混淆。
+func (m *Manager) NoteBalance(provider, id string, balance float64, ok bool) {
+	if provider == "" || id == "" {
+		return
+	}
+	s := m.selState()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bal == nil {
+		s.bal = map[string]balEntry{}
+	}
+	s.bal[provider+"/"+id] = balEntry{balance: balance, ok: ok, at: time.Now()}
+}
+
+// CachedBalance 该平台**任一**可用账号的最高余额（免网络）。
+//
+// 返回 (余额, 是否测得过)：测得过 = 至少有一个账号在本进程内成功查到过。
+// 排序时"测得过"的排前面（按余额降序），没测过的当 0 —— 见 handler 的排序注释。
+func (m *Manager) CachedBalance(provider string) (float64, bool) {
+	if provider == "" {
+		return 0, false
+	}
+	s := m.selState()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	best := 0.0
+	found := false
+	for key, e := range s.bal {
+		if splitProvider(key) != provider {
+			continue
+		}
+		if e.ok {
+			found = true
+			if e.balance > best {
+				best = e.balance
+			}
+		}
+	}
+	return best, found
 }
 
 func (m *Manager) selState() *selectState {

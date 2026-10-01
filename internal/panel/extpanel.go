@@ -196,6 +196,16 @@ func (p *Panel) ExtManagerNoteChatResult(provider, id string, err error) {
 	p.extManager().NoteChatResult(provider, id, err)
 }
 
+// ExtManagerNoteBalance 暴露余额观测（5 分钟余额刷新喂给候选排序）。
+func (p *Panel) ExtManagerNoteBalance(provider, id string, balance float64, ok bool) {
+	p.extManager().NoteBalance(provider, id, balance, ok)
+}
+
+// ExtManagerCachedBalance 暴露免网络的余额读（候选按剩余额度排序用）。
+func (p *Panel) ExtManagerCachedBalance(provider string) (float64, bool) {
+	return p.extManager().CachedBalance(provider)
+}
+
 // ---------------------------------------------------------------------------
 // Loomy 账号服务登录（密码 / 短信）：新增平台账号的自动路径。
 // 登录成功 = session 拿到 + 设备身份持久化 + 外部账号落库，全自动。
@@ -351,6 +361,10 @@ func (p *Panel) RunExtBalanceRefresh() {
 		if v == nil {
 			continue
 		}
+		// 这一记**是本函数此前唯一的缺口**：ViewOne 拿到了余额却直接丢掉，
+		// 导致候选排序没有任何额度依据（ViewOne 每次 30s 网络，绝不能在请求
+		// 路径上重跑）。缓存下来，排序侧走 CachedBalance 免网络读。
+		p.extManager().NoteBalance(v.Provider, v.ID, v.Balance, v.BalanceOK)
 		if v.BalanceOK {
 			ok++
 		} else {

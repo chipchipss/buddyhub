@@ -713,14 +713,9 @@ func (h *Handler) modelList() []map[string]any {
 		zaiReady = h.cfg.Zai.Count() > 0
 	}
 	if zaiReady {
-		for _, m := range []struct{ id, desc string }{
-			{"GLM-5.3-Flash", "GLM 5.3 Flash（智谱，最快）"},
-			{"GLM-5.3", "GLM 5.3（智谱旗舰）"},
-			{"GLM-5.2", "GLM 5.2"},
-			{"GLM-5-Turbo", "GLM 5 Turbo"},
-			{"GLM-5.1", "GLM 5.1"},
-			{"GLM-4.7", "GLM 4.7"},
-		} {
+		// 清单与**降级候选索引**同源（modelfamily.zaiCatalog）：两处各写一份的
+		// 结果是「模型列表里有、跨平台候选里没有」，出了问题查不出来。
+		for _, m := range zaiCatalog {
 			out = append(out, map[string]any{
 				"id": zaiModelPrefix + m.id, "object": "model",
 				"created": 1753600000, "owned_by": "zai",
@@ -898,6 +893,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	out := h.tryBridge(w, r, body, bareModel)
 	if out.matched {
 		if out.served {
+			return
+		}
+		// 该通道认了这个前缀但没服务成。**只有额度耗尽才换平台**——
+		// 5xx / 超时 / 参数错换过去大概率还是同样的错，而且会拿到语义
+		// 不同的模型（那种"看起来成功了"的降级比直接报错更难排查）。
+		// 一个候选都没成就写**原来那条 503**，客户端看到的错误码不变。
+		if isExhausted(out.lastErr) && h.failoverToFamily(w, r, body, bareModel) {
 			return
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, out.code, out.detail)
@@ -1327,6 +1329,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
 			msg = s
 		}
+	}
+	// 腾讯池轮转到底了。**只有该换平台时才换**（exhaustedForTerminal），
+	// 走通即 return —— 客户端拿到的是另一个平台的响应，回包 model 仍是它
+	// 请求的那个名字（见 failover.go 的说明）。
+	if exhaustedForTerminal(status, code, msg) && h.failoverToFamily(w, r, body, bareModel) {
+		return
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status

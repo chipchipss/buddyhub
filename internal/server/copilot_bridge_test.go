@@ -95,6 +95,7 @@ type fakeExtMgr struct {
 	mu    sync.Mutex
 	last  map[string]json.RawMessage
 	notes []noteRec
+	bal   map[string]balRec
 }
 
 func (f *fakeExtMgr) ReplaceCred(provider, id string, cred json.RawMessage) {
@@ -118,6 +119,30 @@ type noteRec struct {
 	provider string
 	id       string
 	failed   bool
+}
+
+// NoteBalance 记录余额观测（测试可预置余额来验证候选排序）。
+func (f *fakeExtMgr) NoteBalance(provider, id string, balance float64, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.bal == nil {
+		f.bal = map[string]balRec{}
+	}
+	f.bal[provider] = balRec{balance: balance, ok: ok}
+}
+
+// CachedBalance 返回测试预置的余额。
+func (f *fakeExtMgr) CachedBalance(provider string) (float64, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b := f.bal[provider]
+	return b.balance, b.ok
+}
+
+// balRec 测试用的余额快照。
+type balRec struct {
+	balance float64
+	ok      bool
 }
 
 // noteRecords 返回已记录的上报（并发安全快照）。

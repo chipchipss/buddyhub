@@ -154,6 +154,10 @@ type ExtManager interface {
 	// NoteChatResult 上报一次对话结果，驱动外部账号的冷却/退避
 	//（extstore.SelectChatOrder 据此把失败的号退到队尾）。
 	NoteChatResult(provider, id string, err error)
+	// NoteBalance 上报一次余额观测（5 分钟余额刷新喂进缓存，供候选排序）。
+	NoteBalance(provider, id string, balance float64, ok bool)
+	// CachedBalance 免网络读该平台的最高余额。第二返回值=是否测得过。
+	CachedBalance(provider string) (float64, bool)
 }
 
 // ExtSetManager 注入外部账号管理器（main 装配时调用；nil = Qoder 桥接禁用）。
@@ -168,6 +172,15 @@ func (h *Handler) noteChat(provider, id string, err error) {
 		return
 	}
 	h.extManager.NoteChatResult(provider, id, err)
+}
+
+// extBalance 读该平台的缓存余额。没有管理器（裸用/测试）时返回 (0, false)——
+// 排序侧把"没测得过"当 0 处理，退化成稳定的原序，不影响正确性。
+func (h *Handler) extBalance(provider string) (float64, bool) {
+	if h.extManager == nil {
+		return 0, false
+	}
+	return h.extManager.CachedBalance(provider)
 }
 
 // errOf 把失败原因串转成 error。
