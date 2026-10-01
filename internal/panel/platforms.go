@@ -83,11 +83,12 @@ var platforms = []Platform{
 	{ID: "raccoon", Name: "小浣熊（商汤）", Group: GroupGateway, Prefix: "raccoon:", Login: LoginQR,
 		Checkin: true, Note: "微信扫码登录（OpenAI 兼容直连）"},
 
+	{ID: "codearts", Name: "CodeArts（华为云）", Group: GroupGateway, Prefix: "codearts:", Login: LoginManual,
+		Checkin: true, Note: "永久 AK/SK（建议）"},
+
 	// ── 积分 / 签到平台（无对话 API）──
 	{ID: "lobsterai", Name: "LobsterAI（有道）", Group: GroupPoints, Login: LoginManual,
 		Checkin: true, Note: "从客户端凭据文件复制"},
-	{ID: "codearts", Name: "CodeArts（华为云）", Group: GroupPoints, Login: LoginManual,
-		Checkin: true, Note: "建议用永久 AK/SK"},
 
 	// 本机凭据 / 配置页填写的通道：同样是可调用的对话通道，只是不从
 	// 「添加账号」入池（Login 字段说明了这一点）。

@@ -62,9 +62,22 @@ type Client struct {
 	HTTP *http.Client
 }
 
-// New 创建客户端。
+// httpClient 包级客户端（默认值；SetHTTPClient 可整体替换）。
+//
+// 新建一个 Client 就换一次 http.Client 会让**连接池失效**（每条请求都重建
+// TCP/TLS），且测试没有注入点——与 raccoon/qoder/trae 同一套做法。
+var httpClient = &http.Client{Timeout: requestTimeout}
+
+// New 创建客户端（共享包级 HTTP 客户端与连接池）。
 func New() *Client {
-	return &Client{HTTP: &http.Client{Timeout: requestTimeout}}
+	return &Client{HTTP: httpClient}
+}
+
+// SetHTTPClient 替换包级 HTTP 客户端（测试注入 mock 上游；nil 忽略）。
+func SetHTTPClient(c *http.Client) {
+	if c != nil {
+		httpClient = c
+	}
 }
 
 // signRequestHuawei SDK-HMAC-SHA256 签名（对齐 Jet-Hub sign.ts 与华为 Rust 参考实现）。

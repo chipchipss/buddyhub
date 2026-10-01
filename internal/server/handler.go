@@ -144,6 +144,7 @@ type Handler struct {
 	lastAccioErr    string
 	lastTraeWorkErr string
 	lastRaccoonErr  string
+	lastCodeArtsErr string
 
 	// clineFlights / autoclawFlights 续期单飞表。
 	// 两家的 refresh_token 都是一次性轮换语义：并发续期会互相作废并把人踢下线，
@@ -634,6 +635,22 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		out = append(out, entry)
 	}
+	// CodeArts 模型名单（codearts: 前缀）：签名 GET + 10 分钟缓存。
+	for _, m := range h.codeartsCatalog() {
+		if m.ID == "" {
+			continue
+		}
+		entry := map[string]any{
+			"id":       codeartsModelPrefix + m.ID,
+			"object":   "model",
+			"created":  1753600000,
+			"owned_by": "codearts",
+		}
+		if m.Name != "" && m.Name != m.ID {
+			entry["description"] = m.Name
+		}
+		out = append(out, entry)
+	}
 	// Accio 模型名单（accio: 前缀）：有账号时实时拉（10 分钟缓存）。
 	for _, m := range h.accioCatalog() {
 		if m.ID == "" {
@@ -1009,6 +1026,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			detail += "；最近失败原因: " + h.lastRaccoonErr
 		}
 		writeOpenAIError(w, http.StatusServiceUnavailable, "no_raccoon_account", detail)
+		return
+	}
+
+	// CodeArts 直连通道（codearts: 前缀模型）：签名口径与积分/签到那条链路
+	// 不同（对话不签 host），见 extprovider/codearts/chat.go 模块头。
+	if isCodeArtsModel(bareModel) {
+		cm := strings.TrimPrefix(bareModel, codeartsModelPrefix)
+		bodyCM := body
+		if cm != bareModel {
+			bodyCM = rewriteModel(body, cm)
+		}
+		if h.codeartsChatStream(w, r, bodyCM, cm) {
+			return
+		}
+		detail := "没有可用的 CodeArts 账号（面板-添加账号-外部平台-CodeArts 填 AK/SK 后重试）"
+		if h.lastCodeArtsErr != "" {
+			detail += "；最近失败原因: " + h.lastCodeArtsErr
+		}
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_codearts_account", detail)
 		return
 	}
 

@@ -1026,6 +1026,7 @@ web/
 | `traework:` | TraeWork（字节） | `data/ext-accounts.json`（provider `traework`） | 同上 |
 | `qoder:` | Qoder（阿里） | `data/ext-accounts.json`（provider `qoder`） | — |
 | `raccoon:` | 小浣熊（商汤，**OpenAI 兼容直连**） | `data/ext-accounts.json`（provider `raccoon`） | — |
+| `codearts:` | CodeArts（华为云，签名口径与积分/签到不同） | `data/ext-accounts.json`（provider `codearts`） | — |
 | `codex:` | Codex 订阅池 | 本机 `~/.codex*` 凭据 | — |
 | `free:` | 免费 key 池（`free:<provider>/<model>`） | 配置的免费 Key | — |
 

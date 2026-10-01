@@ -33,6 +33,7 @@ var gatewayRoutes = []struct {
 	{loomyModelPrefix, isLoomyModel},
 	{zaiModelPrefix, isZaiModel},
 	{raccoonModelPrefix, isRaccoonModel},
+	{codeartsModelPrefix, isCodeArtsModel},
 }
 
 // GatewayPrefixes 导出全部**有对话桥接**的模型前缀。
