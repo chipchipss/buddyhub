@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -173,6 +174,17 @@ func truncate(b []byte, n int) string {
 		return string(b[:n])
 	}
 	return string(b)
+}
+
+// firstNonEmpty 取第一个非空串。字段名在上游不同版本/不同链路里不统一
+// （poll 回 `token`，refresh 回 `device_token`），逐个探测比猜哪个对可靠。
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // Campaign 活动条目。
@@ -363,27 +375,45 @@ func (c *Client) Poll(ctx context.Context, s *DeviceSession) (*Credential, strin
 		return nil, "", fmt.Errorf("poll HTTP %d", resp.StatusCode)
 	}
 	var parsed struct {
+		// Token deviceToken/poll 的**实际字段**（响应形如
+		// {"id":…,"token":"dt-…","user_id":…}）。只读 access_token 会永远取不到，
+		// 表现为「授权完了却一直 pending」——实测踩过。
+		Token              string `json:"token"`
 		AccessToken        string `json:"access_token"`
+		DeviceToken        string `json:"device_token"`
 		SecurityOAuthToken string `json:"security_oauth_token"`
 		RefreshToken       string `json:"refresh_token"`
 		ExpireTime         int64  `json:"expire_time"`
 		RefreshExpireTime  int64  `json:"refresh_token_expire_time"`
 		UserID             string `json:"user_id"`
 		UserName           string `json:"user_name"`
+		// ExpiresAt 上游两条链路给的键名不一致（参考实现读的是 expires_at，
+		// 本地结构用 expire_time）。缺了它 NeedRefresh 就永远判「不临期」，
+		// 令牌过期才被动失败。
+		ExpiresAt        int64 `json:"expires_at"`
+		RefreshExpiresAt int64 `json:"refresh_token_expire_at"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, "", fmt.Errorf("poll 响应解析失败: %w", err)
 	}
-	token := parsed.AccessToken
+	token := firstNonEmpty(parsed.AccessToken, parsed.Token, parsed.DeviceToken, parsed.SecurityOAuthToken)
 	if token == "" {
 		// 200 却没有 token —— 上游给了个空壳回执，把原文截一段出来供排障
 		return nil, "200 但无 access_token：" + truncate(raw, 120), nil
+	}
+	// 秒 / 毫秒两种形态（秒级时间戳在毫秒字段上会判成"早已过期"）
+	expireAt := parsed.ExpireTime
+	if expireAt == 0 {
+		expireAt = parsed.ExpiresAt
+	}
+	if expireAt > 0 && expireAt < 1e12 {
+		expireAt *= 1000
 	}
 	cred := &Credential{
 		AccessToken:        token,
 		SecurityOAuthToken: token, // 双写同值
 		RefreshToken:       parsed.RefreshToken,
-		ExpireTime:         parsed.ExpireTime,
+		ExpireTime:         expireAt,
 		RefreshExpireTime:  parsed.RefreshExpireTime,
 		MachineID:          s.MachineID,
 		UID:                parsed.UserID,

@@ -890,3 +890,46 @@ func TestParseCallbackEmptyErrorIsNotFailure(t *testing.T) {
 		t.Errorf("应取到授权码: %+v", cb)
 	}
 }
+
+/* ── 换证回执信封 ──────────────────────────────────────────────── */
+
+// 这族 API 用 Tencent 风格的 Result 信封（同源的 GetLoginGuidance 就是
+// Result.LoginHost）。只解 data 会得到「HTTP 200 却没有令牌」——看着像成功，
+// 实际一个字段都没读到。
+func TestParseTokenResponseUnwrapsResultEnvelope(t *testing.T) {
+	for _, body := range []string{
+		`{"Result":{"access_token":"at-1","refresh_token":"rt-1","uid":"u-1"}}`,
+		`{"result":{"accessToken":"at-1","refreshToken":"rt-1"}}`,
+		`{"data":{"access_token":"at-1","refresh_token":"rt-1"}}`,
+		`{"access_token":"at-1","refresh_token":"rt-1"}`,
+	} {
+		cred, err := parseTokenResponse([]byte(body), nil)
+		if err != nil {
+			t.Errorf("%s → 解析失败: %v", body, err)
+			continue
+		}
+		if cred.AccessToken != "at-1" {
+			t.Errorf("%s → access_token = %q", body, cred.AccessToken)
+		}
+	}
+}
+
+// 拿不到令牌时要给出**回执结构**，否则换了个字段名就没法排。
+// 但绝不能打原文——换证回执里就是令牌本身。
+func TestTokenErrorLeaksStructureNotValues(t *testing.T) {
+	const secret = "eyJhbGciOiJIUzI1NiJ9.SECRET-TOKEN-VALUE"
+	_, err := parseTokenResponse([]byte(`{"Result":{"OpResult":"`+secret+`","Status":0}}`), nil)
+	if err == nil {
+		t.Fatal("没有令牌时应报错")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "OpResult") {
+		t.Errorf("结构里应出现键名以便定位: %q", msg)
+	}
+	if strings.Contains(msg, secret) {
+		t.Fatal("错误信息里混进了令牌值")
+	}
+	if strings.Contains(msg, "SECRET-TOKEN-VALUE") {
+		t.Fatal("错误信息里混进了令牌值")
+	}
+}

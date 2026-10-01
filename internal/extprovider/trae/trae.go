@@ -47,6 +47,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -557,17 +558,74 @@ func deviceInfo(c *LoginContext) map[string]any {
 	}
 }
 
+// describeDoc 回执的结构描述：路径 + 值类型/长度，**不含值本身**。
+//
+// 排障要用它——上游改字段名时只有结构能看出令牌挂在哪个键下（嵌套也要能展开）。
+// 绝不能打原文：换证回执里就是令牌，截断也不安全。
+func describeDoc(doc map[string]any) string {
+	var out []string
+	var walk func(prefix string, v any)
+	walk = func(prefix string, v any) {
+		switch t := v.(type) {
+		case map[string]any:
+			if len(t) == 0 {
+				out = append(out, prefix+":{}")
+				return
+			}
+			keys := make([]string, 0, len(t))
+			for k := range t {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				walk(prefix+"."+k, t[k])
+			}
+		case []any:
+			out = append(out, fmt.Sprintf("%s:array[%d]", prefix, len(t)))
+		case string:
+			out = append(out, fmt.Sprintf("%s:string(%d)", prefix, len(t)))
+		case nil:
+			out = append(out, prefix+":null")
+		case float64, bool, json.Number:
+			out = append(out, fmt.Sprintf("%s:%v", prefix, t))
+		default:
+			out = append(out, fmt.Sprintf("%s:%T", prefix, v))
+		}
+	}
+	for _, k := range keysOf(doc) {
+		walk(k, doc[k])
+	}
+	if len(out) > 40 {
+		out = append(out[:40], fmt.Sprintf("…共 %d 个字段", len(out)))
+	}
+	return "{" + strings.Join(out, ", ") + "}"
+}
+
+// keysOf 按字典序取 map 的键（结构描述要稳定，否则每次失败都不一样没法比对）。
+func keysOf(doc map[string]any) []string {
+	keys := make([]string, 0, len(doc))
+	for k := range doc {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // parseTokenResponse 解析换证/续期回执。字段名有多种写法。
 func parseTokenResponse(raw []byte, c *LoginContext) (*Credential, error) {
 	var doc map[string]any
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("换证回执解析失败：%w", err)
 	}
-	// 可能包在 data 里
-	if d, ok := doc["data"].(map[string]any); ok {
-		for k, v := range d {
-			if _, exists := doc[k]; !exists {
-				doc[k] = v
+	// 可能包在信封里。**两个都要试**：这族 API 用的是 Tencent 风格的
+	// Result 信封（同源的 GetLoginGuidance 就是 Result.LoginHost），
+	// 只解 data 会得到「HTTP 200 却没有令牌」——看着像成功，实际一个字段都没读到。
+	for _, k := range []string{"data", "Data", "result", "Result"} {
+		if d, ok := doc[k].(map[string]any); ok {
+			for n, v := range d {
+				if _, exists := doc[n]; !exists {
+					doc[n] = v
+				}
 			}
 		}
 	}
@@ -579,10 +637,12 @@ func parseTokenResponse(raw []byte, c *LoginContext) (*Credential, error) {
 		}
 		return ""
 	}
-	access := pick("access_token", "accessToken", "AccessToken", "token")
+	access := pick("access_token", "accessToken", "AccessToken", "token", "Token")
 	refresh := pick("refresh_token", "refreshToken", "RefreshToken")
 	if access == "" && refresh == "" {
-		return nil, fmt.Errorf("换证成功但回执里没有任何令牌")
+		// 带上回执的**结构**而不是原文：上游改字段名时只有结构能看出令牌挂在
+		// 哪个键下，而原文里可能就带着令牌本身（截断也不安全）。
+		return nil, fmt.Errorf("换证成功但回执里没有任何令牌（回执结构 %s）", describeDoc(doc))
 	}
 	cred := &Credential{
 		AccessToken:  access,
