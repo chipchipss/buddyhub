@@ -478,7 +478,7 @@ func pollRaccoonQr(ctx context.Context, sess *extLoginSession) (cred *extLoginCr
 
 // pollQoderDevice 轮询一次设备授权（nil 凭据 = 尚未授权）。
 func pollQoderDevice(ctx context.Context, sess *extLoginSession) (cred *extLoginCred, done bool, note string) {
-	got, err := qoder.New().Poll(ctx, sess.device)
+	got, status, err := qoder.New().Poll(ctx, sess.device)
 	if err != nil {
 		n := sess.bumpErrStreak()
 		log.Printf("panel: qoder 设备轮询出错（第 %d 次）: %v", n, err)
@@ -489,7 +489,9 @@ func pollQoderDevice(ctx context.Context, sess *extLoginSession) (cred *extLogin
 	}
 	sess.resetErrStreak()
 	if got == nil {
-		return nil, false, "pending"
+		// 带上上游原始状态：第一次轮询必然留一行日志，用来区分
+		// 「上游说还没授权」和「我们压根没在轮询」。
+		return nil, false, "pending（上游 " + status + "）"
 	}
 	uid := got.UID
 	if uid == "" {
@@ -518,7 +520,10 @@ func pollCopilotCode(ctx context.Context, sess *extLoginSession) (cred *extLogin
 		return nil, true, res.Error
 	}
 	if !res.Done {
-		return nil, false, "pending"
+		// 把上游原始状态带进 note：lastNote 只在**变化**时记日志，因此第一次
+		// 轮询必然留一行——用户报「授权完了却一直显示等待授权」时，先要能区分
+		// 「上游说还没授权」和「我们压根没在轮询」。
+		return nil, false, "pending（上游 " + res.Status + "）"
 	}
 	c := res.Cred
 	id := c.Login
@@ -614,6 +619,9 @@ func pollTraeCallback(ctx context.Context, sess *extLoginSession) (cred *extLogi
 	case cb := <-sess.traeDone:
 		c, err := trae.Complete(ctx, sess.traeCtx, cb)
 		if err != nil {
+			// 把原始 query 一起记下来：上游改回调形状时，只有原文能看出
+			// 解析器漏了哪个键（解析器认不出的东西全在这里）。
+			log.Printf("panel: trae 换证失败：%v（回调原文 %q）", err, head(cb.RawQuery, 300))
 			return nil, true, "Trae 授权失败：" + err.Error()
 		}
 		id := c.UID

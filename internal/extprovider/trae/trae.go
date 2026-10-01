@@ -343,12 +343,15 @@ type Callback struct {
 	RefreshToken string
 	LoginHost    string
 	Error        string
+	// RawQuery 原始 query（未解码）。只在排障时用：上游改回调形状时，
+	// 只有原文能看出到底变了什么——解析器认不出的键全在这里。
+	RawQuery string
 }
 
 // ParseCallback 解析回调 query。
 //
-// 字段名有四种写法（camelCase / snake / Pascal / 连字符），逐个探测——
-// 上游不同版本发过不同形态。
+// 键名有四五种写法（camelCase / snake / Pascal / 连字符），逐个探测——
+// 上游不同版本发过不同形态。错误键**只看非空值**：`error=` 不算失败。
 func ParseCallback(query url.Values) *Callback {
 	pick := func(keys ...string) string {
 		for _, k := range keys {
@@ -358,12 +361,82 @@ func ParseCallback(query url.Values) *Callback {
 		}
 		return ""
 	}
-	return &Callback{
-		AuthCode:     pick("auth_code", "authCode", "AuthCode", "code"),
-		RefreshToken: pick("refresh_token", "refreshToken", "RefreshToken", "refresh-token"),
-		LoginHost:    pick("login_host", "loginHost", "LoginHost"),
-		Error:        pick("error", "error_description"),
+
+	// 错误分支优先，且一旦命中就不再读授权码（参考实现同样在 error 处直接 return）：
+	// 读出来会让上层以为「拿到码了，只是顺带有个错误」。
+	for _, k := range []string{"error", "error_code", "err", "errorCode", "error_description"} {
+		if v := strings.TrimSpace(query.Get(k)); v != "" {
+			return &Callback{Error: v}
+		}
 	}
+	// 官方前端用它标记「这次不是要回调到本机」——此时回调里不会有授权码，
+	// 继续等也是白等，直接给出可读的失败原因。
+	if strings.TrimSpace(query.Get("isRedirect")) == "false" {
+		return &Callback{Error: "isRedirect=false（上游未按本机回调方式跳转）"}
+	}
+
+	authCode := pick("authCode", "auth_code", "AuthCode", "authorization_code", "code")
+	if authCode == "" {
+		// 新版本把授权码包在 authCodeInfo 这个 **JSON 字符串**里再塞进 query，
+		// 字段名还嵌套过几层。见 extractAuthCode。
+		for _, k := range []string{"authCodeInfo", "auth_code_info", "AuthCodeInfo"} {
+			if raw := pick(k); raw != "" {
+				if code := extractAuthCode(raw); code != "" {
+					authCode = code
+					break
+				}
+			}
+		}
+	}
+	return &Callback{
+		AuthCode:     authCode,
+		RefreshToken: pick("refreshToken", "refresh_token", "RefreshToken", "refresh-token"),
+		LoginHost:    pick("loginHost", "login_host", "LoginHost", "host", "consoleHost"),
+	}
+}
+
+// extractAuthCode 从 authCodeInfo 的 JSON 串里挖出授权码。
+//
+// 字段名在版本间漂过，所以是**递归**找：嵌套对象/数组都要能挖到。
+func extractAuthCode(raw string) string {
+	var doc any
+	if json.Unmarshal([]byte(raw), &doc) != nil {
+		return ""
+	}
+	keys := []string{"authCode", "auth_code", "AuthCode", "AuthCodeToken", "code"}
+	var walk func(v any) string
+	walk = func(v any) string {
+		switch t := v.(type) {
+		case map[string]any:
+			for _, k := range keys {
+				if s, ok := t[k].(string); ok && strings.TrimSpace(s) != "" {
+					return s
+				}
+			}
+			for _, nested := range t {
+				if s := walk(nested); s != "" {
+					return s
+				}
+			}
+		case []any:
+			for _, item := range t {
+				if s := walk(item); s != "" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	return walk(doc)
+}
+
+// resolvesLogin 这次回调是否把登录推进到了可判定的状态。
+//
+// false 时监听器要**继续等下一个请求**：浏览器会先发 preconnect、favicon 探测
+// 之类的杂音（它们也打到 /authorize，但 query 里什么都没有）。一次就收尾等于
+// 把真回调挡在门外——实测表现是「授权页刚打开 2 秒就报『回调里没有授权码』」。
+func (c *Callback) resolvesLogin() bool {
+	return c.Error != "" || c.AuthCode != "" || c.RefreshToken != ""
 }
 
 // apiHostsFor 换证要依次试的 API 域候选（顺序即优先级）。
@@ -763,34 +836,19 @@ func AwaitCallback(ctx context.Context, ln net.Listener, ttl time.Duration) (*Ca
 	ch := make(chan result, 1)
 
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			ch <- result{nil, err}
-			return
-		}
-		defer conn.Close()
-		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-		buf := make([]byte, 8192)
-		n, _ := conn.Read(buf)
-		line := string(buf[:n])
-		path := "/"
-		if i := strings.Index(line, " "); i > 0 {
-			rest := line[i+1:]
-			if j := strings.Index(rest, " "); j > 0 {
-				path = rest[:j]
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				ch <- result{nil, err}
+				return
 			}
-		}
-		u, perr := url.Parse(path)
-		if perr != nil {
-			ch <- result{nil, perr}
+			cb, ok := readCallbackConn(conn)
+			if !ok {
+				continue // 杂音请求（preconnect / favicon 探测）：继续等真回调
+			}
+			ch <- result{cb, nil}
 			return
 		}
-		body := "<html><meta charset=\"utf-8\"><body style=\"font-family:system-ui;padding:40px;text-align:center\">" +
-			"<h2>授权完成</h2><p>可以关闭本页，回到管理面板查看结果。</p></body></html>"
-		resp := "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " +
-			strconv.Itoa(len(body)) + "\r\nConnection: close\r\n\r\n" + body
-		_, _ = conn.Write([]byte(resp))
-		ch <- result{ParseCallback(u.Query()), nil}
 	}()
 
 	select {
@@ -801,4 +859,39 @@ func AwaitCallback(ctx context.Context, ln net.Listener, ttl time.Duration) (*Ca
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// readCallbackConn 读一个回调连接：回一页提示，并解析出回调内容。
+//
+// 返回 ok=false 表示这只是一次杂音请求（query 里没有可判定的登录信息），
+// 调用方应继续等下一个——见 Callback.resolvesLogin 的说明。
+func readCallbackConn(conn net.Conn) (*Callback, bool) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 8192)
+	n, _ := conn.Read(buf)
+	line := string(buf[:n])
+	path := "/"
+	if i := strings.Index(line, " "); i > 0 {
+		rest := line[i+1:]
+		if j := strings.Index(rest, " "); j > 0 {
+			path = rest[:j]
+		}
+	}
+	u, perr := url.Parse(path)
+	if perr != nil {
+		return nil, false
+	}
+	cb := ParseCallback(u.Query())
+	cb.RawQuery = u.RawQuery
+
+	// 无论这次是不是杂音都要先回一页：浏览器在等响应，不回它会一直转圈，
+	// 还可能因此重试、把真正的回调挤到后面。
+	body := "<html><meta charset=\"utf-8\"><body style=\"font-family:system-ui;padding:40px;text-align:center\">" +
+		"<h2>授权完成</h2><p>可以关闭本页，回到管理面板查看结果。</p></body></html>"
+	resp := "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " +
+		strconv.Itoa(len(body)) + "\r\nConnection: close\r\n\r\n" + body
+	_, _ = conn.Write([]byte(resp))
+
+	return cb, cb.resolvesLogin()
 }

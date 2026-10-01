@@ -241,6 +241,10 @@ type PollResult struct {
 	Done  bool
 	Cred  *Credential
 	Error string // 面向用户的错误（授权被拒 / 设备码过期）
+	// Status 上游这一次的原始状态（authorization_pending / slow_down / 空）。
+	// 只给日志用：用户报「授权完了还一直显示等待授权」时，唯一能区分
+	// 「上游说还没授权」和「我们压根没在轮询」的就是它。
+	Status string
 }
 
 // Poll 轮询授权状态；未完成时 Done=false（调用方按 Interval 重试）。
@@ -280,7 +284,8 @@ func (f *DeviceFlow) Poll(ctx context.Context) (*PollResult, error) {
 	case "":
 		f.badCodeStreak = 0
 		if doc.AccessToken == "" {
-			return &PollResult{Done: false}, nil
+			// 200 但既没有 token 也没有 error —— 上游给了个空壳回执。
+			return &PollResult{Done: false, Status: "empty-response"}, nil
 		}
 		cred, err := Exchange(ctx, doc.AccessToken)
 		if err != nil {
@@ -292,7 +297,7 @@ func (f *DeviceFlow) Poll(ctx context.Context) (*PollResult, error) {
 		return &PollResult{Done: true, Cred: cred}, nil
 	case "authorization_pending", "slow_down":
 		f.badCodeStreak = 0
-		return &PollResult{Done: false}, nil
+		return &PollResult{Done: false, Status: doc.Error}, nil
 	case "expired_token":
 		return &PollResult{Error: "设备码已过期，请重新发起登录"}, nil
 	case "access_denied":
@@ -301,7 +306,7 @@ func (f *DeviceFlow) Poll(ctx context.Context) (*PollResult, error) {
 		// 设备码刚下发时 GitHub 会短暂回这个错（尚未生效）——当作 pending 重试。
 		f.badCodeStreak++
 		if f.badCodeStreak <= badCodeTolerance {
-			return &PollResult{Done: false}, nil
+			return &PollResult{Done: false, Status: doc.Error}, nil
 		}
 		return &PollResult{Error: "设备码无效，请重新发起登录"}, nil
 	default:

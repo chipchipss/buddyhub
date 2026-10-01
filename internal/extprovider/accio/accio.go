@@ -222,6 +222,18 @@ type Callback struct {
 	Code  string
 	State string
 	Error string
+	// RawQuery 原始 query（未解码）。排障用：上游改回调形状时，
+	// 解析器认不出的键全在这里。
+	RawQuery string
+}
+
+// resolvesLogin 这次回调是否把登录推进到了可判定的状态。
+//
+// false 时监听器要**继续等下一个请求**：浏览器会先发 preconnect、favicon 探测
+// 之类的杂音（它们也打到回调路径，但 query 里什么都没有）。一次就收尾等于把
+// 真回调挡在门外——Trae 通道实测踩过：授权页刚打开 2 秒就报「回调里没有授权码」。
+func (c *Callback) resolvesLogin() bool {
+	return c.Error != "" || c.Code != ""
 }
 
 // ParseCallback 解析回调 query（字段名有多种写法）。
@@ -610,34 +622,19 @@ func AwaitCallback(ctx context.Context, ln net.Listener, ttl time.Duration) (*Ca
 	}
 	ch := make(chan result, 1)
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			ch <- result{nil, err}
-			return
-		}
-		defer conn.Close()
-		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-		buf := make([]byte, 8192)
-		n, _ := conn.Read(buf)
-		line := string(buf[:n])
-		path := "/"
-		if i := strings.Index(line, " "); i > 0 {
-			rest := line[i+1:]
-			if j := strings.Index(rest, " "); j > 0 {
-				path = rest[:j]
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				ch <- result{nil, err}
+				return
 			}
-		}
-		u, perr := url.Parse(path)
-		if perr != nil {
-			ch <- result{nil, perr}
+			cb, ok := readCallbackConn(conn)
+			if !ok {
+				continue // 杂音请求（preconnect / favicon 探测）：继续等真回调
+			}
+			ch <- result{cb, nil}
 			return
 		}
-		body := "<html><meta charset=\"utf-8\"><body style=\"font-family:system-ui;padding:40px;text-align:center\">" +
-			"<h2>授权完成</h2><p>可以关闭本页，回到管理面板查看结果。</p></body></html>"
-		resp := "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " +
-			strconv.Itoa(len(body)) + "\r\nConnection: close\r\n\r\n" + body
-		_, _ = conn.Write([]byte(resp))
-		ch <- result{ParseCallback(u.Query()), nil}
 	}()
 
 	select {
@@ -648,4 +645,36 @@ func AwaitCallback(ctx context.Context, ln net.Listener, ttl time.Duration) (*Ca
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// readCallbackConn 读一个回调连接：回一页提示，并解析出回调内容。
+// ok=false 表示只是杂音请求，调用方应继续等。
+func readCallbackConn(conn net.Conn) (*Callback, bool) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 8192)
+	n, _ := conn.Read(buf)
+	line := string(buf[:n])
+	path := "/"
+	if i := strings.Index(line, " "); i > 0 {
+		rest := line[i+1:]
+		if j := strings.Index(rest, " "); j > 0 {
+			path = rest[:j]
+		}
+	}
+	u, perr := url.Parse(path)
+	if perr != nil {
+		return nil, false
+	}
+	cb := ParseCallback(u.Query())
+	cb.RawQuery = u.RawQuery
+
+	// 无论是不是杂音都先回一页：浏览器在等响应，不回它会一直转圈。
+	body := "<html><meta charset=\"utf-8\"><body style=\"font-family:system-ui;padding:40px;text-align:center\">" +
+		"<h2>授权完成</h2><p>可以关闭本页，回到管理面板查看结果。</p></body></html>"
+	resp := "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " +
+		strconv.Itoa(len(body)) + "\r\nConnection: close\r\n\r\n" + body
+	_, _ = conn.Write([]byte(resp))
+
+	return cb, cb.resolvesLogin()
 }

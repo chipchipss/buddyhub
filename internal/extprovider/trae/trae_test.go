@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -775,4 +776,117 @@ func (h hostCapture) RoundTrip(req *http.Request) (*http.Response, error) {
 	req.URL.Scheme = "http"
 	req.URL.Host = strings.TrimPrefix(h.target.URL, "http://")
 	return http.DefaultTransport.RoundTrip(req)
+}
+
+/* ── 回调监听：忽略杂音 ────────────────────────────────────────── */
+
+// 浏览器会先对回调端口发 preconnect / favicon 探测之类的杂音请求——它们也打到
+// /authorize，但 query 里什么都没有。收到就收尾的话，真回调会被挡在门外，
+// 用户看到的是「授权页刚打开 2 秒就报『回调里没有授权码』」（实测踩过）。
+func TestAwaitCallbackIgnoresNoise(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听失败: %v", err)
+	}
+	defer ln.Close()
+
+	done := make(chan *Callback, 1)
+	fail := make(chan error, 1)
+	go func() {
+		cb, aerr := AwaitCallback(context.Background(), ln, 10*time.Second)
+		if aerr != nil {
+			fail <- aerr
+			return
+		}
+		done <- cb
+	}()
+
+	base := "http://" + ln.Addr().String()
+	// 杂音：都没有可判定的登录信息
+	for _, p := range []string{"/authorize", "/favicon.ico", "/authorize?isRedirect=true", "/authorize?loginTraceID=t"} {
+		resp, gerr := http.Get(base + p)
+		if gerr != nil {
+			t.Fatalf("杂音请求 %s 失败: %v", p, gerr)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Errorf("杂音请求 %s 也应得到 200（否则浏览器会转圈重试），得到 %d", p, resp.StatusCode)
+		}
+	}
+
+	// 真回调
+	resp, err := http.Get(base + "/authorize?authCode=REAL-1&loginHost=www.trae.cn")
+	if err != nil {
+		t.Fatalf("真回调失败: %v", err)
+	}
+	resp.Body.Close()
+
+	select {
+	case cb := <-done:
+		if cb.AuthCode != "REAL-1" {
+			t.Fatalf("应拿到真回调的授权码，得到 %+v", cb)
+		}
+		if cb.LoginHost != "www.trae.cn" {
+			t.Errorf("loginHost 解析错误: %q", cb.LoginHost)
+		}
+		if !strings.Contains(cb.RawQuery, "authCode=REAL-1") {
+			t.Errorf("RawQuery 应保留原文: %q", cb.RawQuery)
+		}
+	case ferr := <-fail:
+		t.Fatalf("等待回调失败: %v", ferr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("超时：真回调没被识别")
+	}
+}
+
+// 新版把授权码包在 authCodeInfo 这个 **JSON 字符串**里再塞进 query，
+// 字段名还嵌套过几层——解析器要能挖出来。
+func TestParseCallbackAuthCodeInfo(t *testing.T) {
+	// 参考实现回调向量里的真实形态
+	raw := "isRedirect=true&scope=solo&authCodeInfo=" +
+		url.QueryEscape(`{"AuthCode":"AC-JSON"}`) + "&loginTraceID=t&host=https%3A%2F%2Fapi.trae.com.cn"
+	q, err := url.ParseQuery(raw)
+	if err != nil {
+		t.Fatalf("构造 query 失败: %v", err)
+	}
+	cb := ParseCallback(q)
+	if cb.AuthCode != "AC-JSON" {
+		t.Fatalf("authCodeInfo 里的授权码没挖出来: %+v", cb)
+	}
+	// host 也是 loginHost 的候选名
+	if cb.LoginHost != "https://api.trae.com.cn" {
+		t.Errorf("host 应作为 loginHost 候选: %q", cb.LoginHost)
+	}
+
+	// 再套一层嵌套也要能挖到
+	nested := url.QueryEscape(`{"data":{"result":{"authCode":"AC-DEEP"}}}`)
+	q2, _ := url.ParseQuery("authCodeInfo=" + nested)
+	if got := ParseCallback(q2).AuthCode; got != "AC-DEEP" {
+		t.Errorf("嵌套 authCodeInfo 没挖到: %q", got)
+	}
+}
+
+// isRedirect=false 表示上游没按本机回调方式跳转，回调里不会有授权码——
+// 继续等是白等，要直接给出可读原因。
+func TestParseCallbackIsRedirectFalse(t *testing.T) {
+	q, _ := url.ParseQuery("isRedirect=false&scope=solo")
+	cb := ParseCallback(q)
+	if cb.Error == "" {
+		t.Fatal("isRedirect=false 应判为失败")
+	}
+	if !strings.Contains(cb.Error, "isRedirect") {
+		t.Errorf("错误信息应说明原因: %q", cb.Error)
+	}
+}
+
+// 空值不算命中：`error=&code=X` 要取到 X。
+func TestParseCallbackEmptyErrorIsNotFailure(t *testing.T) {
+	q, _ := url.ParseQuery("error=&code=X-1")
+	cb := ParseCallback(q)
+	if cb.Error != "" {
+		t.Errorf("空的 error 不算失败: %+v", cb)
+	}
+	if cb.AuthCode != "X-1" {
+		t.Errorf("应取到授权码: %+v", cb)
+	}
 }

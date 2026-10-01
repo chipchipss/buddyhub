@@ -337,25 +337,30 @@ func (s *DeviceSession) BuildAuthUrl() string {
 
 // Poll 轮询一次取 token（挂 openApiBase，不是 authBase —— 写错 host 永远 401）。
 // 404 = 无待授权会话（继续轮询）；200 = 拿到 token。
-func (c *Client) Poll(ctx context.Context, s *DeviceSession) (*Credential, error) {
+// Poll 查询一次设备授权状态。
+//
+// 返回值里的 status 是**上游原始状态**，只给日志用：用户报「授权完了却一直显示
+// 等待授权」时，唯一能区分「上游说还没授权」和「我们压根没在轮询」的就是它。
+// 未完成时 cred 为 nil，err 也为 nil。
+func (c *Client) Poll(ctx context.Context, s *DeviceSession) (*Credential, string, error) {
 	url := fmt.Sprintf("%s%s?nonce=%s&verifier=%s&challenge_method=S256",
 		OpenAPIBase, deviceTokenPoll, s.Nonce, s.Verifier)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, nil // 尚未授权
+		return nil, "404 尚未授权", nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("poll HTTP %d", resp.StatusCode)
+		return nil, "", fmt.Errorf("poll HTTP %d", resp.StatusCode)
 	}
 	var parsed struct {
 		AccessToken        string `json:"access_token"`
@@ -367,11 +372,12 @@ func (c *Client) Poll(ctx context.Context, s *DeviceSession) (*Credential, error
 		UserName           string `json:"user_name"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, fmt.Errorf("poll 响应解析失败: %w", err)
+		return nil, "", fmt.Errorf("poll 响应解析失败: %w", err)
 	}
 	token := parsed.AccessToken
 	if token == "" {
-		return nil, nil // 未完成
+		// 200 却没有 token —— 上游给了个空壳回执，把原文截一段出来供排障
+		return nil, "200 但无 access_token：" + truncate(raw, 120), nil
 	}
 	cred := &Credential{
 		AccessToken:        token,
@@ -383,5 +389,5 @@ func (c *Client) Poll(ctx context.Context, s *DeviceSession) (*Credential, error
 		UID:                parsed.UserID,
 		Nickname:           parsed.UserName,
 	}
-	return cred, nil
+	return cred, "ok", nil
 }
