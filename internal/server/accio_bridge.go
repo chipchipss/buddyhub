@@ -39,12 +39,14 @@ func (h *Handler) accioChatStream(w http.ResponseWriter, r *http.Request, body [
 		var cred accio.Credential
 		if json.Unmarshal(a.Cred, &cred) != nil {
 			lastErr = "凭据解析失败"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			continue
 		}
 		if cred.NeedsRefresh() {
 			fresh, rerr := h.refreshAccioCred(r.Context(), a.ID, &cred)
 			if rerr != nil {
 				lastErr = rerr.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				log.Printf("accio-bridge: %s 续期失败: %v", a.ID, rerr)
 				continue
 			}
@@ -62,6 +64,7 @@ func (h *Handler) accioChatStream(w http.ResponseWriter, r *http.Request, body [
 		resp, cerr := accio.Chat(r.Context(), &cred, outBody, reqID)
 		if cerr != nil {
 			lastErr = cerr.Error()
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("accio-bridge: %s chat 失败: %v", a.ID, cerr)
 			continue
 		}
@@ -76,6 +79,7 @@ func (h *Handler) accioChatStream(w http.ResponseWriter, r *http.Request, body [
 			}
 			if cerr != nil {
 				lastErr = cerr.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				continue
 			}
 		}
@@ -83,6 +87,7 @@ func (h *Handler) accioChatStream(w http.ResponseWriter, r *http.Request, body [
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			lastErr = "上游 HTTP " + strconv.Itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("accio-bridge: %s 上游 %d: %s", a.ID, resp.StatusCode, shorten(string(raw), 200))
 			continue
 		}
@@ -90,6 +95,7 @@ func (h *Handler) accioChatStream(w http.ResponseWriter, r *http.Request, body [
 		log.Printf("accio-bridge: acct=%s region=%s model=%s 建流成功",
 			a.ID, accio.ParseRegion(string(cred.Region)).Label(), bareModel)
 		h.translateAccio(w, resp, body, bareModel)
+		h.noteChat(a.Provider, a.ID, nil)
 		return true
 	}
 	h.lastAccioErr = lastErr

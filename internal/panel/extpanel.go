@@ -190,6 +190,12 @@ func (p *Panel) ExtManagerReplaceCred(provider, id string, cred json.RawMessage)
 	p.extManager().ReplaceCred(provider, id, cred)
 }
 
+// ExtManagerNoteChatResult 暴露对话结果上报（驱动外部账号冷却/退避，
+// server 桥接经 main 闭包调用）。
+func (p *Panel) ExtManagerNoteChatResult(provider, id string, err error) {
+	p.extManager().NoteChatResult(provider, id, err)
+}
+
 // ---------------------------------------------------------------------------
 // Loomy 账号服务登录（密码 / 短信）：新增平台账号的自动路径。
 // 登录成功 = session 拿到 + 设备身份持久化 + 外部账号落库，全自动。

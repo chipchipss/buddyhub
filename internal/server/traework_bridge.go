@@ -44,25 +44,30 @@ func (h *Handler) traeworkChatStream(w http.ResponseWriter, r *http.Request, bod
 		var cred traework.Credential
 		if json.Unmarshal(a.Cred, &cred) != nil {
 			lastErr = "凭据解析失败"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			continue
 		}
 		if cred.AccessToken == "" {
 			lastErr = "账号缺少 access_token"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			continue
 		}
 
 		if h.clientWantsStream(body) {
 			h.streamTraeWork(w, r, &cred, prompt, bareModel)
+			h.noteChat(a.Provider, a.ID, nil)
 			return true
 		}
 
 		turn, err := traework.RunTurn(r.Context(), &cred, prompt, nil)
 		if err != nil {
 			lastErr = err.Error()
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("traework-bridge: %s 对话失败: %v", a.ID, err)
 			continue
 		}
 		writeJSON(w, http.StatusOK, buildTraeWorkCompletion(turn, bareModel))
+		h.noteChat(a.Provider, a.ID, nil)
 		return true
 	}
 	h.lastTraeWorkErr = lastErr

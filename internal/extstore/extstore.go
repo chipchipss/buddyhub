@@ -80,6 +80,12 @@ type Manager struct {
 	mu       sync.Mutex
 	path     string
 	accounts []*ExtAccount
+
+	// selOnce / sel 选择与健康的运行时状态（select.go）。惰性初始化：
+	// 不是所有 Manager 用例都要它（纯持久化测试用不到），而字段为 nil 时
+	// selState 会 panic——用 Once 一次建好，省得每个入口都判空。
+	selOnce sync.Once
+	sel     *selectState
 }
 
 // NewManager 创建管理器并加载 data/ext-accounts.json（不存在则空表）。
@@ -662,7 +668,12 @@ func (m *Manager) StatusAll(ctx context.Context) []*ExtAccountView {
 }
 
 // ExtList 导出 List（server 包 Qoder 桥接读取账号）。
-func (m *Manager) ExtList() []*ExtAccount { return m.List() }
+// ExtList 桥接专用的账号列表：**按健康与轮转序排好**返回。
+//
+// 只有 chat 桥接用它（面板内部走 List()，展示顺序不该被路由策略左右）。
+// 桥接的循环是「成功即停」，所以顺序直接决定负载落点——不排的话所有
+// 请求都打在按 provider+label 排序后的第一个号上。
+func (m *Manager) ExtList() []*ExtAccount { return m.SelectChatOrder(m.List()) }
 
 // ReplaceCred 导出 replaceCred（server 包 Qoder 桥接刷新后回写凭据）。
 func (m *Manager) ReplaceCred(provider, id string, cred json.RawMessage) {

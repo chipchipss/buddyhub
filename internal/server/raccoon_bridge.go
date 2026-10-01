@@ -49,12 +49,14 @@ func (h *Handler) raccoonChatStream(w http.ResponseWriter, r *http.Request, body
 		var cred raccoon.Credential
 		if json.Unmarshal(a.Cred, &cred) != nil {
 			lastErr = "凭据解析失败"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			continue
 		}
 		if cred.IsExpired() {
 			fresh, rerr := h.refreshRaccoonCred(r.Context(), a.ID, &cred)
 			if rerr != nil {
 				lastErr = rerr.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				log.Printf("raccoon-bridge: %s 续期失败: %v", a.ID, rerr)
 				continue
 			}
@@ -74,12 +76,15 @@ func (h *Handler) raccoonChatStream(w http.ResponseWriter, r *http.Request, body
 		}
 		if cerr != nil {
 			lastErr = cerr.Error()
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("raccoon-bridge: %s chat 失败: %v", a.ID, cerr)
 			continue
 		}
 
 		log.Printf("raccoon-bridge: acct=%s model=%s 建流成功", a.ID, bareModel)
 		h.forwardRaccoon(w, resp, body, bareModel)
+		// 上游 200 即算成功（流已建，后续是推帧）——清退避，这个号重新回到轮转
+		h.noteChat(a.Provider, a.ID, nil)
 		return true
 	}
 	h.lastRaccoonErr = lastErr

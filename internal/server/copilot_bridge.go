@@ -45,6 +45,7 @@ func (h *Handler) copilotChatStream(w http.ResponseWriter, r *http.Request, body
 		var cred copilot.Credential
 		if json.Unmarshal(a.Cred, &cred) != nil {
 			lastErr = "凭据解析失败"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			continue
 		}
 		// Copilot token 约 25 分钟过期：到期前自动用 GitHub token 续期；
@@ -53,6 +54,7 @@ func (h *Handler) copilotChatStream(w http.ResponseWriter, r *http.Request, body
 			fresh, err := copilot.Refresh(r.Context(), &cred)
 			if err != nil {
 				lastErr = err.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				log.Printf("copilot-bridge: %s 续期失败: %v", a.ID, err)
 				continue
 			}
@@ -65,6 +67,7 @@ func (h *Handler) copilotChatStream(w http.ResponseWriter, r *http.Request, body
 		resp, err := copilot.Chat(r.Context(), &cred, body)
 		if err != nil {
 			lastErr = err.Error()
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("copilot-bridge: %s chat 失败: %v", a.ID, err)
 			continue
 		}
@@ -75,6 +78,7 @@ func (h *Handler) copilotChatStream(w http.ResponseWriter, r *http.Request, body
 			fresh, rerr := copilot.Refresh(r.Context(), &cred)
 			if rerr != nil {
 				lastErr = rerr.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				log.Printf("copilot-bridge: %s 强制续期失败: %v", a.ID, rerr)
 				continue
 			}
@@ -85,6 +89,7 @@ func (h *Handler) copilotChatStream(w http.ResponseWriter, r *http.Request, body
 			resp, err = copilot.Chat(r.Context(), &cred, body)
 			if err != nil {
 				lastErr = err.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				continue
 			}
 		}
@@ -93,6 +98,7 @@ func (h *Handler) copilotChatStream(w http.ResponseWriter, r *http.Request, body
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			lastErr = "上游 HTTP " + strconv.Itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("copilot-bridge: %s 上游 %d: %s", a.ID, resp.StatusCode, shorten(string(raw), 200))
 			continue // 换下一个 Copilot 账号
 		}

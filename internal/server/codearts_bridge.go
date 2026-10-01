@@ -46,10 +46,12 @@ func (h *Handler) codeartsChatStream(w http.ResponseWriter, r *http.Request, bod
 		var cred codearts.Credential
 		if json.Unmarshal(a.Cred, &cred) != nil {
 			lastErr = "凭据解析失败"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			continue
 		}
 		if cred.AccessKeyID == "" || cred.SecretAccessKey == "" {
 			lastErr = "凭据缺少 AK/SK"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			continue
 		}
 
@@ -57,6 +59,7 @@ func (h *Handler) codeartsChatStream(w http.ResponseWriter, r *http.Request, bod
 		resp, cerr := cli.Chat(r.Context(), &cred, bareModel, body, stream, false)
 		if cerr != nil {
 			lastErr = cerr.Error()
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("codearts-bridge: %s chat 失败: %v", a.ID, cerr)
 			continue
 		}
@@ -64,6 +67,7 @@ func (h *Handler) codeartsChatStream(w http.ResponseWriter, r *http.Request, bod
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			lastErr = "上游 HTTP " + itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("codearts-bridge: %s 上游 %d: %s", a.ID, resp.StatusCode, shorten(string(raw), 200))
 			continue
 		}

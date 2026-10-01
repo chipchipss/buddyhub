@@ -45,6 +45,7 @@ func (h *Handler) clineChatStream(w http.ResponseWriter, r *http.Request, body [
 		var cred cline.Credential
 		if json.Unmarshal(a.Cred, &cred) != nil {
 			lastErr = "凭据解析失败"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			continue
 		}
 		if cred.NeedsRefresh() {
@@ -53,6 +54,7 @@ func (h *Handler) clineChatStream(w http.ResponseWriter, r *http.Request, body [
 			fresh, err := h.refreshClineCred(r.Context(), a.ID, &cred)
 			if err != nil {
 				lastErr = err.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				log.Printf("cline-bridge: %s 续期失败: %v", a.ID, err)
 				continue
 			}
@@ -62,6 +64,7 @@ func (h *Handler) clineChatStream(w http.ResponseWriter, r *http.Request, body [
 		resp, err := cline.Chat(r.Context(), &cred, body)
 		if err != nil {
 			lastErr = err.Error()
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("cline-bridge: %s chat 失败: %v", a.ID, err)
 			continue
 		}
@@ -72,12 +75,14 @@ func (h *Handler) clineChatStream(w http.ResponseWriter, r *http.Request, body [
 			fresh, rerr := h.refreshClineCred(r.Context(), a.ID, &cred)
 			if rerr != nil {
 				lastErr = rerr.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				continue
 			}
 			cred = *fresh
 			resp, err = cline.Chat(r.Context(), &cred, body)
 			if err != nil {
 				lastErr = err.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				continue
 			}
 		}
@@ -89,6 +94,7 @@ func (h *Handler) clineChatStream(w http.ResponseWriter, r *http.Request, body [
 			// 换号重试同样会 403——但这里仍换下一个账号试一次：
 			// 池里可能同时有免费池与订阅池账号，换号是有意义的。
 			lastErr = "上游 HTTP " + strconv.Itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("cline-bridge: %s 上游 %d: %s", a.ID, resp.StatusCode, shorten(string(raw), 200))
 			continue
 		}

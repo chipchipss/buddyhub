@@ -43,12 +43,14 @@ func (h *Handler) autoclawChatStream(w http.ResponseWriter, r *http.Request, bod
 		var cred autoclaw.Credential
 		if json.Unmarshal(a.Cred, &cred) != nil {
 			lastErr = "凭据解析失败"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			continue
 		}
 		if cred.NeedsRefresh() {
 			fresh, err := h.refreshAutoClawCred(r.Context(), a.ID, &cred)
 			if err != nil {
 				lastErr = err.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				log.Printf("autoclaw-bridge: %s 续期失败: %v", a.ID, err)
 				continue
 			}
@@ -58,6 +60,7 @@ func (h *Handler) autoclawChatStream(w http.ResponseWriter, r *http.Request, bod
 		resp, err := autoclaw.Chat(r.Context(), &cred, bareModel, body)
 		if err != nil {
 			lastErr = err.Error()
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("autoclaw-bridge: %s chat 失败: %v", a.ID, err)
 			continue
 		}
@@ -68,12 +71,14 @@ func (h *Handler) autoclawChatStream(w http.ResponseWriter, r *http.Request, bod
 			fresh, rerr := h.refreshAutoClawCred(r.Context(), a.ID, &cred)
 			if rerr != nil {
 				lastErr = rerr.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				continue
 			}
 			cred = *fresh
 			resp, err = autoclaw.Chat(r.Context(), &cred, bareModel, body)
 			if err != nil {
 				lastErr = err.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				continue
 			}
 		}
@@ -82,6 +87,7 @@ func (h *Handler) autoclawChatStream(w http.ResponseWriter, r *http.Request, bod
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			lastErr = "上游 HTTP " + strconv.Itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("autoclaw-bridge: %s 上游 %d: %s", a.ID, resp.StatusCode, shorten(string(raw), 200))
 			continue
 		}

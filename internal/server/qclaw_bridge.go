@@ -39,18 +39,21 @@ func (h *Handler) qclawChatStream(w http.ResponseWriter, r *http.Request, body [
 		var cred qclaw.Credential
 		if json.Unmarshal(a.Cred, &cred) != nil {
 			lastErr = "凭据解析失败"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			continue
 		}
 		// QClaw 的对话走建出来的 sk key（长期有效），JWT 只用于业务域；
 		// 没有 sk key 说明当初建 key 那步没成，直接跳过。
 		if cred.APIKey == "" {
 			lastErr = "账号缺少对话用的 sk key，请重新登录"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			continue
 		}
 
 		resp, err := qclaw.Chat(r.Context(), &cred, body)
 		if err != nil {
 			lastErr = err.Error()
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("qclaw-bridge: %s chat 失败: %v", a.ID, err)
 			continue
 		}
@@ -63,6 +66,7 @@ func (h *Handler) qclawChatStream(w http.ResponseWriter, r *http.Request, body [
 				resp, err = qclaw.Chat(r.Context(), &cred, body)
 				if err != nil {
 					lastErr = err.Error()
+					h.noteChat(a.Provider, a.ID, errOf(lastErr))
 					continue
 				}
 			}
@@ -72,12 +76,14 @@ func (h *Handler) qclawChatStream(w http.ResponseWriter, r *http.Request, body [
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			lastErr = "上游 HTTP " + strconv.Itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("qclaw-bridge: %s 上游 %d: %s", a.ID, resp.StatusCode, shorten(string(raw), 200))
 			continue
 		}
 
 		log.Printf("qclaw-bridge: acct=%s model=%s 建流成功", a.ID, bareModel)
 		h.passThroughQClaw(w, resp, h.clientWantsStream(body))
+		h.noteChat(a.Provider, a.ID, nil)
 		return true
 	}
 	h.lastQClawErr = lastErr

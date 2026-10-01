@@ -106,11 +106,13 @@ func (h *Handler) LoomyChatStream(w http.ResponseWriter, r *http.Request, body [
 				}
 				if err != nil {
 					lastErr = "session 失效，请在面板重新登录该 Loomy 账号"
+					h.noteChat(extstore.PLoomyCLI, acc.ExtID, errOf(lastErr))
 					log.Printf("loomy-bridge: %s session 失效 (HTTP %d)", acc.Label, status)
 					continue
 				}
 			} else {
 				lastErr = err.Error()
+				h.noteChat(extstore.PLoomyCLI, acc.ExtID, errOf(lastErr))
 				log.Printf("loomy-bridge: %s chat 失败 (HTTP %d): %v", acc.Label, status, err)
 				if status == http.StatusBadRequest || status == http.StatusNotFound || status == http.StatusUnprocessableEntity {
 					// 请求本身的问题，换号无意义
@@ -146,6 +148,9 @@ func (h *Handler) LoomyChatStream(w http.ResponseWriter, r *http.Request, body [
 				_, _ = w.Write(raw)
 			}
 		}
+		// session-file 兜底账号 ExtID 为空，上报会被 extstore 忽略——正确：
+		// 它不在外部账号表里，没有可冷却的对象。
+		h.noteChat(extstore.PLoomyCLI, acc.ExtID, nil)
 		return true
 	}
 	h.lastLoomyErr = lastErr

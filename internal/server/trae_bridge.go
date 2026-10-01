@@ -49,12 +49,14 @@ func (h *Handler) traeChatStream(w http.ResponseWriter, r *http.Request, body []
 		var cred trae.Credential
 		if json.Unmarshal(a.Cred, &cred) != nil {
 			lastErr = "凭据解析失败"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			continue
 		}
 		if cred.NeedsRefresh() {
 			fresh, rerr := h.refreshTraeCred(r.Context(), a.ID, &cred)
 			if rerr != nil {
 				lastErr = rerr.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				log.Printf("trae-bridge: %s 续期失败: %v", a.ID, rerr)
 				continue
 			}
@@ -65,6 +67,7 @@ func (h *Handler) traeChatStream(w http.ResponseWriter, r *http.Request, body []
 		resp, cerr := trae.Chat(r.Context(), &cred, outBody, true)
 		if cerr != nil {
 			lastErr = cerr.Error()
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("trae-bridge: %s chat 失败: %v", a.ID, cerr)
 			continue
 		}
@@ -77,6 +80,7 @@ func (h *Handler) traeChatStream(w http.ResponseWriter, r *http.Request, body []
 			}
 			if cerr != nil {
 				lastErr = cerr.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				continue
 			}
 		}
@@ -84,6 +88,7 @@ func (h *Handler) traeChatStream(w http.ResponseWriter, r *http.Request, body []
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			lastErr = "上游 HTTP " + strconv.Itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("trae-bridge: %s 上游 %d: %s", a.ID, resp.StatusCode, shorten(string(raw), 200))
 			continue
 		}

@@ -8,6 +8,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -41,6 +42,7 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 		var cred qoder.Credential
 		if json.Unmarshal(a.Cred, &cred) != nil {
 			lastErr = "凭据解析失败"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			continue
 		}
 		// 到期前自动续期；续期失败继续尝试下一个账号。
@@ -52,6 +54,10 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 				}
 			} else {
 				log.Printf("qoder-bridge: %s 续期失败: %v", a.ID, err)
+				// 此前这里**只 continue 不设 lastErr**：整轮失败时
+				// h.lastQoderErr 是空串，503 文案里看不到真实原因。
+				lastErr = "续期失败: " + err.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				continue
 			}
 		}
@@ -75,6 +81,7 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 			}
 			if err != nil {
 				lastErr = err.Error()
+				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				log.Printf("qoder-bridge: %s chat 失败 (HTTP %d): %v", a.ID, status, err)
 				continue // 换下一个 Qoder 账号
 			}
@@ -87,6 +94,7 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 		} else {
 			h.proxyQoderAggregate(w, rc)
 		}
+		h.noteChat(a.Provider, a.ID, nil)
 		return true
 	}
 	h.lastQoderErr = lastErr
@@ -143,10 +151,35 @@ func (h *Handler) proxyQoderAggregate(w http.ResponseWriter, rc io.ReadCloser) {
 // ExtManager Qoder 桥接需要的最小外部账号能力（main 注入实现）。
 type ExtManager interface {
 	ReplaceCred(provider, id string, cred json.RawMessage)
+	// NoteChatResult 上报一次对话结果，驱动外部账号的冷却/退避
+	//（extstore.SelectChatOrder 据此把失败的号退到队尾）。
+	NoteChatResult(provider, id string, err error)
 }
 
 // ExtSetManager 注入外部账号管理器（main 装配时调用；nil = Qoder 桥接禁用）。
 func (h *Handler) ExtSetManager(m ExtManager) { h.extManager = m }
+
+// noteChat 上报一次对话结果。
+//
+// 统一从这里走：桥接里散落 `if h.extManager != nil` 会漏掉（漏一次 = 那个号
+// 永远不进冷却，每次都白白撞），而裸用/测试场景没有管理器时静默忽略即可。
+func (h *Handler) noteChat(provider, id string, err error) {
+	if h.extManager == nil {
+		return
+	}
+	h.extManager.NoteChatResult(provider, id, err)
+}
+
+// errOf 把失败原因串转成 error。
+//
+// 桥接内部一直用字符串（最终要拼进 `h.lastXxxErr` 文案给用户看），而上报接口
+// 要 error——两者的形状差只在这一个转换点收口，不用改每个桥接的变量类型。
+func errOf(s string) error {
+	if s == "" {
+		return nil
+	}
+	return errors.New(s)
+}
 
 // qoderModelPrefix Qoder 路由前缀。
 const qoderModelPrefix = "qoder:"

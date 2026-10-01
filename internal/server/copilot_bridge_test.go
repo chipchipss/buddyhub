@@ -92,8 +92,9 @@ func (u *copilotUpstream) count(kind string) int {
 
 // fakeExtMgr 记录 ReplaceCred 回写（验证续期后凭据落库）。
 type fakeExtMgr struct {
-	mu   sync.Mutex
-	last map[string]json.RawMessage
+	mu    sync.Mutex
+	last  map[string]json.RawMessage
+	notes []noteRec
 }
 
 func (f *fakeExtMgr) ReplaceCred(provider, id string, cred json.RawMessage) {
@@ -103,6 +104,29 @@ func (f *fakeExtMgr) ReplaceCred(provider, id string, cred json.RawMessage) {
 		f.last = map[string]json.RawMessage{}
 	}
 	f.last[provider+"/"+id] = cred
+}
+
+// NoteChatResult 记录桥接上报的对话结果（供断言冷却/退避是否被触发）。
+func (f *fakeExtMgr) NoteChatResult(provider, id string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.notes = append(f.notes, noteRec{provider: provider, id: id, failed: err != nil})
+}
+
+// noteRec 一次上报的记录。
+type noteRec struct {
+	provider string
+	id       string
+	failed   bool
+}
+
+// noteRecords 返回已记录的上报（并发安全快照）。
+func (f *fakeExtMgr) noteRecords() []noteRec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]noteRec, len(f.notes))
+	copy(out, f.notes)
+	return out
 }
 
 // getRaw 取回写的原始凭据（各通道自解各家的 Credential 形状）。
