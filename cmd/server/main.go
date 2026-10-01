@@ -334,6 +334,8 @@ func main() {
 	// 外部积分账号每日自动签到（lobsterai/raccoon/qoder/codearts 全遍历 +
 	// Loomy 每日赠送额度，与「一键签到全部」同管线；签到均幂等，hook 返回
 	// 即执行，串行遍历有界耗时）。
+	// 外部平台余额：与腾讯池共用同一个 5 分钟 ticker（见 RunBalanceRefreshNow）
+	sch.SetBalanceExtHook(pn.RunExtBalanceRefresh)
 	sch.SetExtHook(func() {
 		go pn.RunExtCheckinAll()
 		go pn.RunLoomyDailyCheckin()

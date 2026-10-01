@@ -7,6 +7,7 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -321,4 +322,39 @@ func (p *Panel) saveLoomyLoginWithPassword(w http.ResponseWriter, r *http.Reques
 	}
 	log.Printf("panel: Loomy 账号已登录并保存 (%s)", res.Phone)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "userid": res.UserID})
+}
+
+// extBalanceLastLog 上一次打印的余额刷新摘要（去重用）。
+//
+// 这个任务跑在 5 分钟的 ticker 上——每次都打一行会在几小时内淹掉日志，
+// 而成功/失败计数不变时那些行没有新信息。
+var extBalanceLastLog string
+
+// RunExtBalanceRefresh 调度器余额刷新入口：把外部平台的余额也刷新一遍。
+//
+// 此前只有腾讯池每 5 分钟刷一次（scheduler.RunBalanceRefreshNow 只遍历
+// cfg.Pool），外部平台的余额是**打开面板时才按需拉**（StatusAll）——
+// 于是面板上显示的一直是上一次打开时的旧数。挂到同一个 ticker 上，
+// 不新增调度任务，也不改变语义（只刷新观测量，不签到、不续期）。
+func (p *Panel) RunExtBalanceRefresh() {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	views := p.extManager().StatusAll(ctx)
+	ok, bad := 0, 0
+	for _, v := range views {
+		if v == nil {
+			continue
+		}
+		if v.BalanceOK {
+			ok++
+		} else {
+			bad++
+		}
+	}
+	// 只在计数**变化**时打：成功每 5 分钟一条毫无信息量，失败重复打也只会
+	// 让真正要看的那条被淹没。
+	if summary := fmt.Sprintf("成功 %d · 失败 %d · 共 %d 账号", ok, bad, len(views)); summary != extBalanceLastLog {
+		extBalanceLastLog = summary
+		log.Printf("ext-balance 完成: %s", summary)
+	}
 }

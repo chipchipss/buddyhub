@@ -323,9 +323,17 @@ func (m *Manager) CheckinOne(ctx context.Context, a *ExtAccount) *CheckinResult 
 		// Cline 同样没有每日签到；凭据有效性由 ViewOne 续期验证。
 		res.Kind, res.Message = "inactive", "Cline 无需签到（网关直连通道）"
 	case PAutoClaw:
-		// AutoClaw 有每日签到（源实现在 userapi 域），但需额外的活动接口；
-		// 此处先只做凭据有效性验证，避免打未验证的端点。
-		res.Kind, res.Message = "inactive", "AutoClaw 无需签到（网关直连通道）"
+		// 每日签到走 userapi 域的「完成客户端任务」通用入口
+		// （`autoclaw-task-complete`，task_id=daily_signin）。判据不是 HTTP
+		// 状态码——上游恒回 200，要按 reward_points / already_completed 判，
+		// 见 autoclaw.CheckinDaily。
+		var cred autoclaw.Credential
+		if err := json.Unmarshal(a.Cred, &cred); err != nil {
+			res.Kind, res.Message = "failed", "凭据解析失败"
+			return res
+		}
+		r := autoclaw.CheckinDaily(ctx, &cred)
+		res.Kind, res.Credit, res.Message = r.Kind, r.Credit, r.Message
 	case PQClaw:
 		res.Kind, res.Message = "inactive", "QClaw 无需签到（网关直连通道）"
 	case PTrae:

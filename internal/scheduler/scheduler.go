@@ -64,6 +64,10 @@ type Config struct {
 	// ExtHook 外部积分账号签到回调（panel.extCheckinAll 同管线：遍历
 	// lobsterai/raccoon/qoder/codearts 全部账号执行各自签到/领取）。nil 时到点跳过。
 	ExtHook func()
+	// BalanceExtHook 外部积分账号的余额刷新回调（panel.RunExtBalanceRefresh）。
+	// 与上面的 ExtHook 不同：不签到、不续期，只让余额这个观测量保持新鲜；
+	// 挂在同一个 5 分钟 ticker 上，不新增调度任务。
+	BalanceExtHook func()
 }
 
 // Scheduler 调度器。
@@ -128,6 +132,13 @@ func (s *Scheduler) SetGrowthHook(fn func()) {
 func (s *Scheduler) SetExtHook(fn func()) {
 	s.schedMu.Lock()
 	s.cfg.ExtHook = fn
+	s.schedMu.Unlock()
+}
+
+// SetBalanceExtHook 挂载/替换外部平台余额刷新回调（与 SetExtHook 同批接线）。
+func (s *Scheduler) SetBalanceExtHook(fn func()) {
+	s.schedMu.Lock()
+	s.cfg.BalanceExtHook = fn
 	s.schedMu.Unlock()
 }
 
@@ -543,6 +554,15 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 		}(a, st.UID)
 	}
 	wg.Wait()
+
+	// 外部平台的余额此前只在打开面板时按需拉，不刷新的话面板显示的
+	// 一直是上一次打开时的旧数。挂同一个 ticker，不新增调度任务。
+	s.schedMu.Lock()
+	extFn := s.cfg.BalanceExtHook
+	s.schedMu.Unlock()
+	if extFn != nil {
+		extFn()
+	}
 }
 
 // StartBalanceRefresh 后台周期性余额刷新（独立 ticker goroutine，ctx 取消即停）。

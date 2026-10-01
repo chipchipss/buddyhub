@@ -563,3 +563,79 @@ func TestChatHeadersStripBearer(t *testing.T) {
 		t.Error("chat 域不该带 X-Harness-Type")
 	}
 }
+
+/* ── 每日签到 ──────────────────────────────────────────────────── */
+
+// 上游恒回 HTTP 200，判「本次真领到」只能看 reward_points / already_completed。
+// 把「今天已领过」记成成功会虚报积分——这是签到最核心的语义。
+func TestCheckinDailyJudgement(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		wantKind string
+		wantCr   float64
+	}{
+		{"真领到", `{"code":0,"data":{"reward_points":30,"success":true,"already_completed":false}}`, "claimed", 30},
+		{"已领过", `{"code":0,"data":{"reward_points":0,"success":false,"already_completed":true}}`, "already-claimed", 0},
+		{"success 但已领过", `{"code":0,"data":{"reward_points":0,"success":true,"already_completed":true}}`, "already-claimed", 0},
+		{"什么都没发生", `{"code":0,"data":{"reward_points":0,"success":false,"already_completed":false}}`, "failed", 0},
+		{"业务错误", `{"code":631002,"msg":"当前版本已停止服务，请前往官网下载最新版"}`, "failed", 0},
+	}
+	for _, c := range cases {
+		withMock(t, func(w http.ResponseWriter, r *http.Request) {
+			if !strings.Contains(r.URL.Path, "/autoclaw-task-complete") {
+				t.Errorf("打错路径了: %s", r.URL.Path)
+			}
+			// 直接写原文：writeJSON 会把字符串再编码一层（生成 JSON 字符串而非对象）
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, c.body)
+		})
+		got := CheckinDaily(context.Background(), &Credential{Region: RegionCN, Token: "at-1"})
+		if got.Kind != c.wantKind {
+			t.Errorf("%s: Kind = %q，期望 %q（msg=%s）", c.name, got.Kind, c.wantKind, got.Message)
+		}
+		if got.Credit != c.wantCr {
+			t.Errorf("%s: Credit = %v，期望 %v", c.name, got.Credit, c.wantCr)
+		}
+	}
+}
+
+// 走的是 userapi 签名头那一套（与积分/刷新同源），且 task_id 字段只此一个。
+func TestCheckinDailyUsesSignedHeaders(t *testing.T) {
+	var seenBody, seenSign string
+	withMock(t, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		seenBody = string(b)
+		seenSign = r.Header.Get("X-Auth-Sign")
+		_, _ = io.WriteString(w, `{"code":0,"data":{"reward_points":10,"success":true,"already_completed":false}}`)
+	})
+	got := CheckinDaily(context.Background(), &Credential{Region: RegionCN, Token: "at-1"})
+	if got.Kind != "claimed" {
+		t.Fatalf("Kind = %q: %s", got.Kind, got.Message)
+	}
+	if seenSign == "" {
+		t.Fatal("缺 X-Auth-Sign（会被上游判 400002 签名校验失败）")
+	}
+	if !strings.Contains(seenBody, `"task_id":"daily_signin"`) {
+		t.Errorf("请求体不对: %s", seenBody)
+	}
+	// 通用任务入口，请求体只有 task_id 一个字段
+	var doc map[string]any
+	if json.Unmarshal([]byte(seenBody), &doc) != nil || len(doc) != 1 {
+		t.Errorf("请求体应只有一个字段: %s", seenBody)
+	}
+}
+
+// 缺 token 时本地就拦掉，不打上游（打出去也是 401）。
+func TestCheckinDailyWithoutToken(t *testing.T) {
+	withMock(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("缺 token 不该发出请求")
+	})
+	got := CheckinDaily(context.Background(), &Credential{Region: RegionCN})
+	if got.Kind != "failed" {
+		t.Fatalf("Kind = %q", got.Kind)
+	}
+	if !strings.Contains(got.Message, "token") {
+		t.Errorf("错误信息要指明原因: %s", got.Message)
+	}
+}

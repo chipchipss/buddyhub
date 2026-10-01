@@ -69,7 +69,7 @@ var platforms = []Platform{
 	{ID: "cline", Name: "Cline", Group: GroupGateway, Prefix: "cline:", Login: LoginCode,
 		Note: "含免费池，无需订阅"},
 	{ID: "autoclaw", Name: "AutoClaw（智谱）", Group: GroupGateway, Prefix: "autoclaw:", Login: LoginSMS,
-		Note: "手机号登录（国内版）"},
+		Checkin: true, Note: "手机号登录（国内版）"},
 	{ID: "qoder", Name: "Qoder（阿里）", Group: GroupGateway, Prefix: "qoder:", Login: LoginDevice,
 		Checkin: true, Note: "设备授权登录"},
 	{ID: "qclaw", Name: "QClaw（腾讯）", Group: GroupGateway, Prefix: "qclaw:", Login: LoginQR,
