@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,7 +58,23 @@ func (h *Handler) autoclawChatStream(w http.ResponseWriter, r *http.Request, bod
 			cred = *fresh
 		}
 
-		resp, err := autoclaw.Chat(r.Context(), &cred, bareModel, body)
+		// 上游 2026-09-22 起有 system 提示词闸门：system 必须以 OpenClaw 身份句
+		// 开头且带 ## Tooling 段，否则 **406 空响应体**（客户端发的通用提示词
+		// 正好命中）。出站前规范化：前置身份句 + 改写外来身份句，见 prompt.go。
+		outBody := autoclaw.NormalizePrompt(body)
+		if debugOut := os.Getenv("AUTOCLAW_DEBUG_BODY"); debugOut != "" {
+			log.Printf("autoclaw-bridge: 出站体（前 600 字节）: %s", string(outBody[:min(600, len(outBody))]))
+		}
+
+		// 上游有两个模型标识（autoclaw.Chat 注释）：
+		//   X-Request-Model = 带前缀路由 ID（zai_glm-5.3-flash）
+		//   body.model      = 剥前缀模型 ID（glm-5.3-flash）
+		// bareModel 已剥掉 autoclaw: 前缀、剩路由 ID（zai_glm-5.3-flash），
+		// 直接作 X-Request-Model；body.model 用再剥一层的裸名。
+		bodyModel := autoclaw.StripRoutePrefix(bareModel)
+		outBody = rewriteModel(outBody, bodyModel)
+
+		resp, err := autoclaw.Chat(r.Context(), &cred, bareModel, outBody)
 		if err != nil {
 			lastErr = err.Error()
 			h.noteChat(a.Provider, a.ID, errOf(lastErr))
@@ -75,7 +92,7 @@ func (h *Handler) autoclawChatStream(w http.ResponseWriter, r *http.Request, bod
 				continue
 			}
 			cred = *fresh
-			resp, err = autoclaw.Chat(r.Context(), &cred, bareModel, body)
+			resp, err = autoclaw.Chat(r.Context(), &cred, bareModel, outBody)
 			if err != nil {
 				lastErr = err.Error()
 				h.noteChat(a.Provider, a.ID, errOf(lastErr))
@@ -87,6 +104,12 @@ func (h *Handler) autoclawChatStream(w http.ResponseWriter, r *http.Request, bod
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			lastErr = "上游 HTTP " + strconv.Itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
+			// 406 空响应体 = system 提示词闸门拒收（上游连错误体都不给）。
+			// 理论上 NormalizePrompt 已覆盖，走到这里说明出现了黑名单漏网的
+			// 新身份句——提示用户两条当场能做的路，别让人对着空 406 猜。
+			if resp.StatusCode == http.StatusNotAcceptable && strings.TrimSpace(string(raw)) == "" {
+				lastErr += "（上游 system 提示词闸门拒收：客户端身份句可能不在已覆盖指纹内；可在网关设置把系统提示词切到「替换」模式绕过）"
+			}
 			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("autoclaw-bridge: %s 上游 %d: %s", a.ID, resp.StatusCode, shorten(string(raw), 200))
 			continue
@@ -230,3 +253,11 @@ const autoclawModelPrefix = "autoclaw:"
 
 // isAutoClawModel 判断裸模型名是否请求 AutoClaw 通道。
 func isAutoClawModel(bare string) bool { return strings.HasPrefix(bare, autoclawModelPrefix) }
+
+// min 取小值（调试日志用）。
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

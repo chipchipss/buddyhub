@@ -53,6 +53,8 @@ const (
 	PAccio = "accio"
 	// PTraeWork TraeWork（字节 TRAE SOLO CN；粘贴客户端凭据入池）。
 	PTraeWork = "traework"
+	// PIMA 腾讯 ima.copilot（AI 知识管家；浏览器 Cookie 入池）。
+	PIMA = "ima"
 )
 
 // ExtAccount 一个外部平台账号。

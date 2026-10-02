@@ -144,6 +144,7 @@ type Handler struct {
 	lastAccioErr    string
 	lastTraeWorkErr string
 	lastRaccoonErr  string
+	lastIMAErr      string
 	lastCodeArtsErr string
 
 	// clineFlights / autoclawFlights 续期单飞表。
@@ -480,6 +481,21 @@ func (h *Handler) modelList() []map[string]any {
 				}
 			}
 			out = append(out, entry)
+		}
+	}
+	// ima 模型名单（ima: 前缀）：静态清单，有账号才列。
+	if h.cfg.ExtAccounts != nil {
+		for _, a := range h.cfg.ExtAccounts() {
+			if a.Provider == extstore.PIMA && !a.Disabled {
+				for _, m := range imaCatalog() {
+					out = append(out, map[string]any{
+						"id": imaModelPrefix + m.Name, "object": "model",
+						"created": 1753600000, "owned_by": "ima",
+						"description": m.Desc,
+					})
+				}
+				break
+			}
 		}
 	}
 	// Codex 订阅池：本机有有效登录时列出。

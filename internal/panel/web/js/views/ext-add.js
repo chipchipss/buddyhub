@@ -126,6 +126,13 @@ const FORMS = {
     ],
     tip: '华为云 AK/SK：永久密钥留空 Security Token 即可；临时 STS 凭据才需要填（几小时就过期，不建议入池）。',
   },
+  ima: {
+    fields: [
+      { k: 'cookie', label: 'x-ima-cookie（完整值）', required: true },
+      { k: 'user_id', label: 'IMA-UID（可选，展示用）' },
+    ],
+    tip: '打开 ima.qq.com 并登录 → F12 → Network → 随便发一条消息 → 找 /cgi-bin/assistant/qa 请求 → 复制请求头 x-ima-cookie 的完整值粘贴到这里（须含 IMA-TOKEN）。',
+  },
 };
 
 // 注册表 login kind → 交互描述。返回 null 表示「只需手填凭据」。

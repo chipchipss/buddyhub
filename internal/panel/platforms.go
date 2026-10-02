@@ -85,6 +85,8 @@ var platforms = []Platform{
 
 	{ID: "codearts", Name: "CodeArts（华为云）", Group: GroupGateway, Prefix: "codearts:", Login: LoginManual,
 		Checkin: true, Note: "永久 AK/SK（建议）"},
+	{ID: "ima", Name: "ima（腾讯知识管家）", Group: GroupGateway, Prefix: "ima:", Login: LoginManual,
+		Note: "浏览器 F12 复制 x-ima-cookie"},
 
 	// ── 积分 / 签到平台（无对话 API）──
 	{ID: "loomy-cli", Name: "Loomy（讯飞，密钥/短信）", Group: GroupPoints, Login: LoginManual,

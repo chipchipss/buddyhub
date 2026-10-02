@@ -57,3 +57,9 @@ usage.json
 # 运行时日志（若误在仓库根起服务会产生）
 /server.log
 /server.err.log
+
+# 参考仓库 / 调研产物（外来项目，不属于本仓库）
+/ima2api/
+/marvis2api/
+/tencent-ima-copilot-mcp/
+/refs/

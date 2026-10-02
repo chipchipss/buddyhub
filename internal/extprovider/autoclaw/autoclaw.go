@@ -578,8 +578,24 @@ func ListModels(ctx context.Context, region Region, token string) ([]Model, erro
 /* ── 对话 ────────────────────────────────────────────────────── */
 
 // Chat 发起对话（OpenAI 协议，SSE 为裸 chunk 帧，调用方直接透传）。
+// Chat 发一次对话。
+//
+// ⚠️ 上游有**两个模型标识**（models.rs 的 ModelRoute，实测踩过的坑）：
+//
+//	model      参数 = **带前缀的路由 ID**（如 `zai_glm-5.3-flash`）→ 发进
+//	            `X-Request-Model` 请求头（上游靠它选路由/计费通道）
+//	body.model      = **剥掉前缀后的模型 ID**（如 `glm-5.3-flash`）→ 上游用它选型
+//
+// 两个都填剥前缀的名字时（我们此前就是），上游在路由表里查不到
+// `X-Request-Model`，回 406 空响应体。前缀剥离规则：`zaicoding_` 必须先于
+// `zai_` 尝试——反过来会把 `zaicoding_glm-5.3` 错剥成 `coding_glm-5.3`。
+// body 里已经是裸名的（桥接已剥）就保持原样——幂等。
 func Chat(ctx context.Context, cred *Credential, model string, body []byte) (*http.Response, error) {
 	region := ParseRegion(string(cred.Region))
+	bodyModel := StripRoutePrefix(model)
+	if bm := bodyModelField(body); bm != "" {
+		bodyModel = bm // body 已带 model 字段时以它为准（调用方已写好）
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, region.ChatBase(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -587,7 +603,32 @@ func Chat(ctx context.Context, cred *Credential, model string, body []byte) (*ht
 	for k, v := range chatHeaders(cred.Token, model) {
 		req.Header.Set(k, v)
 	}
+	_ = bodyModel // body.model 由调用方（bridge）负责写入；见 StripRoutePrefix
 	return httpClient.Do(req)
+}
+
+// StripRoutePrefix 剥路由前缀（zaicoding_ 先于 zai_）。
+//
+// 导出给桥接：桥接从 `autoclaw:<routeId>` 剥掉 `autoclaw:` 后，
+// 还要把 `<routeId>` 拆成 (routeId, bodyModelId) 两个标识。
+func StripRoutePrefix(routeID string) string {
+	for _, prefix := range []string{"zaicoding_", "zai_"} {
+		if rest, ok := strings.CutPrefix(routeID, prefix); ok {
+			return rest
+		}
+	}
+	return routeID
+}
+
+// bodyModelField 读 body 里的 model 字段（诊断用）。
+func bodyModelField(body []byte) string {
+	var probe struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(body, &probe) != nil {
+		return ""
+	}
+	return probe.Model
 }
 
 /* ── 小工具 ──────────────────────────────────────────────────── */

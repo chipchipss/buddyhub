@@ -211,6 +211,20 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		return bridgeOutcome{matched: true, code: "no_traework_account", detail: detail, lastErr: h.lastTraeWorkErr}
 	}
 
+	// ima 直连通道（ima: 前缀模型）：会话式协议（先 init_session 再问答），
+	// 自定义 SSE，事件名全大写——两侧都要转换，见 ima_bridge.go。
+	// 桥接自己剥 ima: 前缀（模型清单查询需要完整名字）。
+	if isIMAModel(bareModel) {
+		if h.imaBridgeChatStream(w, r, body, bareModel) {
+			return bridgeOutcome{matched: true, served: true}
+		}
+		detail := "没有可用的 ima 账号（面板-添加账号-外部平台-ima 粘贴 Cookie 后重试）"
+		if h.lastIMAErr != "" {
+			detail += "；最近失败原因: " + h.lastIMAErr
+		}
+		return bridgeOutcome{matched: true, code: "no_ima_account", detail: detail, lastErr: h.lastIMAErr}
+	}
+
 	// Codex 订阅池直连（codex: 前缀）：本机 ~/.codex* 凭据 + Responses API。
 	if isCodexModel(bareModel) {
 		cm := strings.TrimPrefix(bareModel, codexModelPrefix)
