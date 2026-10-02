@@ -20,6 +20,21 @@ package codearts
 // 而区域 API 那套（signRequestHuawei）恒签 host。照抄任意一套到另一条链路，
 // 得到的都是稳定 401 `verify ak sk signature fail`，且**因为没有账号无法端到端
 // 验证**，只能靠官方向量的黄金测试兜底（见 signChatGoldenTest）。
+//
+// ── 两条模型通道（agent / benefit）──────────────────────────────
+// 上游模型分两条计费通道，签名头集合**不同**（实测 + 参考项目实证）：
+//
+//   - agent 通道（老套餐模型，如 openpangu-2.0-pro / GLM-5.2）：签名头不含
+//     model-id / model-name / x-model-id 三头，模型名只走 body。
+//   - benefit 通道（免费额度模型，如 deepseek-v4-flash-0731）：body 带
+//     maas_type=benefit，且三模型头**必须参与签名**——缺了报 "model is not
+//     registered"；agent 模型带三头反而报 "unsupported model"。
+//
+// 通路由模型名决定（IsBenefitModel：兜底目录里的 benefit 模型 + 未知新模型
+// 保守按 benefit），见 BuildChatRequest 的 ChatOptions。
+//
+// 模型目录：`/v1/model/builtin` 与 AgentCenter 的 useragents GET 对本凭据都
+// 401（永久 AK/SK 拉不到），ListModels 因此走兜底名单 FallbackModels。
 import (
 	"bytes"
 	"context"
@@ -28,7 +43,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -57,6 +71,19 @@ type ChatHeaderProfile struct {
 	SessionID string
 }
 
+// ChatOptions 一次对话的通道选择（见包注释「两条通道」）。
+//
+// Benefit=true 时出站体注入 maas_type=benefit，且三个模型头（model-id /
+// model-name / x-model-id）必须**参与签名**——上游缺这三个头就报
+// "model is not registered"。Agent 通道的模型名走普通路径即可，签名头
+// 集合与 Benefit 不同（Benefit 头在签名前就要注入）。
+type ChatOptions struct {
+	// Benefit 走免费额度通道（签到领取的模型族）。
+	Benefit bool
+	// 模型名透传给上游 model-id/model-name/x-model-id 三头。
+	Model string
+}
+
 // DefaultChatProfile 默认指纹档（与参考实现 HeaderProfile::default 一致）。
 func DefaultChatProfile() ChatHeaderProfile {
 	return ChatHeaderProfile{
@@ -68,9 +95,13 @@ func DefaultChatProfile() ChatHeaderProfile {
 
 // headers 构造参与签名的客户端指纹头。
 //
-// **三个模型头少一个都不行**（model-id / model-name / x-model-id），上游把模型名
-// 也当请求头用——漏了不会 404，只会被判成"没这个模型"。
-func (p ChatHeaderProfile) headers(model string) map[string]string {
+// 三个模型头（model-id / model-name / x-model-id）**是否参与签名**由
+// benefit 决定：
+//   - benefit 通道（免费模型）：三个模型头**必须**进签名——上游缺它们就报
+//     "model is not registered"（参考项目 BENEFIT_MODELS 实测）。
+//   - agent 通道（老套餐模型）：模型名只走 body，不进签名；强行带上这三个
+//     头反而会被判 "unsupported model"（参考项目两条通道严格区分的原因）。
+func (p ChatHeaderProfile) headers(model string, benefit bool) map[string]string {
 	h := map[string]string{
 		"Content-Type":   "application/json",
 		"Accept":         "text/event-stream",
@@ -79,9 +110,6 @@ func (p ChatHeaderProfile) headers(model string) map[string]string {
 		"X-Language":     p.Language,
 		"plugin-name":    p.PluginName,
 		"plugin-version": p.PluginVersion,
-		"model-id":       model,
-		"model-name":     model,
-		"x-model-id":     model,
 	}
 	if p.IsConfidential {
 		h["is_confidential"] = "true"
@@ -90,6 +118,12 @@ func (p ChatHeaderProfile) headers(model string) map[string]string {
 	}
 	if p.SessionID != "" {
 		h["User-Session-Id"] = p.SessionID
+	}
+	if benefit {
+		// benefit 通道：模型三头进签名 + maas_type 走 body（BuildChatRequest 注入）。
+		h["model-id"] = model
+		h["model-name"] = model
+		h["x-model-id"] = model
 	}
 	return h
 }
@@ -181,9 +215,10 @@ func signChatCanonical(method, uri, query string, headers map[string]string,
 
 // BuildChatRequest 组装一次出站对话请求（端点 + 头 + 体）。
 //
-// `model` 是**上游模型名**（前缀剥掉后的裸名）；`benefit` 给福利模型注入
-// `maas_type: benefit`（普通模型带了反而会被判成"没领福利"）。
-func BuildChatRequest(cred *Credential, model string, payload []byte, stream bool, benefit bool) (string, map[string]string, []byte, error) {
+// `model` 是**上游模型名**（前缀剥掉后的裸名）。opts.Benefit 决定通道：
+// 免费模型注入 `maas_type: benefit` 并把模型三头纳入签名（见 headers 注释）；
+// 普通模型一律按 agent 通道签（带 benefit 头反而 "unsupported model"）。
+func BuildChatRequest(cred *Credential, model string, payload []byte, stream bool, opts ChatOptions) (string, map[string]string, []byte, error) {
 	if model == "" {
 		return "", nil, nil, fmt.Errorf("CodeArts 模型名为空")
 	}
@@ -197,7 +232,7 @@ func BuildChatRequest(cred *Credential, model string, payload []byte, stream boo
 		// 不要求就不给 usage（上游要被点名才会带）
 		doc["stream_options"] = map[string]any{"include_usage": true}
 	}
-	if benefit {
+	if opts.Benefit {
 		doc["maas_type"] = "benefit"
 	}
 	body, err := json.Marshal(doc)
@@ -207,7 +242,7 @@ func BuildChatRequest(cred *Credential, model string, payload []byte, stream boo
 
 	endpoint := SnapEngineURL + ChatPath
 	profile := DefaultChatProfile()
-	signed, err := signChat(cred, http.MethodPost, endpoint, body, profile.headers(model))
+	signed, err := signChat(cred, http.MethodPost, endpoint, body, profile.headers(model, opts.Benefit))
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -216,8 +251,8 @@ func BuildChatRequest(cred *Credential, model string, payload []byte, stream boo
 
 // Chat 发一次对话，返回上游原始响应（SSE 或 JSON，由 body 的 stream 决定）。
 // 返回的 resp 由调用方 Close。
-func (c *Client) Chat(ctx context.Context, cred *Credential, model string, payload []byte, stream, benefit bool) (*http.Response, error) {
-	endpoint, headers, body, err := BuildChatRequest(cred, model, payload, stream, benefit)
+func (c *Client) Chat(ctx context.Context, cred *Credential, model string, payload []byte, stream bool, opts ChatOptions) (*http.Response, error) {
+	endpoint, headers, body, err := BuildChatRequest(cred, model, payload, stream, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -235,39 +270,52 @@ func (c *Client) Chat(ctx context.Context, cred *Credential, model string, paylo
 	return resp, nil
 }
 
-// ListModels 拉模型目录（签名 GET，同样不签 host）。
-func (c *Client) ListModels(ctx context.Context, cred *Credential) ([]Model, error) {
-	endpoint := SnapEngineURL + ModelsPath
-	headers := map[string]string{"Accept": "application/json"}
-	signed, err := signChat(cred, http.MethodGet, endpoint, nil, headers)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range signed {
-		req.Header.Set(k, v)
-	}
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("模型目录请求失败：%w", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("模型目录 HTTP %d：%s", resp.StatusCode, truncate(raw, 200))
-	}
-	return parseModels(raw), nil
-}
-
 // Model 目录条目。
 type Model struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Benefit bool   `json:"benefit"` // 免费额度模型（走 benefit 签名通道）
 }
 
+// FallbackModels 兜底模型目录（云端同步失败时，/v1/models 至少能列出这些）。
+// 与参考项目 FALLBACK_AGENT_MODELS + BENEFIT_MODELS 一致。
+var FallbackModels = []Model{
+	{ID: "openpangu-2.0-pro", Name: "openpangu-2.0-pro"},
+	{ID: "openpangu-2.0-flash", Name: "openpangu-2.0-flash"},
+	{ID: "GLM-5.2", Name: "GLM-5.2"},
+	{ID: "deepseek-v4-flash-0731", Name: "deepseek-v4-flash-0731", Benefit: true},
+	{ID: "deepseek-v4-pro-0813", Name: "deepseek-v4-pro-0813", Benefit: true},
+	{ID: "glm-5.3-flash", Name: "glm-5.3-flash", Benefit: true},
+}
+
+// IsBenefitModel 该裸模型名是否走 benefit 通道（免费额度模型）。
+// 未知模型名默认按 benefit 处理——参考项目同款判据：agent 通道模型会显式
+// 出现在 AgentCenter 目录里，没见过的名字（多为新增免费模型）一律按
+// benefit 头签名，否则上游报 "model is not registered"。
+func IsBenefitModel(bare string) bool {
+	for _, m := range FallbackModels {
+		if m.ID == bare {
+			return m.Benefit
+		}
+	}
+	// 兜底名单里没有 = 未验证过的新模型，按 benefit 处理（参考项目同款保守判据）。
+	return true
+}
+
+// ListModels 拉模型目录。
+//
+// 实测（本机永久 AK/SK）：`/v1/model/builtin` 与 AgentCenter 的 useragents
+// GET 端点都 401——签名口径与 chat 不同，且服务端对这两个 GET 端点的校验更严，
+// 永久 AK/SK 拉不到。因此目录改走**兜底名单**（FallbackModels），保证
+// /v1/models 与 benefit 路由判断永远有可用集合；等上游 GET 端点对该凭据放行
+// 后，可在下面加回云端同步（parseModels 已备好）。
+func (c *Client) ListModels(ctx context.Context, cred *Credential) ([]Model, error) {
+	_ = ctx
+	_ = cred
+	return FallbackModels, nil
+}
+
+// parseModels 保留：上游端点恢复后可直接复用。
 func parseModels(raw []byte) []Model {
 	var doc struct {
 		Models []struct {

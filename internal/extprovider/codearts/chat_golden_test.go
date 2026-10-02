@@ -97,3 +97,41 @@ func TestSignChatAddsDateAndTokenWithoutHost(t *testing.T) {
 	}
 	_ = in
 }
+
+// TestSignChatAgentChannelNoModelHeaders 两条通道的签名头集合必须**不同**：
+// agent 通道（老套餐模型）不含 model-id 三头，benefit 通道（免费模型）必须含。
+// 这是「踩空后表现很像没权限」的坑——漏三头上游报 "model is not registered"，
+// 老套餐模型带三头反而 "unsupported model"（参考项目两条通道严格区分的实证）。
+func TestSignChatAgentChannelNoModelHeaders(t *testing.T) {
+	agent := DefaultChatProfile().headers("openpangu-2.0-pro", false)
+	for _, k := range []string{"model-id", "model-name", "x-model-id"} {
+		if _, ok := agent[k]; ok {
+			t.Errorf("agent 通道签名头集合不该含 %s（会触发 unsupported model）: %+v", k, agent)
+		}
+	}
+	benefit := DefaultChatProfile().headers("deepseek-v4-flash-0731", true)
+	for _, k := range []string{"model-id", "model-name", "x-model-id"} {
+		if v, ok := benefit[k]; !ok || v != "deepseek-v4-flash-0731" {
+			t.Errorf("benefit 通道必须把 %s 签进去且值等于模型名，实际: %+v", k, benefit)
+		}
+	}
+}
+
+// TestIsBenefitModelRouting 兜底目录里的免费模型判 benefit，老套餐判 agent；
+// 未知新模型名保守按 benefit（与参考项目 AGENT_MODELS 判据一致）。
+func TestIsBenefitModelRouting(t *testing.T) {
+	cases := map[string]bool{
+		"openpangu-2.0-pro":    false,
+		"openpangu-2.0-flash":  false,
+		"GLM-5.2":              false,
+		"deepseek-v4-flash-0731": true,
+		"deepseek-v4-pro-0813": true,
+		"glm-5.3-flash":        true,
+		"never-seen-model-x":   true,
+	}
+	for name, want := range cases {
+		if got := IsBenefitModel(name); got != want {
+			t.Errorf("IsBenefitModel(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

@@ -56,7 +56,7 @@ func (h *Handler) codeartsChatStream(w http.ResponseWriter, r *http.Request, bod
 		}
 
 		stream := h.clientWantsStream(body)
-		resp, cerr := cli.Chat(r.Context(), &cred, bareModel, body, stream, false)
+		resp, cerr := cli.Chat(r.Context(), &cred, bareModel, body, stream, codearts.ChatOptions{Benefit: codearts.IsBenefitModel(bareModel)})
 		if cerr != nil {
 			lastErr = cerr.Error()
 			h.noteChat(a.Provider, a.ID, errOf(lastErr))
