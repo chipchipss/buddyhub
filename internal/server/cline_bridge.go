@@ -94,6 +94,13 @@ func (h *Handler) clineChatStream(w http.ResponseWriter, r *http.Request, body [
 			// 换号重试同样会 403——但这里仍换下一个账号试一次：
 			// 池里可能同时有免费池与订阅池账号，换号是有意义的。
 			lastErr = "上游 HTTP " + strconv.Itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
+			// free 池的部分模型（deepseek-v4.1-flash 实测）对很小的 max_tokens
+			// 会内部失败并回 500 "empty response content"——上游模型层的怪癖，
+			// 不是账号问题。给用户一条当场能做的提示（调大 max_tokens 或去掉它）。
+			if resp.StatusCode == http.StatusInternalServerError &&
+				strings.Contains(string(raw), "empty response content") {
+				lastErr += "（free 池该模型对过小的 max_tokens 会内部失败：调大 max_tokens（如 300+）或不传该字段）"
+			}
 			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("cline-bridge: %s 上游 %d: %s", a.ID, resp.StatusCode, shorten(string(raw), 200))
 			continue

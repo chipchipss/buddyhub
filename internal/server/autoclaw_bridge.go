@@ -104,11 +104,15 @@ func (h *Handler) autoclawChatStream(w http.ResponseWriter, r *http.Request, bod
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			lastErr = "上游 HTTP " + strconv.Itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
-			// 406 空响应体 = system 提示词闸门拒收（上游连错误体都不给）。
-			// 理论上 NormalizePrompt 已覆盖，走到这里说明出现了黑名单漏网的
-			// 新身份句——提示用户两条当场能做的路，别让人对着空 406 猜。
+			// 406 空响应体的两层归因（实测排查结论，2026-10-02）：
+			//   1. system 提示词闸门——NormalizePrompt 已自动前置身份句，理论已覆盖；
+			//   2. **账号无对话权限**——JWT 里 power=0 的账号即便请求形状完全正确
+			//     （身份句 + Tooling 段 + 官方头集合 + 合法路由 ID）也恒 406。
+			//     判据：非法模型名回 400「非法模型」（能走到模型校验），
+			//     合法模型名反而 406——卡在模型校验之后的权限层。
+			// 用户能做的：手机号重新登录（上游可能重新评估权限）或换国际版账号。
 			if resp.StatusCode == http.StatusNotAcceptable && strings.TrimSpace(string(raw)) == "" {
-				lastErr += "（上游 system 提示词闸门拒收：客户端身份句可能不在已覆盖指纹内；可在网关设置把系统提示词切到「替换」模式绕过）"
+				lastErr += "（上游 406 空响应：可能是 system 提示词指纹未覆盖，或该账号无对话权限——JWT power=0 的账号实测恒 406；可重新登录后重试，或到 AutoClaw 客户端确认账号可用）"
 			}
 			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("autoclaw-bridge: %s 上游 %d: %s", a.ID, resp.StatusCode, shorten(string(raw), 200))
