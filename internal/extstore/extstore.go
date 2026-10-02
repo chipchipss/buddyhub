@@ -55,6 +55,8 @@ const (
 	PTraeWork = "traework"
 	// PIMA 腾讯 ima.copilot（AI 知识管家；浏览器 Cookie 入池）。
 	PIMA = "ima"
+	// PMarvis 腾讯 Marvis（马维斯，操作系统级 AI 助手；客户端抓包凭据入池）。
+	PMarvis = "marvis"
 )
 
 // ExtAccount 一个外部平台账号。

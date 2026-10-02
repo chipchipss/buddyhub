@@ -87,6 +87,8 @@ var platforms = []Platform{
 		Checkin: true, Note: "永久 AK/SK（建议）"},
 	{ID: "ima", Name: "ima（腾讯知识管家）", Group: GroupGateway, Prefix: "ima:", Login: LoginManual,
 		Note: "浏览器 F12 复制 x-ima-cookie"},
+	{ID: "marvis", Name: "Marvis（马维斯）", Group: GroupGateway, Prefix: "marvis:", Login: LoginManual,
+		Note: "从已登录客户端抓包：mv_ token / openid / device_guid"},
 
 	// ── 积分 / 签到平台（无对话 API）──
 	{ID: "loomy-cli", Name: "Loomy（讯飞，密钥/短信）", Group: GroupPoints, Login: LoginManual,

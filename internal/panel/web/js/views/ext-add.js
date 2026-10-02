@@ -133,6 +133,15 @@ const FORMS = {
     ],
     tip: '打开 ima.qq.com 并登录 → F12 → Network → 随便发一条消息 → 找 /cgi-bin/assistant/qa 请求 → 复制请求头 x-ima-cookie 的完整值粘贴到这里（须含 IMA-TOKEN）。',
   },
+  marvis: {
+    fields: [
+      { k: 'access_token', label: 'Ual-Access-Access-Token（mv_ token）', required: true },
+      { k: 'openid', label: 'Ual-Access-Openid', required: true },
+      { k: 'device_guid', label: 'Ual-Access-Guid（设备 GUID）', required: true },
+      { k: 'login_type', label: 'Ual-Access-Login-Type（如 6）' },
+    ],
+    tip: '从已登录的 Marvis 客户端抓包：Fiddler/mitmproxy 代理后随便发一条消息，复制请求头 Ual-Access-Access-Token / Ual-Access-Openid / Ual-Access-Guid 三个值。token 过期需重新抓。',
+  },
 };
 
 // 注册表 login kind → 交互描述。返回 null 表示「只需手填凭据」。

@@ -145,6 +145,7 @@ type Handler struct {
 	lastTraeWorkErr string
 	lastRaccoonErr  string
 	lastIMAErr      string
+	lastMarvisErr   string
 	lastCodeArtsErr string
 
 	// clineFlights / autoclawFlights 续期单飞表。
@@ -491,6 +492,21 @@ func (h *Handler) modelList() []map[string]any {
 					out = append(out, map[string]any{
 						"id": imaModelPrefix + m.Name, "object": "model",
 						"created": 1753600000, "owned_by": "ima",
+						"description": m.Desc,
+					})
+				}
+				break
+			}
+		}
+	}
+	// Marvis 模型名单（marvis: 前缀）：静态清单，有账号才列。
+	if h.cfg.ExtAccounts != nil {
+		for _, a := range h.cfg.ExtAccounts() {
+			if a.Provider == extstore.PMarvis && !a.Disabled {
+				for _, m := range marvisCatalog() {
+					out = append(out, map[string]any{
+						"id": marvisModelPrefix + m.Name, "object": "model",
+						"created": 1753600000, "owned_by": "marvis",
 						"description": m.Desc,
 					})
 				}

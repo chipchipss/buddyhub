@@ -155,6 +155,7 @@ func rewriteJSONObject(payload, field, want string) string {
 	if !ok || cur == "" || cur == want {
 		return payload
 	}
+	doc[field] = want // ⚠️ 此前漏了这行：只检查不赋值，回写永远不生效
 	out, err := json.Marshal(doc)
 	if err != nil {
 		return payload

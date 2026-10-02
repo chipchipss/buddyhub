@@ -211,6 +211,24 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		return bridgeOutcome{matched: true, code: "no_traework_account", detail: detail, lastErr: h.lastTraeWorkErr}
 	}
 
+	// Marvis 直连通道（marvis: 前缀模型）：上游是标准 OpenAI 协议直通。
+	// ⚠️ 上游按账号做自适应风控——本通道严禁压测。
+	if isMarvisModel(bareModel) {
+		mm := strings.TrimPrefix(bareModel, marvisModelPrefix)
+		bodyMM := body
+		if mm != bareModel {
+			bodyMM = rewriteModel(body, mm)
+		}
+		if h.marvisChatStream(w, r, bodyMM, mm) {
+			return bridgeOutcome{matched: true, served: true}
+		}
+		detail := "没有可用的 Marvis 账号（需从已登录的 Marvis 客户端抓包获取凭据后，在面板手工添加）"
+		if h.lastMarvisErr != "" {
+			detail += "；最近失败原因: " + h.lastMarvisErr
+		}
+		return bridgeOutcome{matched: true, code: "no_marvis_account", detail: detail, lastErr: h.lastMarvisErr}
+	}
+
 	// ima 直连通道（ima: 前缀模型）：会话式协议（先 init_session 再问答），
 	// 自定义 SSE，事件名全大写——两侧都要转换，见 ima_bridge.go。
 	// 桥接自己剥 ima: 前缀（模型清单查询需要完整名字）。
