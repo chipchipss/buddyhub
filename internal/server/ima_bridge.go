@@ -68,19 +68,47 @@ func (h *Handler) imaBridgeChatStream(w http.ResponseWriter, r *http.Request, bo
 			continue
 		}
 
+		// 凭据临期先续期（cookie 里的 IMA-TOKEN 约 2 小时到期，refresh_token
+		// 通常随 cookie 一起带）。续期成功后回写账号表，下轮直接命中。
+		if cred.NeedsRefresh() {
+			if fresh, rerr := h.refreshIMACred(r.Context(), a.ID, &cred); rerr == nil {
+				cred = *fresh
+			} else {
+				log.Printf("ima-bridge: %s 续期失败: %v", a.ID, rerr)
+			}
+		}
+
 		resp, err := ima.AskStream(r.Context(), convID, a.ID, question, *m, &cred)
 		if err != nil {
 			lastErr = err.Error()
 			log.Printf("ima-bridge: %s 问答失败: %v", a.ID, err)
 			if isIMAAuthError(err) {
-				h.noteChat(a.Provider, a.ID, errOf(lastErr))
-				continue // 凭据失效：换下一个账号
-			}
-			// 会话类错误：重建会话再试一次（同账号）
-			resp, err = retryWithNewSession(r.Context(), convID, a.ID, question, *m, &cred)
-			if err != nil {
-				h.noteChat(a.Provider, a.ID, errOf(lastErr))
-				continue
+				// 认证失败（code=41/600001/5/51）：换新 token 并丢弃会话再试一次；
+				// 续期也救不回来才换下一个账号。
+				fresh, rerr := h.refreshIMACred(r.Context(), a.ID, &cred)
+				if rerr == nil {
+					cred = *fresh
+					ima.DropSession(convID, a.ID)
+					resp, err = retryWithNewSession(r.Context(), convID, a.ID, question, *m, &cred)
+					if err == nil {
+						lastErr = ""
+					} else {
+						lastErr = fmt.Sprintf("%s（续期后仍失败：%v）", lastErr, err)
+					}
+				} else {
+					lastErr = fmt.Sprintf("%s（续期也失败：%v）", lastErr, rerr)
+				}
+				if err != nil {
+					h.noteChat(a.Provider, a.ID, errOf(lastErr))
+					continue
+				}
+			} else {
+				// 会话类错误：重建会话再试一次（同账号）
+				resp, err = retryWithNewSession(r.Context(), convID, a.ID, question, *m, &cred)
+				if err != nil {
+					h.noteChat(a.Provider, a.ID, errOf(lastErr))
+					continue
+				}
 			}
 		}
 
@@ -112,6 +140,23 @@ func (h *Handler) imaBridgeChatStream(w http.ResponseWriter, r *http.Request, bo
 	}
 	h.lastIMAErr = lastErr
 	return false
+}
+
+// refreshIMACred 换新 IMA-TOKEN + 回写账号表。
+//
+// **单飞是必需的**：refresh_token 是一次性轮换语义（换成功后旧 token 即作废），
+// 并发的多个请求各自续期一次会让后到的拿着作废的 token → 全线 600001。
+// 同账号的续期合并成一次，其余请求复用结果（与 cline/autoclaw 的单飞同款理由）。
+func (h *Handler) refreshIMACred(ctx context.Context, accountID string, cred *ima.Credential) (*ima.Credential, error) {
+	fresh, err := h.imaFlights.Do(accountID, func() (*ima.Credential, error) {
+		return cred.Refresh(ctx)
+	})
+	if err == nil && h.extManager != nil {
+		if raw, merr := json.Marshal(fresh); merr == nil {
+			h.extManager.ReplaceCred(extstore.PIMA, accountID, raw)
+		}
+	}
+	return fresh, err
 }
 
 // retryWithNewSession 丢弃缓存的会话重建一次再问。

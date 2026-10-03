@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -51,13 +52,132 @@ const (
 type Credential struct {
 	// Cookie 完整的 x-ima-cookie 值（浏览器 F12 复制，须含 IMA-TOKEN 与 IMA-UID）。
 	Cookie string `json:"cookie"`
+	// RefreshToken IMA-REFRESH-TOKEN 的值；Cookie 里没有时留空（则不自动续期）。
+	// 手工添加的 cookie 通常自带该字段，故自动续期对绝大多数账号开箱可用。
+	RefreshToken string `json:"refresh_token,omitempty"`
 	// UserID IMA-UID 的值（展示用）。
 	UserID string `json:"user_id,omitempty"`
 	// Nickname 展示名。
 	Nickname string `json:"nickname,omitempty"`
 	// LastRefresh 最近一次续期成功的时刻（秒）；由续期循环维护。
 	LastRefresh int64 `json:"last_refresh,omitempty"`
+	// TokenValidTime 上游下发的 token 有效秒数（缺省 7200）；续期后用于判断下次何时到期。
+	TokenValidTime int64 `json:"token_valid_time,omitempty"`
 }
+
+// refreshPath 续期端点（换新 IMA-TOKEN）。
+const refreshPath = "/auth_login/refresh"
+
+// tokenTTL 缺省有效期（秒）。上游 client 口径是 7200。
+const tokenTTL = 7200
+
+// refreshSkew 提前多久续期（秒）。留 10 分钟余量，避免请求正好压在到期边界上。
+const refreshSkew = 600
+
+// NeedsRefresh 是否该续期。
+//
+// **没有 refresh_token 就不续**——此时只能人工重抓 cookie，续期无从谈起（也不该
+// 让每个请求都去打一次注定失败的续期接口）。有 refresh_token 时按
+// 「上次续期 + 有效期 - 余量」判断；从未续期过（LastRefresh=0）且拿不到有效秒数
+// 时保守视为**不需要**——刚添加的 cookie 通常还有效，避免每次首请求都续期。
+func (c *Credential) NeedsRefresh() bool {
+	rt := strings.TrimSpace(c.RefreshToken)
+	if rt == "" {
+		rt = cookieField(c.Cookie, "IMA-REFRESH-TOKEN")
+	}
+	if rt == "" {
+		return false // 无续期凭据：只能人工重抓
+	}
+	if c.LastRefresh == 0 {
+		return false // 刚添加，还没到过期点
+	}
+	valid := c.TokenValidTime
+	if valid <= 0 {
+		valid = tokenTTL
+	}
+	expireAt := c.LastRefresh + valid - refreshSkew
+	return time.Now().Unix() >= expireAt
+}
+
+// Refresh 换新 IMA-TOKEN，回填 Cookie 里的 IMA-TOKEN 字段。
+//
+// 协议事实来自 ima2api 的 refreshAccount：`POST /auth_login/refresh`
+// 体 `{refresh_token, user_id, registration_id}`；回执 `{code:0, token,
+// token_valid_time}`。注意 bkn 必须用**旧** token 算（请求头里的
+// x-ima-cookie 仍是旧的），换来的新 token 只写回 cookie 供后续请求使用。
+func (c *Credential) Refresh(ctx context.Context) (*Credential, error) {
+	rt := strings.TrimSpace(c.RefreshToken)
+	if rt == "" {
+		rt = cookieField(c.Cookie, "IMA-REFRESH-TOKEN")
+	}
+	if rt == "" {
+		return nil, fmt.Errorf("cookie 里没有 IMA-REFRESH-TOKEN，需重新抓取 cookie")
+	}
+	uid := strings.TrimSpace(c.UserID)
+	if uid == "" {
+		uid = cookieField(c.Cookie, "IMA-UID")
+	}
+	payload, _ := json.Marshal(map[string]string{
+		"refresh_token":  rt,
+		"user_id":        uid,
+		"registration_id": "",
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, BaseHost+refreshPath, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range headers(c) {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("续期请求失败：%w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return nil, &IMAError{Code: -1, Message: "续期被拒（HTTP " + fmt.Sprint(resp.StatusCode) + "）：refresh_token 可能已失效，需重新抓取 cookie", Auth: true}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("续期 HTTP %d：%s", resp.StatusCode, truncate(raw, 160))
+	}
+	var doc struct {
+		Code           int    `json:"code"`
+		Msg            string `json:"msg"`
+		Token          string `json:"token"`
+		TokenValidTime int64  `json:"token_valid_time"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("续期回执解析失败：%w", err)
+	}
+	if doc.Code != 0 {
+		return nil, &IMAError{Code: doc.Code, Message: doc.Msg, Auth: true}
+	}
+	if doc.Token == "" {
+		return nil, fmt.Errorf("续期回执不含 token")
+	}
+	out := *c
+	out.Cookie = replaceCookieToken(c.Cookie, doc.Token)
+	out.LastRefresh = time.Now().Unix()
+	if doc.TokenValidTime > 0 {
+		out.TokenValidTime = doc.TokenValidTime
+	}
+	out.RefreshToken = rt
+	out.UserID = uid
+	return &out, nil
+}
+
+// replaceCookieToken 把 cookie 里的 IMA-TOKEN 换掉（没有则追加）。
+func replaceCookieToken(cookie, newToken string) string {
+	if strings.Contains(cookie, "IMA-TOKEN=") {
+		return cookieRegexToken.ReplaceAllString(cookie, "IMA-TOKEN="+newToken)
+	}
+	return cookie + "; IMA-TOKEN=" + newToken
+}
+
+// cookieRegexToken 匹配 cookie 里 IMA-TOKEN 的整个值（惰性到分号或结尾）。
+var cookieRegexToken = regexp.MustCompile(`IMA-TOKEN=[^;]*`)
 
 // bkn 计算 x-ima-bkn：djb2 变体哈希（与 ima2api 的 calcBkn 逐字对齐）。
 //

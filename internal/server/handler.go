@@ -17,6 +17,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extprovider/accio"
 	"github.com/chipchipss/buddyhub/internal/extprovider/autoclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
+	"github.com/chipchipss/buddyhub/internal/extprovider/ima"
 	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/raccoon"
@@ -157,6 +158,8 @@ type Handler struct {
 	traeFlights     flightGroup[*trae.Credential]
 	accioFlights    flightGroup[*accio.Credential]
 	raccoonFlights  flightGroup[*raccoon.Credential]
+	// imaFlights ima 续期单飞表：cookie 里的 refresh_token 同样是一次性轮换语义。
+	imaFlights flightGroup[*ima.Credential]
 }
 
 // NewHandler 构建 handler。
