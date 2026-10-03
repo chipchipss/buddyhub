@@ -16,9 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
-	"syscall"
 	"time"
-	"unsafe"
 )
 
 // loomyCredWithPassword loomy-cli 凭据（含可选存密密码）。
@@ -106,56 +104,6 @@ func UnprotectPassword(stored string) (string, error) {
 	// 无前缀：旧数据兼容，视为明文
 	return stored, nil
 }
-
-// ---- DPAPI (crypt32.dll) ----
-
-type blob struct {
-	cbData uint32
-	pbData *byte
-}
-
-var (
-	crypt32                = syscall.NewLazyDLL("crypt32.dll")
-	procCryptProtectData   = crypt32.NewProc("CryptProtectData")
-	procCryptUnprotectData = crypt32.NewProc("CryptUnprotectData")
-	procLocalFree          = kernel32.NewProc("LocalFree")
-	kernel32               = syscall.NewLazyDLL("kernel32.dll")
-)
-
-func dpapiProtect(src []byte) ([]byte, error) {
-	if len(src) == 0 {
-		return nil, errors.New("empty")
-	}
-	in := blob{cbData: uint32(len(src)), pbData: &src[0]}
-	var out blob
-	// CRYPTPROTECT_UI_FORBIDDEN
-	r1, _, err := procCryptProtectData.Call(
-		uintptr(unsafe.Pointer(&in)), 0, 0, 0, 0,
-		0x1, uintptr(unsafe.Pointer(&out)))
-	if r1 == 0 {
-		return nil, err
-	}
-	defer localFree(uintptr(unsafe.Pointer(out.pbData)))
-	return unsafe.Slice(out.pbData, out.cbData), nil
-}
-
-func dpapiUnprotect(src []byte) ([]byte, error) {
-	if len(src) == 0 {
-		return nil, errors.New("empty")
-	}
-	in := blob{cbData: uint32(len(src)), pbData: &src[0]}
-	var out blob
-	r1, _, err := procCryptUnprotectData.Call(
-		uintptr(unsafe.Pointer(&in)), 0, 0, 0, 0,
-		uintptr(unsafe.Pointer(&out)))
-	if r1 == 0 {
-		return nil, err
-	}
-	defer localFree(uintptr(unsafe.Pointer(out.pbData)))
-	return unsafe.Slice(out.pbData, out.cbData), nil
-}
-
-func localFree(p uintptr) { procLocalFree.Call(p) }
 
 // ParseLoomyCred 从外部池凭据 JSON 解析（兼容旧结构无 password/login_at）。
 func ParseLoomyCred(raw json.RawMessage) (*LoomyCred, error) {
