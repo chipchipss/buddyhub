@@ -1194,6 +1194,27 @@ python import_codearts.py <accessKeys.csv>   # CodeArts AK/SK 批量导入面板
 
 账号 / 数据通过 `docker-compose.yml` 卷挂载持久化：`./auths`、`./data`、`./config.json`。
 
+### 跨平台构建
+
+**Linux / macOS / Windows 全平台可编译**（纯 Go + `CGO_ENABLED=0`，无 cgo 依赖）：
+
+```bash
+# Linux（amd64 / arm64）
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o buddyhub ./cmd/server
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o buddyhub ./cmd/server
+# macOS / Windows 同理，换 GOOS/GOARCH 即可
+```
+
+> 唯一的平台相关代码是 **Loomy 密码的 Windows DPAPI 加密**（`internal/upstream/loomy_dpapi_windows.go`，
+> `//go:build windows`）。非 Windows 由 `loomy_dpapi_other.go` 提供桩，实际走
+> `plain:` 明文前缀落盘（文件由 extstore 以 0600 写出）——DPAPI 绑定「本机+当前用户」，
+> 没有跨平台等价物。**它曾经没有 build tag，导致 Linux 交叉编译失败、Docker 镜像构建不出来**，
+> 现已拆分隔离（见 `loomy_store.go` 的 runtime.GOOS 分支）。
+
+**镜像里没有 Node.js / Chromium**，因此 `schedule.zai.captcha_solver`（Z.AI Plan 通道的
+阿里云无痕验证求解器）在容器内不可用——不配置时 `zai:` 通道降级为**仅 API Key 回退**，
+这是既有设计。需要该能力时在宿主装好 Node + Chromium 并挂进容器，或自行扩展镜像。
+
 ### 工具脚本
 
 | 脚本 | 用途 |
