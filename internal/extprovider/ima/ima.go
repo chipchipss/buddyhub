@@ -33,6 +33,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -143,10 +144,12 @@ func (c *Credential) Refresh(ctx context.Context) (*Credential, error) {
 		return nil, fmt.Errorf("续期 HTTP %d：%s", resp.StatusCode, truncate(raw, 160))
 	}
 	var doc struct {
-		Code           int    `json:"code"`
-		Msg            string `json:"msg"`
-		Token          string `json:"token"`
-		TokenValidTime int64  `json:"token_valid_time"`
+		Code  int    `json:"code"`
+		Msg   string `json:"msg"`
+		Token string `json:"token"`
+		// token_valid_time 上游可能回**字符串或数字**（两种都见过）。按 int64
+		// 硬解会直接 json.Unmarshal 报错，把整个续期打挂——故用 any 接住再归一。
+		TokenValidTime any `json:"token_valid_time"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("续期回执解析失败：%w", err)
@@ -160,12 +163,31 @@ func (c *Credential) Refresh(ctx context.Context) (*Credential, error) {
 	out := *c
 	out.Cookie = replaceCookieToken(c.Cookie, doc.Token)
 	out.LastRefresh = time.Now().Unix()
-	if doc.TokenValidTime > 0 {
-		out.TokenValidTime = doc.TokenValidTime
+	if sec := intValue(doc.TokenValidTime); sec > 0 {
+		out.TokenValidTime = sec
 	}
 	out.RefreshToken = rt
 	out.UserID = uid
 	return &out, nil
+}
+
+// intValue any → int64（数字/数字字符串都认；其它形态回落 0）。
+func intValue(v any) int64 {
+	switch t := v.(type) {
+	case float64:
+		return int64(t)
+	case string:
+		n, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64)
+		if err != nil {
+			return 0
+		}
+		return n
+	case json.Number:
+		if n, err := t.Int64(); err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 // replaceCookieToken 把 cookie 里的 IMA-TOKEN 换掉（没有则追加）。
