@@ -81,6 +81,13 @@ func (h *Handler) autoclawChatStream(w http.ResponseWriter, r *http.Request, bod
 			log.Printf("autoclaw-bridge: %s chat 失败: %v", a.ID, err)
 			continue
 		}
+		// 沙箱 relay 路径会回填 cred.SandboxID/Endpoint/EndTimestamp（首次 EnsureSandbox
+		// 申请到的沙箱）——回写账号表让下一轮命中缓存，避免每次对话都打 sandbox/list。
+		if cred.SandboxID != "" && h.extManager != nil {
+			if raw, merr := json.Marshal(&cred); merr == nil {
+				h.extManager.ReplaceCred(extstore.PAutoClaw, a.ID, raw)
+			}
+		}
 
 		// 401 = 令牌被提前失效，强制续期重试一次
 		if resp.StatusCode == http.StatusUnauthorized {
@@ -104,15 +111,14 @@ func (h *Handler) autoclawChatStream(w http.ResponseWriter, r *http.Request, bod
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
 			lastErr = "上游 HTTP " + strconv.Itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
-			// 406 空响应体的两层归因（实测排查结论，2026-10-02）：
-			//   1. system 提示词闸门——NormalizePrompt 已自动前置身份句，理论已覆盖；
-			//   2. **账号无对话权限**——JWT 里 power=0 的账号即便请求形状完全正确
-			//     （身份句 + Tooling 段 + 官方头集合 + 合法路由 ID）也恒 406。
-			//     判据：非法模型名回 400「非法模型」（能走到模型校验），
-			//     合法模型名反而 406——卡在模型校验之后的权限层。
-			// 用户能做的：手机号重新登录（上游可能重新评估权限）或换国际版账号。
+			// 406 空响应体的归因（实测排查结论，2026-10-02 → 2026-10-03 更新）：
+			// 直连 /autoclaw-proxy/… 路径的 406 是**模型校验后的权限层**（JWT power=0
+			// 账号即便请求形状完全正确也恒 406）。autoclaw.Chat 现在**优先走沙箱
+			// relay**（1.18.x 官方客户端路径，zai-org/feedback #804 确认旧直连 406、
+			// relay 可用），只有沙箱也失败才落到这条兜底。见到这里的 406 = 沙箱与
+			// 直连都不通，多半是账号无对话权限。
 			if resp.StatusCode == http.StatusNotAcceptable && strings.TrimSpace(string(raw)) == "" {
-				lastErr += "（上游 406 空响应：可能是 system 提示词指纹未覆盖，或该账号无对话权限——JWT power=0 的账号实测恒 406；可重新登录后重试，或到 AutoClaw 客户端确认账号可用）"
+				lastErr += "（上游 406 空响应：沙箱 relay 与直连均被拒——该账号当前无对话权限；可到 AutoClaw 客户端确认账号可用后重试，或换有权限的账号）"
 			}
 			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("autoclaw-bridge: %s 上游 %d: %s", a.ID, resp.StatusCode, shorten(string(raw), 200))

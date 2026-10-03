@@ -122,6 +122,10 @@ func (h *Handler) translateAccio(w http.ResponseWriter, resp *http.Response, req
 	if !h.clientWantsStream(reqBody) {
 		raw, err := accio.Aggregate(resp.Body, newChunkID(), time.Now().Unix(), model)
 		if err != nil {
+			// 上游 200 但流内藏业务错误（invalid params / 模型名无效等）——
+			// 此前这里不记日志、不上报退避，排障时对着空日志只能瞎猜。
+			// 补上：账号级 lastErr + 退避 + 一行日志。
+			log.Printf("accio-bridge: model=%s 流内错误: %v", model, err)
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
 			return
 		}

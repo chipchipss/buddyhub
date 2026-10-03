@@ -30,6 +30,14 @@ func (h *Handler) clineChatStream(w http.ResponseWriter, r *http.Request, body [
 	if h.cfg.ExtAccounts == nil {
 		return false
 	}
+	// free 池的 deepseek 系模型对过小的 max_tokens 会内部 500（"empty response
+	// content"）——客户端传 max_tokens:8 这类探针值时必挂。出站前把 free 池请求
+	// 的 max_tokens 抬到 128 安全下限（客户端未传时保留，仅补下限；传了且更小则提上去）。
+	if clineFreePool(bareModel) {
+		if norm := floorMaxTokens(body, 128); norm != nil {
+			body = norm
+		}
+	}
 	var accounts []*extstore.ExtAccount
 	for _, a := range h.cfg.ExtAccounts() {
 		if a.Provider == extstore.PCline && !a.Disabled {
@@ -240,3 +248,38 @@ const clineModelPrefix = "cline:"
 
 // isClineModel 判断裸模型名是否请求 Cline 通道。
 func isClineModel(bare string) bool { return strings.HasPrefix(bare, clineModelPrefix) }
+
+// clineFreePool 该裸模型名是否请求 Cline **免费池**（入参是剥掉 `cline:` 后的名字，
+// 形如 `cline-free/deepseek-v4.1-flash`——池前缀保留，见 dispatch.go 的 cline 块）。
+func clineFreePool(bare string) bool { return strings.HasPrefix(bare, cline.FreePrefix) }
+
+// floorMaxTokens 把请求体的 max_tokens / max_completion_tokens 抬到 min 下限：
+// 客户端没传则补上；传了且小于 min 则提到 min；大于 min 原样。返回 nil = 未改动。
+// 只对合法 JSON 对象生效，解析失败原样返回（绝不破坏请求）。
+func floorMaxTokens(body []byte, min int) []byte {
+	var obj map[string]any
+	if json.Unmarshal(body, &obj) != nil {
+		return nil
+	}
+	changed := false
+	for _, k := range []string{"max_tokens", "max_completion_tokens"} {
+		v, ok := obj[k]
+		if !ok {
+			continue
+		}
+		f, ok := v.(float64)
+		if !ok || f > float64(min) {
+			continue
+		}
+		obj[k] = float64(min)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil
+	}
+	return out
+}

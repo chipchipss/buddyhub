@@ -23,7 +23,7 @@ PROBES = [
     ("qoder:Qwen-3-Coder", "qoder"),
     ("raccoon:AutoGLM-4-30B", "raccoon"),
     ("cline:cline-free/deepseek-v4.1-flash", "cline"),
-    ("autoclaw:autoglm", "autoclaw"),
+    ("autoclaw:zai_glm-5.3-flash", "autoclaw"),
     ("qclaw:gpt-4o", "qclaw"),
     ("trae:deepseek-v4", "trae"),
     ("accio:gemini-3-flash-preview", "accio"),

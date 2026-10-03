@@ -118,6 +118,10 @@ func SetHTTPClient(c *http.Client) {
 
 // postJSON 发一次 JSON POST 并解析 {code, msg, data} 信封。
 // code != 0 返回 IMAError（业务错误，HTTP 仍 200）。
+//
+// 诊断：把原始响应体（脱敏前 240 字节）挂在 error 上——「init_session 未返回
+// session_id」曾让人对着一个没有原因的提示猜了 N 轮。上游实际回 code=0 + 有
+// session_id，问题出在 Go 侧（见 InitSession 注释），原始报文一摆出来立判。
 func postJSON(ctx context.Context, path string, body any, cred *Credential) (json.RawMessage, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -156,6 +160,49 @@ func postJSON(ctx context.Context, path string, body any, cred *Credential) (jso
 	return doc.Data, nil
 }
 
+// postJSONTop 发一次 JSON POST，返回**完整**响应体（不解包 `data` 信封）。
+//
+// init_session 的 `session_id` 在**顶层**（`{"code":0,"session_id":…}`），不像
+// 其它接口藏在 `data` 里——用 postJSON 解包会把 session_id 整个丢掉，导致
+// 「init_session 未返回 session_id」却 code=0 的怪象（cookie 其实没问题，换 cookie
+// 也没用，因为病因在解包）。code != 0 仍返回 IMAError。
+func postJSONTop(ctx context.Context, path string, body any, cred *Credential) (json.RawMessage, error) {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, BaseHost+path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range headers(cred) {
+		req.Header.Set(k, v)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("请求失败：%w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return nil, &IMAError{Code: -1, Message: "登录态失效（HTTP " + fmt.Sprint(resp.StatusCode) + "）", Auth: true}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("HTTP %d：%s", resp.StatusCode, truncate(raw, 160))
+	}
+	var doc struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("响应解析失败：%w", err)
+	}
+	if doc.Code != 0 {
+		return nil, &IMAError{Code: doc.Code, Message: doc.Msg, Auth: isAuthCode(doc.Code)}
+	}
+	return raw, nil
+}
+
 // IMAError ima 的业务错误（HTTP 200 但 code != 0）。
 type IMAError struct {
 	Code    int
@@ -179,6 +226,13 @@ func isAuthCode(code int) bool {
 // InitSession 建会话，返回 session_id。
 //
 // msgs_limit=20 是 ima 的硬上限（超过回 code=51）。
+//
+// 响应里的 session_id 在**顶层**（`{"code":0,"session_id":…}`），不在 `data`
+// 信封里——故走 postJSONTop 取完整响应体，再解析顶层字段。用 postJSON（解包
+// data）会丢掉 session_id，表现为「code=0 却没返回 session_id」。
+//
+// 解析同时认顶层与 `data` 两种形状（真实上游回顶层；部分历史版本/测试 mock
+// 可能塞在 data 信封里），命中即取，避免上游偶尔改包结构就整条链路挂死。
 func InitSession(ctx context.Context, question string, cred *Credential) (string, error) {
 	name := question
 	if len([]rune(name)) > 50 {
@@ -187,7 +241,7 @@ func InitSession(ctx context.Context, question string, cred *Credential) (string
 	if strings.TrimSpace(name) == "" {
 		name = "新对话"
 	}
-	data, err := postJSON(ctx, initSessionPath, map[string]any{
+	raw, err := postJSONTop(ctx, initSessionPath, map[string]any{
 		"env_info":   map[string]any{"interact_type": 2, "robot_type": 10000},
 		"name":       name,
 		"msgs_limit": 20,
@@ -195,12 +249,27 @@ func InitSession(ctx context.Context, question string, cred *Credential) (string
 	if err != nil {
 		return "", err
 	}
+	// 顶层优先；取不到再看 data 信封。
 	var doc struct {
+		SessionID string          `json:"session_id"`
+		Data      json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return "", fmt.Errorf("init_session 解析失败：%w（raw=%s）", err, truncate(raw, 120))
+	}
+	if doc.SessionID != "" {
+		return doc.SessionID, nil
+	}
+	var inner struct {
 		SessionID string `json:"session_id"`
 	}
-	if err := json.Unmarshal(data, &doc); err != nil || doc.SessionID == "" {
-		return "", fmt.Errorf("init_session 未返回 session_id")
+	if len(doc.Data) > 0 {
+		_ = json.Unmarshal(doc.Data, &inner)
 	}
+	if inner.SessionID != "" {
+		return inner.SessionID, nil
+	}
+	return "", fmt.Errorf("init_session 未返回 session_id（raw=%s）", truncate(raw, 120))
 	return doc.SessionID, nil
 }
 

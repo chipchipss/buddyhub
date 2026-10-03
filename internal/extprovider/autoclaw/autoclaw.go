@@ -132,6 +132,12 @@ type Credential struct {
 	ExpiresAt int64  `json:"expires_at,omitempty"` // 毫秒
 	// PhoneTail 手机号掩码（展示用，如 138****0000）。
 	PhoneTail string `json:"phone_tail,omitempty"`
+
+	// 沙箱 relay（1.18.x 官方对话路径）：EnsureSandbox 成功后写回，下轮命中缓存。
+	// omitempty：旧凭据没这些字段也能正常反序列化（零值触发 EnsureSandbox 申请）。
+	SandboxID           string `json:"sandbox_id,omitempty"`
+	SandboxEndpoint     string `json:"sandbox_endpoint,omitempty"`
+	SandboxEndTimestamp int64  `json:"sandbox_end_timestamp,omitempty"`
 }
 
 // NeedsRefresh 是否临近过期（提前 5 分钟）。
@@ -578,24 +584,17 @@ func ListModels(ctx context.Context, region Region, token string) ([]Model, erro
 /* ── 对话 ────────────────────────────────────────────────────── */
 
 // Chat 发起对话（OpenAI 协议，SSE 为裸 chunk 帧，调用方直接透传）。
-// Chat 发一次对话。
 //
-// ⚠️ 上游有**两个模型标识**（models.rs 的 ModelRoute，实测踩过的坑）：
+// 两条路径：
+//  1. **沙箱 relay**（1.18.x 官方客户端路径）：`{userapi 域}/autoclaw-cloud/
+//     proxy/{sandboxID}/v1/chat/completions`，走 chatHeaders 签名头。
+//  2. **直连代理**（旧路径）：`{userapi 域}/autoclaw-proxy/proxy/autoclaw`。
 //
-//	model      参数 = **带前缀的路由 ID**（如 `zai_glm-5.3-flash`）→ 发进
-//	            `X-Request-Model` 请求头（上游靠它选路由/计费通道）
-//	body.model      = **剥掉前缀后的模型 ID**（如 `glm-5.3-flash`）→ 上游用它选型
-//
-// 两个都填剥前缀的名字时（我们此前就是），上游在路由表里查不到
-// `X-Request-Model`，回 406 空响应体。前缀剥离规则：`zaicoding_` 必须先于
-// `zai_` 尝试——反过来会把 `zaicoding_glm-5.3` 错剥成 `coding_glm-5.3`。
-// body 里已经是裸名的（桥接已剥）就保持原样——幂等。
+// 策略：先走直连，若上游回 **406**（权限层被拒，JWT power=0 + 模型校验后的
+// 闸门）则自动回落到沙箱 relay 再试一次；沙箱也失败才把直连的 406 响应交回
+// 调用方（保留原始 body，由 bridge 做归因文案）。
 func Chat(ctx context.Context, cred *Credential, model string, body []byte) (*http.Response, error) {
 	region := ParseRegion(string(cred.Region))
-	bodyModel := StripRoutePrefix(model)
-	if bm := bodyModelField(body); bm != "" {
-		bodyModel = bm // body 已带 model 字段时以它为准（调用方已写好）
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, region.ChatBase(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -603,8 +602,56 @@ func Chat(ctx context.Context, cred *Credential, model string, body []byte) (*ht
 	for k, v := range chatHeaders(cred.Token, model) {
 		req.Header.Set(k, v)
 	}
-	_ = bodyModel // body.model 由调用方（bridge）负责写入；见 StripRoutePrefix
-	return httpClient.Do(req)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusNotAcceptable {
+		resp.Body.Close()
+		if relay, rerr := ChatViaSandbox(ctx, cred, body, model); rerr == nil && relay != nil {
+			if relay.StatusCode >= 200 && relay.StatusCode < 300 {
+				return relay, nil
+			}
+			relay.Body.Close()
+		}
+	}
+	return resp, nil
+}
+
+// ChatViaSandbox 走沙箱 relay 的 OpenAI 端点（1.18.x 官方客户端真实路径）。
+//
+// relay 基址：`{userapi 域}/autoclaw-cloud/proxy/{sandboxID}/v1/chat/completions`，
+// 走 chatHeaders（X-Authorization）签名头。上游回 11003 = 该账号无沙箱对话权限
+// （与直连 406 同根：power=0），由调用方归因，不再反复重试。
+func ChatViaSandbox(ctx context.Context, cred *Credential, body []byte, model string) (*http.Response, error) {
+	_, relayBase, err := EnsureSandbox(ctx, cred)
+	if err != nil {
+		return nil, err
+	}
+	b, err := ensureModelInBody(body, model)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		relayBase+"/v1/chat/completions", bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range chatHeaders(cred.Token, model) {
+		req.Header.Set(k, v)
+	}
+	// 沙箱 relay 端点认标准 `Authorization` 头（chatHeaders 里是 `X-Authorization`，
+	// 实测只带 X- 前缀那版回 11002 "authorization token is required"）——两个都带。
+	// 上游 11003「invalid authorization token」= 该 token 无沙箱对话权限（与直连
+	// 406 同根：JWT power=0），交给调用方归因，不再反复重试。
+	if tok := stripBearer(cred.Token); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("沙箱 relay 对话失败：%w", err)
+	}
+	return resp, nil
 }
 
 // StripRoutePrefix 剥路由前缀（zaicoding_ 先于 zai_）。
@@ -673,6 +720,159 @@ func parseExpiresAt(v any) int64 {
 		return int64(t)
 	}
 	return 0
+}
+
+// Sandbox 沙箱信息（字段与 /agentdr/v2/assistant/sandbox/list 对齐）。
+type Sandbox struct {
+	SandboxID       string `json:"sandbox_id"`
+	SandboxName     string `json:"sandbox_name"`
+	SandboxStatus   string `json:"sandbox_status"`
+	RuntimeStatus   string `json:"runtime_status"`
+	SandboxEndpoint string `json:"sandbox_endpoint"`
+	EndTimestamp    int64  `json:"end_timestamp"`
+}
+
+// sandboxBaseHost 沙箱 relay 实际服务的主机（按账号 region 归一）。
+//
+// 上游 sandbox/list 下发的 endpoint 常写国际域（autoglm-api.zhipuai.cn），但 CN
+// 账号的沙箱实例挂在 CN 域（autoglm-acceleration-api.zhipuai.cn）——直接拿
+// endpoint 域名拼 relay 路径会 404（实测 2026-10-03）。
+func sandboxBaseHost(region Region) string {
+	if region == RegionIntl {
+		return "https://autoglm-api.autoglm.ai"
+	}
+	return "https://autoglm-acceleration-api.zhipuai.cn"
+}
+
+// RelayProxyBase 拼「{host}/autoclaw-cloud/proxy/{sandboxID}」形式的 relay 基址。
+// hostOverride 非空时替代 endpoint 里下发的域名（见 sandboxBaseHost 注释）。
+func RelayProxyBase(endpoint, sandboxID, hostOverride string) string {
+	host := hostOverride
+	if host == "" {
+		host = endpoint
+		if i := strings.Index(host, "/"); i >= 0 {
+			host = host[:i] // 只取 scheme://host 部分
+		}
+	}
+	_ = endpoint // 上游 endpoint 里的 /autoclaw-cloud 路径段与 region 域对齐，直接拼固定后缀
+	return host + "/autoclaw-cloud/proxy/" + strings.TrimSpace(sandboxID)
+}
+
+// EnsureSandbox 确保账号有沙箱，返回 (sandboxID, relayProxyBase)。
+// 缓存命中（Credential 里已有沙箱）直接用；否则 list → 空则 apply → 重 list。
+func EnsureSandbox(ctx context.Context, cred *Credential) (string, string, error) {
+	now := time.Now().Unix()
+	region := ParseRegion(string(cred.Region))
+	host := sandboxBaseHost(region)
+	if cred.SandboxID != "" {
+		cred.SandboxEndpoint = RelayProxyBase(cred.SandboxEndpoint, cred.SandboxID, host)
+		return cred.SandboxID, cred.SandboxEndpoint, nil
+	}
+	list, err := listSandboxes(ctx, region, cred.Token)
+	if err != nil {
+		return "", "", err
+	}
+	if len(list) == 0 {
+		if err := applySandbox(ctx, region, cred.Token); err != nil {
+			return "", "", err
+		}
+		list, err = listSandboxes(ctx, region, cred.Token)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	if len(list) == 0 {
+		return "", "", fmt.Errorf("autoclaw 无可用沙箱（apply 后仍为空）")
+	}
+	pick := list[0]
+	for _, s := range list {
+		expired := s.EndTimestamp != 0 && s.EndTimestamp <= now
+		if !expired && (pick.SandboxID == "" || (pick.EndTimestamp != 0 && pick.EndTimestamp <= now)) {
+			pick = s
+		}
+	}
+	cred.SandboxID = pick.SandboxID
+	cred.SandboxEndpoint = RelayProxyBase(pick.SandboxEndpoint, pick.SandboxID, host)
+	cred.SandboxEndTimestamp = pick.EndTimestamp
+	if cred.SandboxID == "" {
+		return "", "", fmt.Errorf("autoclaw 沙箱回执缺 sandbox_id")
+	}
+	return cred.SandboxID, cred.SandboxEndpoint, nil
+}
+
+// listSandboxes 列出账号沙箱（userapi 域，签名头 + 数据信封）。
+func listSandboxes(ctx context.Context, region Region, token string) ([]Sandbox, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		region.UserAPI()+"/agentdr/v2/assistant/sandbox/list", nil)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range userAPIHeaders(token) {
+		req.Header.Set(k, v)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("拉取沙箱列表失败：%w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("沙箱列表 HTTP %d：%s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &env)
+	data := env.Data
+	if len(data) == 0 {
+		data = raw
+	}
+	var list []Sandbox
+	if json.Unmarshal(data, &list) == nil {
+		return list, nil
+	}
+	var wrapped struct {
+		SandboxList []Sandbox `json:"sandbox_list"`
+	}
+	if json.Unmarshal(data, &wrapped) == nil {
+		return wrapped.SandboxList, nil
+	}
+	return nil, fmt.Errorf("沙箱列表解析失败")
+}
+
+// applySandbox 申请沙箱（sandbox_name 用官方默认 "default"）。
+func applySandbox(ctx context.Context, region Region, token string) error {
+	body, _ := json.Marshal(map[string]string{"sandbox_name": "default"})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		region.UserAPI()+"/agentdr/v2/assistant/sandbox/apply", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	for k, v := range userAPIHeaders(token) {
+		req.Header.Set(k, v)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("申请沙箱 HTTP %d：%s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	return nil
+}
+
+// ensureModelInBody 缺 model 字段时补上（调用方 bridge 已写好则原样保留）。
+func ensureModelInBody(body []byte, model string) ([]byte, error) {
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return body, nil
+	}
+	if _, ok := doc["model"]; !ok && model != "" {
+		doc["model"] = model
+	}
+	return json.Marshal(doc)
 }
 
 func truncate(s string, n int) string {
