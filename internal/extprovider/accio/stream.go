@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -165,6 +167,12 @@ func Aggregate(r io.Reader, id string, created int64, model string) ([]byte, err
 		f := ParseFrame(data)
 		if f == nil {
 			return
+		}
+		// 排障：把上游每一帧原文记到调试日志（ACCIO_DEBUG_SSE=1 时）。
+		// 上游 200 但正文为空的唯一解释就是帧形状与 ParseFrame 期望不符，
+		// 没原始帧就永远只能猜。
+		if os.Getenv("ACCIO_DEBUG_SSE") != "" {
+			log.Printf("accio-debug: SSE data: %s", data)
 		}
 		if f.ErrorCode != "" || f.ErrorMsg != "" {
 			upstreamErr = ErrorMessage(f.ErrorCode, f.ErrorMsg)

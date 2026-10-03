@@ -297,11 +297,16 @@ func (e *QAEvent) IsError() bool {
 	return e.Event == "INNER_EXCEPTION" || e.Event == "ERROR" || e.Event == "FAILED"
 }
 
-// Text 提取事件里的文本。
+// Text 提取事件里的正文文本。
 //
-// data: 的 JSON 里文本字段名漂过多个版本（Text/text/Content/content/Delta/
-// delta/Msg/msg/reply/Reply/answer/Answer），逐个探测；JSON 损坏时尽力用
-// tryRepairJSON 兜底（ima2api 同款手法——上游偶发截断的 JSON 也能挖出正文）。
+// ima 的正文**不在事件顶层**：QA 流的正文事件是 STRUCTURED_BLOCK，data 形如
+// `{"Type":"blockMessage","Data":{"text_message":{"Text":"…"}}}`——要钻进
+// `Data` 嵌套才拿得到 Text。旧实现只在顶层找 Text/text/Content 等字段，
+// 对 blockMessage 恒空（表现是 200 但 content 是 ""，看着像"回答为空"）。
+//
+// 策略：顶层 + `Data` 一层 + `Data` 里的 `text_message`（兼容其它块类型的
+// 直接 Text 字段）逐个探测；命中即返回。loading / 空块 / 建议问等非正文事件
+// 自然落空（提取不到就跳过，见桥接侧 controlEvents 过滤）。
 func (e *QAEvent) Text() string {
 	raw := strings.TrimSpace(e.Data)
 	if raw == "" {
@@ -314,10 +319,21 @@ func (e *QAEvent) Text() string {
 	if doc == nil {
 		return ""
 	}
-	for _, k := range []string{"Text", "text", "Content", "content", "Delta", "delta",
-		"Msg", "msg", "reply", "Reply", "answer", "Answer"} {
-		if v, ok := doc[k].(string); ok && v != "" {
-			return v
+	// 候选对象：顶层、Data、Data.text_message（ima blockMessage 的正文落点）。
+	candidates := []map[string]any{doc}
+	if dataObj, ok := doc["Data"].(map[string]any); ok {
+		candidates = append(candidates, dataObj)
+		if tm, ok := dataObj["text_message"].(map[string]any); ok {
+			candidates = append(candidates, tm)
+		}
+	}
+	// 文本字段名漂过多个版本，逐个探测。
+	for _, cand := range candidates {
+		for _, k := range []string{"Text", "text", "Content", "content", "Delta", "delta",
+			"Msg", "msg", "reply", "Reply", "answer", "Answer"} {
+			if v, ok := cand[k].(string); ok && v != "" {
+				return v
+			}
 		}
 	}
 	return ""
