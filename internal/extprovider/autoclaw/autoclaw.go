@@ -528,6 +528,99 @@ func Refresh(ctx context.Context, cred *Credential) (*Credential, error) {
 	return &out, nil
 }
 
+/* ── 余额（钱包）────────────────────────────────────────────── */
+
+// Wallet 钱包余额快照。
+type Wallet struct {
+	// TotalBalance 总积分（reward + daily 等聚合）。
+	TotalBalance int64
+	// Reward 奖励积分（签到 / 活动领取的）。
+	Reward int64
+	// Daily 每日活跃额度（当日有效，次日清零）。
+	Daily int64
+}
+
+// FetchBalance 查询账号钱包余额。
+//
+// 端点 `GET {userapi}/agent-assetmgr/api/v2/wallets?biz_app_id=autoclaw`，
+// 响应 data.total_balance 为聚合总额，data.wallets[] 按 public_wallet_type 分类。
+//
+// ⚠️ 实测（2026-10-03）：对 assetmgr 域直接用存量 token 的签名头会回
+// `code 410000 用户未登录`，**先走一次 Refresh 换新 token 再查就通**——
+// 调用方（extstore.ViewOne）已在临期时刷新，但 assetmgr 似乎还要求 token
+// 是「新鲜签出」的；故这里 410000 时自动刷新一次重试。
+func FetchBalance(ctx context.Context, cred *Credential) (*Wallet, error) {
+	region := ParseRegion(string(cred.Region))
+	fetch := func(token string) (json.RawMessage, int, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			region.UserAPI()+"/agent-assetmgr/api/v2/wallets?biz_app_id=autoclaw", nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		for k, v := range userAPIHeaders(token) {
+			req.Header.Set(k, v)
+		}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return raw, resp.StatusCode, nil
+	}
+
+	raw, status, err := fetch(cred.Token)
+	if err != nil {
+		return nil, fmt.Errorf("钱包查询失败：%w", err)
+	}
+	var probe struct {
+		Code int             `json:"code"`
+		Data json.RawMessage `json:"data"`
+		Msg  string          `json:"msg"`
+	}
+	_ = json.Unmarshal(raw, &probe)
+	// 410000 用户未登录：token 对 assetmgr 不新鲜 → 刷新一次重试（单次，不递归）。
+	if probe.Code == 410000 && cred.CanRefresh() {
+		if fresh, rerr := Refresh(ctx, cred); rerr == nil {
+			*cred = *fresh
+			if raw, status, err = fetch(cred.Token); err == nil {
+				_ = json.Unmarshal(raw, &probe)
+			}
+		}
+	}
+	if status != http.StatusOK || len(probe.Data) == 0 {
+		return nil, fmt.Errorf("钱包 HTTP %d：%s", status, truncate(string(raw), 160))
+	}
+	var doc struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			TotalBalance json.RawMessage `json:"total_balance"`
+			Wallets      []struct {
+				PublicWalletType string `json:"public_wallet_type"`
+				Balance          int64  `json:"balance"`
+			} `json:"wallets"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("钱包回执解析失败：%w", err)
+	}
+	if doc.Code != 0 {
+		return nil, fmt.Errorf("钱包查询被拒（code %d）：%s", doc.Code, doc.Msg)
+	}
+	w := &Wallet{}
+	_ = json.Unmarshal(doc.Data.TotalBalance, &w.TotalBalance)
+	for _, s := range doc.Data.Wallets {
+		switch s.PublicWalletType {
+		case "reward":
+			w.Reward = s.Balance
+		case "daily":
+			w.Daily = s.Balance
+		}
+	}
+	return w, nil
+}
+
 /* ── 模型目录 ────────────────────────────────────────────────── */
 
 // Model 模型条目。

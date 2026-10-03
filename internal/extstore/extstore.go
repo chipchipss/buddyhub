@@ -621,6 +621,21 @@ func (m *Manager) ViewOne(ctx context.Context, a *ExtAccount) *ExtAccountView {
 		if cred.PhoneTail != "" {
 			v.Note += " · " + cred.PhoneTail
 		}
+		// 真实余额（此前只显示 token 存在性，面板上积分恒空，用户以为账号是 0 积分）。
+		// FetchBalance 在 assetmgr 回 410000（token 对该域不新鲜）时会自行刷新重试，
+		// 刷新出的新 token 一并回写账号表，避免下一轮再撞一次。
+		if w, werr := autoclaw.FetchBalance(ctx, &cred); werr == nil {
+			v.Balance, v.BalanceOK = float64(w.TotalBalance), true
+			if w.Daily > 0 {
+				v.Note += fmt.Sprintf(" · 今日额度 %d", w.Daily)
+			}
+		} else {
+			v.Note += "（余额查询失败：" + werr.Error() + "）"
+		}
+		// FetchBalance 内部可能已轮换 token（410000 重试路径）——回写凭据。
+		if raw, merr := json.Marshal(&cred); merr == nil {
+			m.replaceCred(a.Provider, a.ID, raw)
+		}
 	case PCline:
 		// Cline 视图：续期一次验证凭据有效性，并展示 credit 余额。
 		var cred cline.Credential
