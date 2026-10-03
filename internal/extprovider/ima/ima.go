@@ -412,7 +412,6 @@ func InitSession(ctx context.Context, question string, cred *Credential) (string
 		return inner.SessionID, nil
 	}
 	return "", fmt.Errorf("init_session 未返回 session_id（raw=%s）", truncate(raw, 120))
-	return doc.SessionID, nil
 }
 
 // qaEvent 一次 SSE 推送。
