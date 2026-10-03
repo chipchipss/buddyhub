@@ -528,6 +528,26 @@ func (m *Manager) ViewOne(ctx context.Context, a *ExtAccount) *ExtAccountView {
 				v.Note = err.Error()
 			}
 		}
+	case PLoomyCLI:
+		// Loomy 视图：查积分明细（永久 + 每日额度）。此前 ViewOne 没有本分支，
+		// 面板上 Loomy 账号的余额/状态恒空白（用户以为账号不可用）。
+		// 实现直接用 upstream.GetCreditDetail（与积分页同一条链路）。
+		var cred struct {
+			Session string `json:"session"`
+		}
+		if json.Unmarshal(a.Cred, &cred) != nil || cred.Session == "" {
+			v.Note = "凭据里没有 session，需重新登录"
+			return v
+		}
+		if d, err := upstream.NewLoomyClient("").GetCreditDetail(cred.Session); err == nil && d != nil {
+			v.Balance, v.BalanceOK = float64(d.Total), true
+			v.Note = fmt.Sprintf("Loomy · 永久 %d", d.Permanent)
+			if d.HasQuota {
+				v.Note += fmt.Sprintf(" · 今日 %d/%d", d.Consumed, d.DailyQuota)
+			}
+		} else if err != nil {
+			v.Note = err.Error()
+		}
 	case PCodeArts:
 		var cred codearts.Credential
 		if json.Unmarshal(a.Cred, &cred) == nil {
