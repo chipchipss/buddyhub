@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>多平台 Buddy 账号统一积分与网关中心 · OpenAI / Anthropic / Responses API 兼容</b><br>
-  Web 面板 · 账号池轮转 · 工具调用自愈 · Responses API · 定时签到 / 活跃 / 旅行 / 保活 · 成长任务一键完成 · <b>讯飞 Loomy + LobsterAI + 小浣熊 + Qoder + 华为云 积分自动领取 · Z.AI / ZCode · GitHub Copilot · Cline（免费池）· AutoClaw（智谱）· QClaw（腾讯）· Trae / TraeWork（字节）· Accio（阿里）</b>
+  Web 面板 · 账号池轮转 · 工具调用自愈 · Responses API · 定时签到 / 活跃 / 旅行 / 保活 · 成长任务一键完成 · <b>讯飞 Loomy + LobsterAI + 小浣熊 + Qoder + 华为云 积分自动领取 · Z.AI / ZCode · GitHub Copilot · Cline（免费池）· AutoClaw（智谱）· QClaw（腾讯）· Trae / TraeWork（字节）· Accio（阿里）· ima（腾讯知识管家）</b>
 </p>
 
 <p align="center">
@@ -174,6 +174,10 @@ POST /panel/api/ext/{provider}/login/poll  → {done:false, status} | {done:true
 
 - 也支持在「自动化 → 外部平台」页内直接添加（同一套表单），或用底部的「高级：粘贴完整凭据 JSON」批量导入
 - **CodeArts 建议用永久 AK/SK**：`Security Token` 留空即可（网关会**省略** `x-security-token` 头，与华为云永久密钥的签名口径一致）。临时 STS 凭据几小时就过期，放进池里等于每隔几小时重填一次
+- **CodeArts 批量导入**：华为云控制台导出的 `xxx-accessKeys.csv` 可直接喂给仓库根目录的 `import_codearts.py`（自动读 `config.json` 的 `api_key`，同 provider+id 幂等覆盖）：
+  ```bash
+  python import_codearts.py ~/Downloads/xxx-accessKeys.csv [--checkin]
+  ```
 - **Qoder 的 `machine_id` 必填**——缺失会被上游直接拒绝
 
 > 💡 LobsterAI 的登录是绑在 Electron 客户端里的本地 OAuth 回调流程，还需要 `uuid` / `first_key_from` 等客户端渠道字段，无法在网关侧复刻；CodeArts 的 AK/SK 本就是在华为云控制台创建的，没有可自动化的「登录」这一步。这两个平台保持手工填写是设计选择，不是没做完。
@@ -337,6 +341,9 @@ Cline 的 `refresh_token` 是**一次性轮换**语义：并发请求同时发�
 | 项目 | 值得看的地方 | 我们做了什么 |
 |---|---|---|
 | **[aimod-cc/agent2api](https://github.com/aimod-cc/agent2api)** | 支持的通道最多（WorkBuddy / 小浣熊 / CatPaw / AutoClaw / Qoder / Cline / Accio / CodeArts / Trae）；每家一个 adapter，协议事实写得极细（含「踩空后表现很像没权限」这类口径） | 按它的公开协议**核对并实测**后接入了 **Cline**（免费池）· **AutoClaw**（智谱，手机号登录）· **Trae**（字节 SOLO）· **Accio**（阿里 ADK 信封）；续期单飞的做法也来自它的 `refresh_flight` |
+| **[Johnsheng1/codearts2api](https://github.com/Johnsheng1/codearts2api)** | CodeArts 的 **agent / benefit 两条模型通道**口径：benefit 免费模型需 `maas_type:benefit` + 三个模型头参与签名，老套餐模型带上反而 `unsupported model` | 据此把我们的对话签名拆成双通道（`ChatOptions.Benefit`），并用兜底名单替代拉不到的云端模型目录（`/v1/model/builtin` 对永久 AK/SK 回 401/403） |
+| **[B00H0O/Aliyun-Solver](https://github.com/B00H0O/Aliyun-Solver)**（MIT） | 阿里云无痕验证的**真 Chromium**（Playwright）求解器——真 Chromium 有真实 canvas/WebGL 行为信号，jsdom 沙箱会被后端确定性拒绝。输出契约 `VERIFY_PARAM=<param>` 恰好就是我们 `schedule.zai.captcha_solver` 约定的形态，零改动接入 | 作为 Z.AI Plan 通道验证码求解器接入（可用 `PW_CHROME` 指向系统已有的 Chrome/Edge，省下数百 MB 的 Playwright Chromium 下载） |
+| **[re-skylar/qoder-check-in](https://github.com/re-skylar/qoder-check-in)**（MIT） | Qoder CN 每日签到的两条端点与幂等判据：`GET /sash/api/v1/me/campaigns` → `POST …/{campaignId}/claim`，只有 `status:"CLAIMED"` 才算成功 | 与我们 qoder 的实现一致（`replayed:true` 幂等、活动 ID 自动跟随），无需改动；其"账号符合资格但服务端不下发"的已知现象见排障表 |
 | **[wicm84266964/Buddy2api](https://github.com/wicm84266964/Buddy2api)** | 按它的公开协议接入 **QClaw**（腾讯，微信扫码）与 **TraeWork**（字节，会话式协议）|
 | **[wicm84266964/Buddy2api](https://github.com/wicm84266964/Buddy2api)** | QClaw / 千问办公 / TraeWork 三个通道；模型容量发现（`context_window` / `max_output_tokens` + `capacity_source` 标记来源是目录还是兜底）；聚合响应的完整性校验（缺完成标记不当作正常 stop） | 容量发现我们已有（四级查找链 + 探测上限）；`capacity_source` 式「标注数据来源」的思路值得后续补 |
 | **[wangliangdong/loomy2api](https://github.com/wangliangdong/loomy2api)** | Loomy **Web 版**（非桌面客户端）；**额度获取与路由解耦**——定时刷新写缓存，选号只读缓存，绝不在请求路径上打上游额度接口；多客户端会话头的兼容顺序 | 额度刷新与选号本就是分离的；会话键提取的兼容顺序我们已有（`conversation_id` + 内容回退） |
@@ -358,7 +365,28 @@ Cline 的 `refresh_token` 是**一次性轮换**语义：并发请求同时发�
 
 ## 🦞 AutoClaw 通道（智谱 autoglm）
 
-AutoClaw（智谱的桌面 Agent）接进同一个 OpenAI 兼容接口——模型名带 `autoclaw:` 前缀（`autoclaw:glm-5.3` 等）。
+AutoClaw（智谱的桌面 Agent）接进同一个 OpenAI 兼容接口——模型名带 `autoclaw:` 前缀。
+
+> ⚠️ **模型名必须带路由前缀**（如 `autoclaw:zai_glm-5.3-flash`）。上游按 `X-Request-Model` 头
+> 里的**带前缀路由 ID** 选路，`body.model` 则是剥掉前缀后的裸名（`glm-5.3-flash`）。
+> 两个都填裸名时上游在路由表里查不到，回 **406 空响应体**——看起来像"没权限"，
+> 实际是模型标识错了。前缀剥离规则：`zaicoding_` 必须先于 `zai_` 尝试。
+
+### 两条对话路径（直连 406 时自动回落沙箱）
+
+| | 路径 | 说明 |
+|---|---|---|
+| 1 | `{userapi}/autoclaw-proxy/proxy/autoclaw` | 直连代理（旧路径）。JWT `power=0` 的账号在此恒回 406 空 body |
+| 2 | `{userapi}/autoclaw-cloud/proxy/{sandbox_id}/v1/chat/completions` | **沙箱 relay**（1.18.x 官方客户端路径）。`Chat` 在直连返 406 时自动走这条 |
+
+沙箱由 `agentdr/v2/assistant/sandbox/list` 查、`…/sandbox/apply` 申请，结果写回凭据的
+`sandbox_id` 字段缓存（下次直接命中，不必每次都申请）。**沙箱 relay 认标准 `Authorization`
+头**（`chatHeaders` 里的 `X-Authorization` 不够，会回 11002）。
+
+上游端点下发的 `sandbox_endpoint` 常写国际域，但 CN 账号的沙箱挂在 CN 域下——
+网关按凭据的 `region` 归一主机，直接拿 endpoint 拼路径会 404。
+
+> 两条路径都回 11003 / 406 时，说明该账号**无对话权限**（JWT `power=0`），需重新登录或换号。
 
 ### 两个地区，两套域名
 
@@ -451,6 +479,38 @@ QClaw 的微信授权链接有 **221 字节**，超出原先编码器的上限�
 - **v6+ 是多纠错块**，码字必须交织（v1–5 单块才免交织）
 - **v7+ 有版本信息**（18 位），左下那份的位序与右上**互为转置**
 - **v10+ 的字节模式计数指示符是 16 位**（v1–9 是 8 位）——写死 8 位时前几个码字看着还对，后面全错
+
+## 🧭 ima 通道（腾讯 ima.copilot 知识管家）
+
+模型名带 `ima:` 前缀（`ima:glm-5.2` / `ima:hy3-preview` / …，静态清单见 `internal/extprovider/ima/models.go`）。
+
+### 拿凭据（浏览器 F12 一次即可）
+
+打开 <https://ima.qq.com> 登录 → F12 → Network → 随便发一条消息 → 找
+`/cgi-bin/assistant/qa` 请求 → 复制请求头 **`x-ima-cookie`** 的完整值
+（须含 `IMA-TOKEN` 与 `IMA-UID`）粘贴到面板「添加账号 → 外部平台 → ima」。
+
+> 建议连 `IMA-REFRESH-TOKEN` 一起带上（同一串 cookie 里通常已有）：带了网关就能
+> **自动续期**（`IMA-TOKEN` 约 2 小时到期），不必每两小时重抓一次。
+
+### 三处与其它通道不同（照抄会错）
+
+- **会话制**：每次问答前先 `POST /cgi-bin/session_logic/init_session` 拿 `session_id`
+  （20 条消息上限，超限回 `code=51`），会话按「账号 + 对话」缓存 30 分钟。
+  ⚠️ `session_id` 在响应的**顶层**，不在 `data` 信封里——按信封解包会把它整个丢掉。
+- **业务错误藏在 200 的 SSE 流里**（`code=41` 登录过期 / `600001` 被踢 / `5|51` 会话无效），
+  只看 HTTP 状态码会误判成功。
+- **正文在 `STRUCTURED_BLOCK` 事件的 `Data.text_message.Text` 嵌套里**，不是事件顶层。
+
+### 凭据自动续期
+
+`POST /auth_login/refresh`（体 `{refresh_token, user_id, registration_id}`，回执
+`{code:0, token, token_valid_time}`）。`refresh_token` 是**一次性轮换**语义，并发续期会互相
+作废，故与 Cline / AutoClaw 共用同一份单飞实现。bridge 在两处触发：临期先续期再问；
+认证失败（41/600001/5/51）换 token + 丢会话重试一次，仍失败才换号。
+
+> ⚠️ 上游的 `token_valid_time` 可能回**字符串**（`"7200"`）而非数字——按 `int64` 硬解会让
+> 整个续期在 `json.Unmarshal` 处失败、账号到期即报废。
 
 ## 🧭 其它已接入通道（Trae / Accio / TraeWork）
 
@@ -1027,13 +1087,38 @@ web/
 | `traework:` | TraeWork（字节） | `data/ext-accounts.json`（provider `traework`） | 同上 |
 | `qoder:` | Qoder（阿里） | `data/ext-accounts.json`（provider `qoder`） | — |
 | `raccoon:` | 小浣熊（商汤，**OpenAI 兼容直连**） | `data/ext-accounts.json`（provider `raccoon`） | — |
-| `codearts:` | CodeArts（华为云，签名口径与积分/签到不同） | `data/ext-accounts.json`（provider `codearts`） | — |
-| `ima:` | ima（腾讯知识管家，会话式协议） | `data/ext-accounts.json`（provider `ima`） | — |
+| `codearts:` | CodeArts（华为云，**模型分 agent / benefit 两条签名通道**） | `data/ext-accounts.json`（provider `codearts`） | [模型与签名口径](#-外部通道排障速查) |
+| `ima:` | ima（腾讯知识管家，会话式协议，**凭据自动续期**） | `data/ext-accounts.json`（provider `ima`） | [ima 通道](#-ima-通道腾讯-ima-copilot-知识管家) |
 | `marvis:` | Marvis（马维斯，标准 OpenAI 直通） | `data/ext-accounts.json`（provider `marvis`，凭据从客户端抓包） | — |
 | `codex:` | Codex 订阅池 | 本机 `~/.codex*` 凭据 | — |
 | `free:` | 免费 key 池（`free:<provider>/<model>`） | 配置的免费 Key | — |
 
 找不到可用账号时**直接回 503 并说明原因**（含最近一次失败原因），不静默回落腾讯池——前缀就是路由协议，回落会把语义搞乱。
+
+### 外部通道排障速查
+
+各外部平台的模型名与签名口径差异很大，**用错模型名时的报错常长得像"账号没权限"**。
+下表是实测（2026-10）确认的判据，省掉逐个反推：
+
+| 平台 | 可用模型名形态 | 报错 → 真因 |
+|---|---|---|
+| **codearts** | `codearts:openpangu-2.0-pro`（agent）、`codearts:deepseek-v4-flash-0731`（benefit） | 模型分 **agent / benefit 两条签名通道**：benefit 需 `maas_type:benefit` + 三个模型头进签名，agent 反之（带了就报 `unsupported model`）。403 `TM.00001005` = **账号未开通免费席位**，需管理员授权 |
+| **ima** | `ima:glm-5.2` / `ima:hy3-preview`（**不带** `glm-5.3-flash` 这类名字） | `init_session 未返回 session_id` = **解包错**（`session_id` 在响应顶层不在 `data` 信封），与 cookie 无关；`code=600001` = token 过期，**网关会自动续期**（cookie 里的 `IMA-REFRESH-TOKEN`，约 2h 一换） |
+| **autoclaw** | `autoclaw:zai_glm-5.3-flash`（**必须带 `zai_` 路由前缀**） | 406 空 body = 路由 ID 写错，或账号 `power=0` 无对话权限 |
+| **raccoon** | `raccoon:raccoon-8c4485`、`raccoon:raccoon-chat-ml-5-5` | **没有 `glm-5.3-flash` 这类名字**（那是 zai 的）。用错名字报的错误格式与 zai 高度相似，极易误判成平台故障 |
+| **cline** | `cline:cline-free/deepseek-v4.1-flash` | free 池部分模型对**过小的 `max_tokens`** 内部 500（`empty response content`）；网关已把 free 池请求的 max_tokens 抬到 128 下限 |
+| **qoder** | `qoder:Qwen-3-Coder` | 402 `quota exceeded` = **账号额度耗尽**（非代码）。每日积分是**活动制**，服务端不下发时签到返回"当前无可领取活动" |
+| **zai** | `zai:GLM-5.3-Flash`（**大小写敏感**） | 405 `3012 unusual activity` = **账号被风控标记**（billing 正常但 messages 恒拦，官方客户端同样复现，见 `zai-org/feedback#716`）；`plans:[]` = 无生效套餐，`PreviewPlans` 为 0 = 服务端无可领免费额度 |
+
+**探测工具**（仓库根目录，需先起网关）：
+
+```bash
+python probe_gateways.py        # 逐平台打一次 /v1/chat/completions，打印真实上游错误
+python import_codearts.py <accessKeys.csv>   # CodeArts AK/SK 批量导入面板
+```
+
+> 面板的 `/panel/api/zai/accounts` 会回 `captcha.{enabled,pool_size,last_error}`，
+> 是验证码求解器是否真的在出 token 的第一手证据（`last_error` 会直接说明失败原因）。
 
 ### 流式行为细节
 
