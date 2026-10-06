@@ -28,11 +28,11 @@
   display: flex; align-items: center; gap: 8px;
   padding: 8px 11px; border-radius: var(--r-sm);
   background: none; border: 1px solid transparent; cursor: pointer;
-  color: var(--fg-3); font-size: 13px; font-weight: 500; text-align: left;
+  color: var(--fg-2); font-size: 13px; font-weight: 500; text-align: left;
   transition: color var(--t), background var(--t), border-color var(--t);
 }
 @media (hover: hover) and (pointer: fine) {
-  .prail-item:hover { color: var(--fg-2); background: var(--glass-2); }
+  .prail-item:hover { color: var(--fg); background: var(--glass-2); }
 }
 .prail-item:active { transform: scale(.985); }
 .prail-item.on {
@@ -41,14 +41,6 @@
   box-shadow: inset 0 1px 0 var(--hi), var(--shadow-sm);
 }
 .prail-item .nm { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.prail-item .cnt {
-  flex: none; min-width: 20px; text-align: center;
-  font: 600 10.5px var(--mono); font-variant-numeric: tabular-nums;
-  color: var(--fg-3);
-  padding: 2px 6px; border-radius: var(--pill);
-  border: 1px solid var(--edge);
-}
-.prail-item.on .cnt { color: var(--fg-2); border-color: var(--edge-2); }
 
 /* ── 添加账号：平台选择列表（先选平台，再出表单）────────────── */
 .addlist { display: flex; flex-direction: column; gap: 2px; }

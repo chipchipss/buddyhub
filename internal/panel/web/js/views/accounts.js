@@ -43,44 +43,13 @@ async function loadDir(quiet = true) {
 
 /* ── 左列：垂直平台导航 ─────────────────────────────────────────
    只列**有账号**的平台；腾讯恒在（账号池），目录恒在（跨平台总览）。
-   每行：平台名 + 右侧账号数徽标；当前项高亮。 */
+   每行只有平台名；当前项高亮。 */
 function railList(dirData, cur, focus) {
-
-  // 从目录数据统计各分段账号数；目录没加载出来时不阻塞导航
-  const countOf = seg => {
-    if (seg === 'pool') {
-      const d = overview();
-      return d ? (d.accounts || []).length : null;
-    }
-    if (seg === 'zai') {
-      const g = dirData && (dirData.platforms || []).find(p => p.id === 'zai');
-      const n = g ? (g.accounts || []).length : 0;
-      return n > 0 ? n : null;
-    }
-    if (seg === 'ext') {
-      const plats = (dirData && dirData.platforms) || [];
-      let n = 0;
-      for (const p of plats) {
-        if (p.id === 'workbuddy' || p.id === 'zai' || p.id === 'codex' || p.id === 'free') continue;
-        n += (p.accounts || []).length;
-      }
-      return n > 0 ? n : null;
-    }
-    return null;
-  };
-
-  const item = (seg, label, hint) => {
-    const n = countOf(seg);
-    const on = cur === seg;
-    return h('button', {
-      class: 'prail-item' + (on ? ' on' : ''),
-      onclick: () => setTab(seg),
-      title: hint || label,
-    },
-      h('span', { class: 'nm', text: label }),
-      n != null ? h('span', { class: 'cnt', text: String(n) }) : null,
-    );
-  };
+  const item = (seg, label, hint) => h('button', {
+    class: 'prail-item' + (cur === seg ? ' on' : ''),
+    onclick: () => setTab(seg),
+    title: hint || label,
+  }, h('span', { class: 'nm', text: label }));
 
   const list = h('div', { class: 'prail' },
     item('pool', '账号池', '腾讯 WorkBuddy 对话账号'),
@@ -109,10 +78,7 @@ function itemPlatform(p, cur, focus) {
     class: 'prail-item' + (on ? ' on' : ''),
     onclick: () => { extFocus.set(p.id); setTab('ext'); },
     title: p.note || p.name,
-  },
-    h('span', { class: 'nm', text: platName(p.id) }),
-    h('span', { class: 'cnt', text: String((p.accounts || []).length) }),
-  );
+  }, h('span', { class: 'nm', text: platName(p.id) }));
 }
 
 const extFocus = signal('');
