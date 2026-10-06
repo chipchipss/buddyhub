@@ -1,25 +1,24 @@
 /* ══════════════════════════════════════════════════════════════════
    views/accounts.js · 账号
-   所有平台账号的**唯一管理地**：
-     账号池   —— 腾讯 WorkBuddy 对话真账号（可运维卡片）
-     Z.AI     —— Z.AI 账号池（Plan JWT / API Key）
-     外部平台 —— extstore 账号（扫码/授权/逐字段入池）
-     全部平台 —— 跨平台只读目录（点击进对应管理分段）
-   hash 子状态（#accounts?tab=pool 等）可深链、可刷新保持。
-   状态一律单色三档：实心点=可用 · 空心环=冷却 · 虚线/灰点=停用（见 status.js）。
+   垂直平台导航 + 内容区：
+     左列 = 平台清单（只显示**有账号**的平台，外加固定两项：
+            账号池 [腾讯] 与 全部平台 [目录]），每行带账号数徽标；
+     右侧 = 所选平台的账号管理界面。
+   状态一律单色三档（见 status.js）。hash 子状态（#accounts?tab=xxx）可深链。
    ══════════════════════════════════════════════════════════════════ */
 
 import { h, icon, signal, api, toast, ago, fmtToken, fmtMs, fmtRate, confirmDialog } from '../kernel.js';
-import { defineView, navigate, parseHash, setHashSeg } from '../shell.js';
+import { defineView, parseHash, setHashSeg } from '../shell.js';
 import { overview, refreshOverview } from '../store.js';
 import { openAccountDrawer } from '../drawers.js';
-import { loadPlatforms, platName } from '../platforms.js';
+import { loadPlatforms, platforms, platName } from '../platforms.js';
 import { statusOf, statusChip } from '../status.js';
 import { zaiSegment } from './zai-segment.js';
 import { extSegment } from './ext-segment.js';
 
 const TABS = ['pool', 'zai', 'ext', 'dir'];
-const tab = signal('pool');          // pool | zai | ext | dir
+const TAB_LABELS = { pool: '账号池', zai: 'Z.AI', ext: '外部平台', dir: '全部平台' };
+const tab = signal('pool');
 const dir = signal(null);
 const dirPlat = signal('all');
 
@@ -41,6 +40,82 @@ async function loadDir(quiet = true) {
   }
   catch (e) { if (!quiet) toast(e.message, 'fail'); }
 }
+
+/* ── 左列：垂直平台导航 ─────────────────────────────────────────
+   只列**有账号**的平台；腾讯恒在（账号池），目录恒在（跨平台总览）。
+   每行：平台名 + 右侧账号数徽标；当前项高亮。 */
+function railList(dirData, cur, focus) {
+
+  // 从目录数据统计各分段账号数；目录没加载出来时不阻塞导航
+  const countOf = seg => {
+    if (seg === 'pool') {
+      const d = overview();
+      return d ? (d.accounts || []).length : null;
+    }
+    if (seg === 'zai') {
+      const g = dirData && (dirData.platforms || []).find(p => p.id === 'zai');
+      const n = g ? (g.accounts || []).length : 0;
+      return n > 0 ? n : null;
+    }
+    if (seg === 'ext') {
+      const plats = (dirData && dirData.platforms) || [];
+      let n = 0;
+      for (const p of plats) {
+        if (p.id === 'workbuddy' || p.id === 'zai' || p.id === 'codex' || p.id === 'free') continue;
+        n += (p.accounts || []).length;
+      }
+      return n > 0 ? n : null;
+    }
+    return null;
+  };
+
+  const item = (seg, label, hint) => {
+    const n = countOf(seg);
+    const on = cur === seg;
+    return h('button', {
+      class: 'prail-item' + (on ? ' on' : ''),
+      onclick: () => setTab(seg),
+      title: hint || label,
+    },
+      h('span', { class: 'nm', text: label }),
+      n != null ? h('span', { class: 'cnt', text: String(n) }) : null,
+    );
+  };
+
+  const list = h('div', { class: 'prail' },
+    item('pool', '账号池', '腾讯 WorkBuddy 对话账号'),
+  );
+
+  // 有账号的外部平台逐个平铺（不用「外部平台」聚合层）——zai 有专属界面，单独一项
+  const plats = (dirData && dirData.platforms) || [];
+  const zaiG = plats.find(p => p.id === 'zai');
+  if (zaiG && (zaiG.accounts || []).length) list.append(item('zai', 'Z.AI', 'Z.AI / 智谱账号池'));
+
+  const extPlats = plats.filter(p => {
+    if (p.id === 'workbuddy' || p.id === 'zai') return false;
+    if (p.login === 'none' || p.login === 'config') return false; // codex / free 走配置页
+    return (p.accounts || []).length > 0;
+  });
+  for (const p of extPlats) list.append(itemPlatform(p, cur, focus));
+
+  list.append(item('dir', '全部平台', '跨平台只读目录'));
+  return list;
+}
+
+// 平台行：点击进入外部平台分段并预选该平台（extSegment 按 focus 高亮）
+function itemPlatform(p, cur, focus) {
+  const on = cur === 'ext' && focus === p.id;
+  return h('button', {
+    class: 'prail-item' + (on ? ' on' : ''),
+    onclick: () => { extFocus.set(p.id); setTab('ext'); },
+    title: p.note || p.name,
+  },
+    h('span', { class: 'nm', text: platName(p.id) }),
+    h('span', { class: 'cnt', text: String((p.accounts || []).length) }),
+  );
+}
+
+const extFocus = signal('');
 
 async function act(uid, path, body, okMsg) {
   try {
@@ -135,18 +210,11 @@ function poolView() {
 function dirView() {
   const d = dir();
   if (!d) return h('div', { class: 'busy', text: '读取平台目录' });
-  const plats = d.platforms || [];
-  const shown = dirPlat() === 'all' ? plats : plats.filter(p => p.id === dirPlat());
+  const plats = (d.platforms || []).filter(p => (p.accounts || []).length > 0);   // 只显示有账号的
+  if (!plats.length) return h('div', { class: 'empty' }, h('div', { class: 'd', text: '还没有任何账号' }));
+  const segOf = { workbuddy: 'pool', zai: 'zai' };
   return h('div', { class: 'stack' },
-    h('div', { class: 'row wrap' },
-      ...[{ id: 'all', name: '全部', n: plats.reduce((s, p) => s + (p.accounts || []).length, 0) }]
-        .concat(plats.map(p => ({ id: p.id, name: platName(p.id), n: (p.accounts || []).length })))
-        .map(c => h('button', {
-          class: 'btn sm' + (dirPlat() === c.id ? ' primary' : ''),
-          onclick: () => { dirPlat.set(c.id); },
-        }, `${c.name} ${c.n}`)),
-    ),
-    ...shown.map(p => {
+    ...plats.map(p => {
       const accts = p.accounts || [];
       return h('section', { class: 'card' },
         h('header', null,
@@ -156,30 +224,22 @@ function dirView() {
           h('span', { class: 'hint', text: `${accts.length} 个账号` }),
           h('button', {
             class: 'btn sm ghost',
-            // 后端下发 manage_to（#accounts / #accounts?seg=zai|ext / #config）；
-            // 同视图跳转时按平台落到真实分段，异视图直接导航。
             onclick: () => {
-              const to = p.manage_to || '#accounts';
-              if (to.startsWith('#accounts')) {
-                const seg = (to.split('?seg=')[1]) || 'pool';
-                setTab(TABS.includes(seg) ? seg : 'pool');
-              } else {
-                navigate(to.slice(1));
-              }
+              if (p.id in segOf) { setTab(segOf[p.id]); return; }
+              if (p.login === 'none' || p.login === 'config') { /* codex/free 等在配置页 */ }
+              else { extFocus.set(p.id); setTab('ext'); }
             },
           }, '管理 →'),
         ),
-        accts.length
-          ? h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
-            h('thead', null, h('tr', null, h('th', { text: '账号' }), h('th', { text: '状态' }), h('th', { text: '额度' }), h('th', { text: '备注' }))),
-            h('tbody', null, ...accts.map(a => h('tr', null,
-              h('td', null, h('div', { style: { fontWeight: '550' }, text: a.label || a.id }), h('div', { class: 'muted', style: { font: '10.5px var(--mono)' }, text: a.id })),
-              h('td', null, statusChip(statusOf(a))),
-              h('td', { class: 'num', text: a.quota || '—' }),
-              h('td', { class: 'muted', text: a.detail || '' }),
-            ))),
-          ))
-          : h('div', { class: 'body' }, h('div', { class: 'empty' }, h('div', { class: 'd', text: '该平台暂无账号' }))),
+        h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
+          h('thead', null, h('tr', null, h('th', { text: '账号' }), h('th', { text: '状态' }), h('th', { text: '额度' }), h('th', { text: '备注' }))),
+          h('tbody', null, ...accts.map(a => h('tr', null,
+            h('td', null, h('div', { style: { fontWeight: '550' }, text: a.label || a.id }), h('div', { class: 'muted', style: { font: '10.5px var(--mono)' }, text: a.id })),
+            h('td', null, statusChip(statusOf(a))),
+            h('td', { class: 'num', text: a.quota || '—' }),
+            h('td', { class: 'muted', text: a.detail || '' }),
+          ))),
+        )),
       );
     }),
   );
@@ -194,37 +254,35 @@ export default defineView({
   sub() {
     const t = tab.peek();
     if (t === 'zai') return 'Z.AI 账号池';
-    if (t === 'ext') return '外部平台账号';
     if (t === 'dir') return '全部平台目录';
+    if (String(t).startsWith('ext')) return platName(String(t).slice(4));
+    if (t !== 'pool') return TAB_LABELS[t] || '';
     const d = overview();
     if (!d) return '正在连接…';
     return `${d.total} 个账号 · ${d.healthy} 可用 · ${d.cooling} 冷却 · ${d.disabled} 禁用`;
   },
   tick() {
-    const t = tab.peek();
-    if (t === 'pool' || t === 'dir') refreshOverview();
-    if (t === 'dir') loadDir();
-    if (t === 'ext') { /* extSegment 自带 tick 数据源（ext 订阅在视图内轮询） */ }
+    refreshOverview();
+    if (tab.peek() === 'dir') loadDir();
   },
   render() {
     syncTabFromHash();
+    // 目录数据懒加载：左列需要它来列平台；没加载出来时左列先只有「账号池」
+    if (dir.peek() === null) loadDir();
+    // 响应式读取：tab / extFocus / dir 任一变化都会重渲染本视图
     const t = tab();
-    const segBtn = (v, label) => h('button', { class: t === v ? 'on' : '', text: label, onclick: () => setTab(v) });
-    return h('div', { class: 'view stack' },
-      h('div', { class: 'row' },
-        h('div', { class: 'seg' },
-          segBtn('pool', '账号池'),
-          segBtn('zai', 'Z.AI'),
-          segBtn('ext', '外部平台'),
-          segBtn('dir', '全部平台'),
-        ),
-        h('span', { class: 'grow' }),
-        h('button', { class: 'btn sm ghost', onclick: () => { refreshOverview(); loadDir(); } }, icon('refresh'), '刷新'),
-      ),
-      t === 'pool' ? poolView()
-        : t === 'zai' ? zaiSegment()
-          : t === 'ext' ? extSegment()
-            : dirView(),
+    const focus = extFocus();
+    const d = dir();
+
+    let body;
+    if (t === 'pool') body = poolView();
+    else if (t === 'zai') body = zaiSegment();
+    else if (t === 'dir') body = dirView();
+    else body = extSegment(focus);
+
+    return h('div', { class: 'view acct-layout' },
+      railList(d, t, focus),
+      h('div', { class: 'acct-content stack' }, body),
     );
   },
 });

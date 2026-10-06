@@ -10,6 +10,7 @@ import { qrMatrix, qrSVG } from './qr.js';
 import { refreshOverview } from './store.js';
 import { navigate } from './shell.js';
 import { flowStore, pollLoop } from './loginflow.js';
+import { platforms } from './platforms.js';
 import { extAddPanel, stopExtAddTimers } from './views/ext-add.js';
 import { zaiAddForm } from './views/zai-segment.js';
 
@@ -43,7 +44,7 @@ function resumeTencentLogin() {
 }
 
 export function openAddAccount() {
-  addTab.set('tencent');
+  addTab.set('');
   status.set({ kind: '', text: '' });
   loomyInfo.set(null);
   if (!loginState.peek()) resumeTencentLogin();  // 有进行中的授权则恢复显示
@@ -69,37 +70,83 @@ function renderAdd() {
   });
 }
 
-// 每个平台的接入方式（新增平台时只改这张表）
-const ADD_TABS = [
-  ['tencent', '腾讯 WorkBuddy'],
-  ['loomy', 'Loomy'],
-  ['zai', 'Z.AI'],
-  ['ext', '外部平台'],
-  ['import', '手动 JSON'],
-];
+/* 添加账号入口：先选平台，再出该平台的导入表单（一次只看一个平台）。
+   平台清单来自注册表（platforms.js）：有 login 方式的都可入池；
+   三个有专属面板的平台（腾讯 / Loomy / Z.AI）走各自的 panel，
+   其余走通用 extAddPanel；JSON 批量导入作为最后一项工具入口。 */
+const BESPOKE_PANELS = { tencent: tencentPanel, loomy: loomyPanel, zai: zaiPanel };
 
-function tabsRow() {
-  return h('div', { class: 'seg', style: { flexWrap: 'wrap' } },
-    ...ADD_TABS.map(([v, n]) => h('button', {
-      class: addTab.peek() === v ? 'on' : '', text: n,
-      onclick: () => { addTab.set(v); stopPoll(); renderAdd(); },
-    })),
+function platformRows() {
+  const cur = addTab.peek();
+  const reg = platforms.peek();
+
+  const row = (id, name, hint) => h('button', {
+    class: 'addrow' + (cur === id ? ' on' : ''),
+    onclick: () => { addTab.set(id); stopPoll(); stopExtAddTimers(); renderAdd(); },
+  },
+    h('span', { class: 'nm', text: name }),
+    h('span', { class: 'hint', text: hint }),
+    h('span', { class: 'grow' }),
+    h('span', { class: 'chev', 'aria-hidden': 'true' }, '›'),
   );
+
+  const rows = [];
+
+  // 三个专属面板的平台（顺序固定）
+  rows.push(row('tencent', '腾讯 WorkBuddy', '浏览器 OAuth 登录 · CN / Global'));
+  const loomyP = reg.find(p => p.id === 'loomy');
+  if (loomyP) rows.push(row('loomy', loomyP.name, loomyP.note || '客户端检测 / 手机号 / Token'));
+  const zaiP = reg.find(p => p.id === 'zai');
+  if (zaiP) rows.push(row('zai', zaiP.name, 'OAuth 免密 / JWT / API Key'));
+
+  // 其余有 login 方式的平台（通用表单）
+  for (const p of reg) {
+    if (!p.login || p.id in BESPOKE_PANELS || p.id === 'loomy' || p.id === 'zai') continue;
+    if (p.login === 'none' || p.login === 'config') continue;   // codex / free 走配置页
+    rows.push(row('ext:' + p.id, p.name, p.note || '按平台引导入池'));
+  }
+
+  rows.push(row('import', '批量 JSON 导入', 'cockpit tools 导出的账号数组'));
+  return rows;
 }
 
 function tabBody() {
-  return h('div', { class: 'stack' },
-    tabsRow(),
-    addTab.peek() === 'tencent' ? tencentPanel()
-      : addTab.peek() === 'loomy' ? loomyPanel()
-        : addTab.peek() === 'zai' ? zaiPanel()
-          : addTab.peek() === 'ext' ? extPanel()
+  const cur = addTab.peek();
+  // 未选择平台：出平台清单（默认状态）
+  if (cur === 'tencent' || cur === 'loomy' || cur === 'zai' || cur === 'import') {
+    return h('div', { class: 'stack' },
+      h('button', { class: 'addrow back', onclick: () => { addTab.set(''); stopPoll(); stopExtAddTimers(); renderAdd(); } },
+        h('span', { class: 'chev', 'aria-hidden': 'true' }, '‹'),
+        h('span', { class: 'nm', text: '选择其他平台' })),
+      cur === 'tencent' ? tencentPanel()
+        : cur === 'loomy' ? loomyPanel()
+          : cur === 'zai' ? zaiPanel()
             : importPanel(),
-    status.peek().text
-      ? h('div', { class: 'chip' + (status.peek().kind === 'fail' ? ' faint' : ' strong'),
-          style: { padding: '10px 13px', whiteSpace: 'normal', display: 'block' },
-          text: status.peek().text })
-      : null,
+      status.peek().text
+        ? h('div', { class: 'chip' + (status.peek().kind === 'fail' ? ' faint' : ' strong'),
+            style: { padding: '10px 13px', whiteSpace: 'normal', display: 'block' },
+            text: status.peek().text })
+        : null,
+    );
+  }
+  if (String(cur).startsWith('ext:')) {
+    const prov = String(cur).slice(4);
+    return h('div', { class: 'stack' },
+      h('button', { class: 'addrow back', onclick: () => { addTab.set(''); stopPoll(); stopExtAddTimers(); renderAdd(); } },
+        h('span', { class: 'chev', 'aria-hidden': 'true' }, '‹'),
+        h('span', { class: 'nm', text: '选择其他平台' })),
+      extAddPanel(() => refreshOverview(), { flat: true, lockProvider: prov }),
+      status.peek().text
+        ? h('div', { class: 'chip' + (status.peek().kind === 'fail' ? ' faint' : ' strong'),
+            style: { padding: '10px 13px', whiteSpace: 'normal', display: 'block' },
+            text: status.peek().text })
+        : null,
+    );
+  }
+  // 平台选择页
+  return h('div', { class: 'stack' },
+    h('div', { class: 'muted', style: { fontSize: '12px' }, text: '选择要添加的平台，凭据直接落盘进池，无需重启。' }),
+    h('div', { class: 'addlist' }, ...platformRows()),
   );
 }
 

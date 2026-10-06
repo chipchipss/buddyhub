@@ -35,17 +35,22 @@ async function extAct(provider, id, action, body) {
   } catch (e) { toast(e.message, 'fail'); }
 }
 
-export function extSegment() {
+/** extSegment(focusProvider) —— 外部平台账号管理面。
+ *  focusProvider 传入平台 id 时只显示该平台的账号，标题随平台，
+ *  且隐藏「一键签到全部」（跨平台动作在无 focus 的聚合视图里）。 */
+export function extSegment(focusProvider = '') {
   const d = ext();
-  const list = (d && d.accounts) || [];
+  const all = (d && d.accounts) || [];
+  const list = focusProvider ? all.filter(a => a.provider === focusProvider) : all;
+  const title = focusProvider ? platName(focusProvider) : '外部平台账号';
   return h('section', { class: 'card' },
     h('header', null,
-      h('h2', { text: '外部平台账号' }),
+      h('h2', { text: title }),
       h('span', { class: 'hint', text: '每日签到由「任务」排程执行' }),
       h('span', { class: 'grow' }),
       h('span', { class: 'hint', text: d ? `${list.length} 个账号 · ${list.filter(a => a.balance_ok).length} 个余额正常` : '' }),
       h('button', { class: 'btn sm ghost', onclick: () => loadExt(false) }, icon('refresh'), '刷新'),
-      h('button', {
+      focusProvider ? null : h('button', {
         class: 'btn sm primary', onclick: async ev => {
           var __b = ev.currentTarget; if (__b) __b.disabled = true;
           try {
@@ -67,7 +72,7 @@ export function extSegment() {
           ? h('div', { class: 'acct-grid' }, ...list.map(a => h('article', { class: 'acct' + (a.disabled ? ' off' : '') },
             h('div', { class: 'top' },
               h('div', { class: 'who' },
-                h('div', { class: 'nm', text: `${platName(a.provider)} · ${a.label || a.id}` }),
+                h('div', { class: 'nm', text: focusProvider ? (a.label || a.id) : `${platName(a.provider)} · ${a.label || a.id}` }),
                 h('div', { class: 'id', text: a.id }),
               ),
               statusChip(statusOf(a)),
@@ -100,11 +105,12 @@ export function extSegment() {
               }, '删除'),
             ),
           )))
-          : h('div', { class: 'empty' }, icon('accounts'), h('div', { class: 't', text: '还没有外部账号' }),
-            h('div', { class: 'd', text: '可用「添加账号」弹层，或在下方手工粘贴凭据' })),
+          : h('div', { class: 'empty' }, icon('accounts'),
+            h('div', { class: 't', text: focusProvider ? `还没有 ${platName(focusProvider)} 账号` : '还没有外部账号' }),
+            h('div', { class: 'd', text: '点右上角「添加账号」，或在下方表单直接添加' })),
 
-      // 逐字段添加（每个平台按自己的凭据形态出表单）
-      extAddPanel(loadExt),
+      // 逐字段添加（每个平台按自己的凭据形态出表单）；focus 时锁定该平台
+      extAddPanel(loadExt, focusProvider ? { lockProvider: focusProvider } : {}),
 
       h('details', { style: { marginTop: '6px' } },
         h('summary', { class: 'muted', style: { cursor: 'pointer', fontSize: '12.5px' }, text: '高级：粘贴完整凭据 JSON' }),

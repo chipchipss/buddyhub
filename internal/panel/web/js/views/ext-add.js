@@ -185,7 +185,9 @@ function genericPlatforms() {
  *  实测小浣熊扫码快所以能成，Qoder / Copilot 要在浏览器里操作更久，必死。
  *  定时器只在用户显式放弃（关闭抽屉 / 重新发起）时才停。 */
 export function extAddPanel(onAdded, opts = {}) {
-  let provider = '';
+  // opts.lockProvider：锁定单一平台（聚焦视图用）——不出现平台选择器，
+  // 直接渲染该平台的登录/凭据表单。
+  let provider = opts.lockProvider || '';
 
   const bodyBox = h('div', { class: 'stack', style: { gap: '10px', marginTop: '10px' } });
   const tipEl = h('div', { class: 'muted', style: { fontSize: '11.5px' } });
@@ -198,6 +200,7 @@ export function extAddPanel(onAdded, opts = {}) {
 
   // 平台清单是异步拉的：到位后重建下拉并选中第一个（保持当前选择若还在）。
   function fillProviders() {
+    if (opts.lockProvider) return plat(opts.lockProvider) != null;
     const list = genericPlatforms();
     if (!list.length) return false;
     const keep = list.some(p => p.id === provider) ? provider : list[0].id;
@@ -548,7 +551,7 @@ export function extAddPanel(onAdded, opts = {}) {
   }
 
   const inner = h('div', { class: 'stack' },
-    h('div', { class: 'row wrap', style: { gap: '8px' } }, providerSel),
+    opts.lockProvider ? null : h('div', { class: 'row wrap', style: { gap: '8px' } }, providerSel),
     bodyBox,
     tipEl,
   );
