@@ -27,7 +27,7 @@ type dirAccount struct {
 	Status   string `json:"status"`    // healthy/cooling/off/unknown
 	Quota    string `json:"quota"`     // "1234/5000" 形态展示（平台尽力而为）
 	Detail   string `json:"detail"`    // 平台自由文本（冷却原因/余额 note）
-	ManageTo string `json:"manage_to"` // 前端跳转 hash（#accounts/#ext/#config）
+	ManageTo string `json:"manage_to"` // 前端跳转 hash（#accounts / #accounts?seg=zai|ext / #config）
 }
 
 // dirPlatform 单平台分组。
@@ -51,14 +51,21 @@ func maskKey(k string) string {
 }
 
 // manageToFor 该平台的管理页跳转目标。
+//
+// 前端视图注册表里只有 overview/accounts/usage/tasks/models/keys/config/logs
+// 这些真实视图；Z.AI 与外部平台的管理界面是「账号」视图的分段
+// （#accounts?seg=zai / #accounts?seg=ext），不是独立 hash——指向不存在的
+// #ext 会被 navigate 回落到第一个视图，表现为「点了没反应」。
 func manageToFor(pl Platform) string {
 	switch {
 	case pl.ID == "workbuddy":
 		return "#accounts"
+	case pl.ID == "zai":
+		return "#accounts?seg=zai"
 	case pl.Login == LoginNone || pl.Login == LoginConfig:
 		return "#config" // 本机凭据 / 配置页填写
 	default:
-		return "#ext"
+		return "#accounts?seg=ext"
 	}
 }
 
@@ -127,7 +134,7 @@ func (p *Panel) accountsDir(w http.ResponseWriter, r *http.Request) {
 						detail = s.LastErr
 					}
 					g.Accounts = append(g.Accounts, dirAccount{
-						ID: s.ID, Label: s.Name, Status: st, Detail: detail, ManageTo: "#ext",
+						ID: s.ID, Label: s.Name, Status: st, Detail: detail, ManageTo: "#accounts?seg=zai",
 					})
 				}
 			}

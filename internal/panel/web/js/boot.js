@@ -12,7 +12,7 @@ import { openAddAccount } from './drawers.js';
 import './views/overview.js';
 import './views/accounts.js';
 import './views/usage.js';
-import './views/automation.js';
+import './views/tasks.js';
 import './views/models.js';
 import './views/keys.js';
 import './views/config.js';

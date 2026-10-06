@@ -6,6 +6,7 @@
 import { h, icon, signal, api, toast, ago } from '../kernel.js';
 import { defineView, navigate } from '../shell.js';
 import { overview, refreshOverview } from '../store.js';
+import { statusOf } from '../status.js';
 
 const dir = signal(null);
 const recent = signal(null);
@@ -31,7 +32,8 @@ async function loadRecent(quiet = true) {
 async function batch(path, label) {
   try {
     await api(path, { method: 'POST' });
-    toast(label + '已开始，结果见日志');
+    // 结果落在运行日志：给一条直达入口，而不是让用户自己去找
+    toast(label + '已开始', undefined, { action: { label: '查看日志', onclick: () => navigate('logs') } });
   } catch (e) { toast(e.message, 'fail'); }
 }
 
@@ -60,9 +62,7 @@ function healthRow(accts) {
 }
 
 function cooling(a) {
-  const bl = (new Date(a.breaker_until || 0) - Date.now()) / 1000;
-  const dg = (new Date(a.degrade_until || 0) - Date.now()) / 1000;
-  return Math.max(a.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0) > 0;
+  return statusOf(a).level !== 'ok';
 }
 
 function creditsLabel(accts) {

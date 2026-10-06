@@ -5,6 +5,7 @@
 
 import { h, icon, signal, api, toast, fmtK } from '../kernel.js';
 import { defineView } from '../shell.js';
+import { platforms, loadPlatforms, platName } from '../platforms.js';
 
 const models = signal(null);
 const probes = signal({});
@@ -54,13 +55,13 @@ function rateCell(m) {
   return m.credits || '—';
 }
 
+// 平台归属从前缀推出——清单来自注册表（platforms.js），不再自带名字表。
+// 腾讯模型无前缀（裸 id / cn: / global:），作为兜底分组。
 function platOf(id) {
-  if (id.startsWith('loomy:')) return ['loomy', 'Loomy（讯飞）'];
-  if (id.startsWith('qoder:')) return ['qoder', 'Qoder（阿里）'];
-  if (id.startsWith('zai:')) return ['zai', 'Z.AI 智谱 GLM'];
-  if (id.startsWith('codex:')) return ['codex', 'Codex 订阅池'];
-  if (id.startsWith('free:')) return ['free', '免费 Key 池'];
-  return ['workbuddy', '腾讯 WorkBuddy'];
+  if (!id.includes(':')) return ['workbuddy', platName('workbuddy')];
+  const prefix = id.slice(0, id.indexOf(':') + 1);
+  const p = platforms.peek().find(x => x.prefix === prefix);
+  return p ? [p.id, p.name] : ['workbuddy', platName('workbuddy')];
 }
 
 async function load(quiet = true) {
@@ -69,6 +70,7 @@ async function load(quiet = true) {
     const [d, pr] = await Promise.all([api('models'), api('model_probes').catch(() => ({}))]);
     models.set(d.models || []);
     probes.set(pr.probes || {});
+    loadedAt = new Date().toLocaleTimeString('zh-CN', { hour12: false });
   } catch (e) {
     err.set(e.message);
     if (!quiet) toast(e.message, 'fail');
@@ -102,7 +104,10 @@ function modelRow(m, probeOf) {
   );
 }
 
+// 一次性加载：模型清单每次都实时打上游（慢且上游 WAF 敏感），不适合 5s tick。
+// 加载时刻透出在副标题，让「数据多旧」可见，而不是看起来像实时。
 let started = false;
+let loadedAt = '';
 function ensureLoaded() {
   if (started) return;
   started = true;
@@ -117,10 +122,12 @@ export default defineView({
   keywords: '模型 倍率 档位 max tokens',
   sub() {
     const list = models();
-    return list ? `${list.length} 个模型 · 实时查询上游` : '正在向上游查询…';
+    if (!list) return '正在向上游查询…';
+    return `${list.length} 个模型 · ${loadedAt ? loadedAt + ' 获取' : '查询中'}`;
   },
   render() {
     ensureLoaded();
+    loadPlatforms();
     const list = models();
     const pr = probes();
     const keys = Object.keys(pr);
@@ -145,7 +152,7 @@ export default defineView({
       h('section', { class: 'card' },
         h('header', null,
           h('h2', { text: '模型能力' }),
-          h('span', { class: 'hint', text: '最大输出含实测标注，官方声称值仅供参考' }),
+          h('span', { class: 'hint', text: '最大输出含实测标注，官方声称值仅供参考 · 清单非实时，点「重新获取」拉新' }),
           h('span', { class: 'grow' }),
           h('button', { class: 'btn sm', onclick: () => load(false) }, icon('refresh'), '重新获取'),
         ),

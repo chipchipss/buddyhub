@@ -131,7 +131,7 @@ process.exit(0);
 	if err := os.WriteFile(hf, []byte(harness), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, hash := range []string{"#overview", "#accounts", "#usage", "#automation", "#models", "#keys", "#config", "#logs"} {
+	for _, hash := range []string{"#overview", "#accounts", "#accounts?seg=zai", "#accounts?seg=ext", "#usage", "#tasks", "#tasks?seg=loomy", "#models", "#keys", "#config", "#logs"} {
 		cmd := exec.Command(node, hf)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "SMOKE_HASH="+hash)

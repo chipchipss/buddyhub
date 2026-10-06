@@ -48,4 +48,5 @@ export async function refreshOverview(quiet = true) {
 }
 
 /* ── 当前视图 ─────────────────────────────────────────────────── */
-export const viewId = signal((location.hash || '#overview').slice(1));
+// 初始视图取 hash 的 view 部分（#accounts?tab=ext → accounts；子状态由各视图自行解析）
+export const viewId = signal(((location.hash || '#overview').slice(1).split('?')[0]) || 'overview');

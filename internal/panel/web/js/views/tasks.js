@@ -1,17 +1,29 @@
 /* ══════════════════════════════════════════════════════════════════
-   views/automation.js · 自动化
-   三段工作台：腾讯成长任务 / Loomy 新手之旅 / 外部平台签到
+   views/tasks.js · 任务
+   纯任务工作台：腾讯成长任务队列 / Loomy 新手之旅 / 开学季券码。
+   （账号管理归「账号」视图：Z.AI 段在 views/zai-segment.js，
+   外部平台段在 views/ext-segment.js，由 accounts.js 装配。）
    ══════════════════════════════════════════════════════════════════ */
 
 import { h, icon, signal, api, toast, confirmDialog } from '../kernel.js';
-import { defineView } from '../shell.js';
+import { defineView, parseHash, setHashSeg } from '../shell.js';
 import { refreshOverview } from '../store.js';
 import { openVouchers } from '../drawers.js';
-import { zaiSegment, loadZai } from './zai-segment.js';
-import { extAddPanel } from './ext-add.js';
-import { platforms, loadPlatforms, platName, platHasCheckin } from '../platforms.js';
+import { platName } from '../platforms.js';
 
+const SEGS = ['tencent', 'loomy'];
 const seg = signal('tencent');
+
+// hash 子状态：#tasks?seg=loomy —— 深链/刷新/后退都落在同一段
+export function syncSegFromHash() {
+  const v = parseHash().seg;
+  if (SEGS.includes(v)) seg.set(v);
+}
+function setSeg(v) {
+  seg.set(v);
+  setHashSeg('tasks', v);
+  if (v === 'loomy') { loadLoomy(); loadCredits(); }
+}
 const queue = signal(null);
 const queueSeq = signal(0);
 const conc = signal(1);
@@ -19,7 +31,6 @@ const loomy = signal(null);
 const loomyMsg = signal('');
 const credits = signal(null);
 const ext = signal(null);
-const extMsg = signal('');
 
 let queueTimer = null;
 const GROWTH_TITLES = {};
@@ -38,12 +49,6 @@ async function scanAll(ev) {
 }
 
 const scannedGroups = signal(null);
-
-/** fmtCool 把冷却秒数压成短文案（47s / 3m / 30m）。 */
-function fmtCool(sec) {
-  if (sec >= 60) return Math.round(sec / 60) + 'm';
-  return Math.max(1, Math.round(sec)) + 's';
-}
 
 function groupScanned(d) {
   const groups = [];
@@ -280,168 +285,32 @@ function loomySeg() {
   );
 }
 
-/* ── 外部平台 ─────────────────────────────────────────────────── */
-// 平台名与「有没有签到」都来自注册表（platforms.js）——不再自带表
-
-async function loadExt(quiet = true) {
-  try {
-    await loadPlatforms();
-    ext.set(await api('ext/accounts'));
-    extMsg.set('');
-  }
-  catch (e) { extMsg.set(e.message); if (!quiet) toast(e.message, 'fail'); }
-}
-
-async function extAct(provider, id, action, body) {
-  try {
-    const r = await api(`ext/accounts/${encodeURIComponent(provider)}/${encodeURIComponent(id)}/${action}`, {
-      method: 'POST', body: body ? JSON.stringify(body) : undefined,
-    });
-    if (action === 'checkin') {
-      const res = r.result || {};
-      toast(`[${platName(provider)}] ${res.message || res.kind || '完成'}`, res.kind === 'failed' ? 'fail' : undefined);
-    } else if (action === 'remove') toast('已删除');
-    await loadExt();
-  } catch (e) { toast(e.message, 'fail'); }
-}
-
-function extSeg() {
-  const d = ext();
-  const list = (d && d.accounts) || [];
-  return h('section', { class: 'card' },
-    h('header', null,
-      h('h2', { text: '外部平台签到' }),
-      h('span', { class: 'hint', text: '每日 10:00 自动执行' }),
-      h('span', { class: 'grow' }),
-      h('span', { class: 'hint', text: d ? `${list.length} 个账号 · ${list.filter(a => a.balance_ok).length} 个余额正常` : '' }),
-      h('button', { class: 'btn sm ghost', onclick: () => loadExt(false) }, icon('refresh'), '刷新'),
-      h('button', {
-        class: 'btn sm primary', onclick: async ev => {
-          var __b = ev.currentTarget; if (__b) __b.disabled = true;
-          try {
-            const r = await api('ext/checkin_all', { method: 'POST' });
-            const rs = r.results || [];
-            const ok = rs.filter(x => x.kind === 'claimed').length;
-            const already = rs.filter(x => x.kind === 'already-claimed').length;
-            const failed = rs.filter(x => x.kind === 'failed').length;
-            toast(`签到完成：成功 ${ok} · 已领过 ${already} · 失败 ${failed}`, failed ? 'fail' : undefined);
-            await loadExt();
-          } catch (e) { toast(e.message, 'fail'); }
-          finally { if (__b) __b.disabled = false; }
-        },
-      }, icon('check'), '一键签到全部'),
-    ),
-    h('div', { class: 'body stack' },
-      extMsg() ? h('div', { class: 'empty' }, h('div', { class: 'd', text: extMsg() }))
-        : list.length
-          ? h('div', { class: 'acct-grid' }, ...list.map(a => h('article', { class: 'acct' + (a.disabled ? ' off' : '') },
-            h('div', { class: 'top' },
-              h('div', { class: 'who' },
-                h('div', { class: 'nm', text: `${platName(a.provider)} · ${a.label || a.id}` }),
-                h('div', { class: 'id', text: a.id }),
-              ),
-              h('span', { class: 'chip' + (a.disabled ? ' faint' : '') }, h('i', { class: a.disabled ? 'dot off' : 'dot' }), a.disabled ? '已停用' : '启用中'),
-              // 对话侧自动退避。不显示的话，某个号被退避时界面上只表现为
-              // 「莫名不被选中」——用户没有任何线索，也不知道等多久会自己恢复。
-              a.cooldown_sec > 0
-                ? h('span', {
-                  class: 'chip', title: `对话侧自动退避：连续失败 ${a.fail_streak || 1} 次，恢复后重新参与轮换`,
-                }, h('i', { class: 'dot off' }), `冷却 ${fmtCool(a.cooldown_sec)}`)
-                : null,
-            ),
-            h('div', { class: 'credits' },
-              h('div', { class: 'line' },
-                // 无签到的通道（Copilot / Cline / AutoClaw）按「订阅状态」呈现，
-                // 而不是硬凑一个 0 分余额——有没有签到由注册表说了算。
-                !platHasCheckin(a.provider)
-                  ? h('span', { class: 'of', style: { fontSize: '12px' }, text: a.note || '已接入' })
-                  : h('span', { class: 'n', text: a.balance_ok ? String(a.balance ?? 0) : '—' }),
-                platHasCheckin(a.provider)
-                  ? h('span', { class: 'of', text: a.balance_ok ? '分' : (a.note || '') })
-                  : null,
-              ),
-            ),
-            h('div', { class: 'acts' },
-              platHasCheckin(a.provider)
-                ? h('button', { class: 'btn', disabled: a.disabled, onclick: () => extAct(a.provider, a.id, 'checkin') }, '签到')
-                : null,
-              h('button', {
-                class: 'btn', onclick: () => extAct(a.provider, a.id, 'toggle', { disabled: !a.disabled }),
-              }, a.disabled ? '启用' : '停用'),
-              h('button', {
-                class: 'btn danger', onclick: async () => {
-                  if (await confirmDialog(`确定删除 ${platName(a.provider)} 账号 ${a.id}？`, { ok: '删除' })) {
-                    await extAct(a.provider, a.id, 'remove');
-                  }
-                },
-              }, '删除'),
-            ),
-          )))
-          : h('div', { class: 'empty' }, icon('accounts'), h('div', { class: 't', text: '还没有外部账号' }),
-            h('div', { class: 'd', text: '可用「添加账号」弹层，或在下方手工粘贴凭据' })),
-
-      // 逐字段添加（每个平台按自己的凭据形态出表单）
-      extAddPanel(loadExt),
-
-      h('details', { style: { marginTop: '6px' } },
-        h('summary', { class: 'muted', style: { cursor: 'pointer', fontSize: '12.5px' }, text: '高级：粘贴完整凭据 JSON' }),
-        h('div', { class: 'row wrap', style: { marginTop: '10px' } },
-          h('select', { class: 'input', id: 'ext-provider', style: { width: 'auto' } },
-            ...platforms.peek().filter(p => p.login).map(p => h('option', { value: p.id, text: p.name }))),
-          h('input', { class: 'input', id: 'ext-id', placeholder: '账号 ID', style: { flex: '1', minWidth: '140px' } }),
-          h('input', { class: 'input', id: 'ext-cred', placeholder: '凭据 JSON', style: { flex: '2', minWidth: '200px', fontFamily: 'var(--mono)', fontSize: '11.5px' } }),
-          h('button', {
-            class: 'btn sm primary', onclick: async () => {
-              const provider = document.getElementById('ext-provider').value;
-              const id = document.getElementById('ext-id').value.trim();
-              const raw = document.getElementById('ext-cred').value.trim();
-              if (!id) { toast('请填写账号 ID', 'fail'); return; }
-              let cred;
-              try { cred = JSON.parse(raw); } catch { toast('凭据不是合法 JSON', 'fail'); return; }
-              try {
-                await api('ext/accounts', { method: 'POST', body: JSON.stringify({ provider, id, cred }) });
-                toast('账号已添加');
-                document.getElementById('ext-id').value = '';
-                document.getElementById('ext-cred').value = '';
-                await loadExt();
-              } catch (e) { toast(e.message, 'fail'); }
-            },
-          }, '添加'),
-        ),
-      ),
-    ),
-  );
-}
-
 export default defineView({
-  id: 'automation',
-  title: '自动化',
+  id: 'tasks',
+  title: '任务',
   icon: 'automation',
   group: '自动化',
-  keywords: '任务 签到 loomy 外部 队列 自动化',
+  keywords: '任务 签到 loomy 队列 自动化',
   sub() {
     const q = queue();
     if (seg.peek() === 'tencent' && q && q.running) return '任务队列执行中…';
-    return '腾讯成长任务 · Loomy · 外部平台';
+    return '腾讯成长任务 · Loomy 新手之旅';
   },
   tick() {
     if (seg.peek() === 'loomy') loadLoomy();
-    if (seg.peek() === 'ext') loadExt();
-    if (seg.peek() === 'zai') loadZai();
     if (seg.peek() === 'tencent' && queueTimer) pollQueue();
   },
   render() {
+    syncSegFromHash();
     const s = seg();
     return h('div', { class: 'view stack' },
       h('div', { class: 'row' },
         h('div', { class: 'seg' },
-          h('button', { class: s === 'tencent' ? 'on' : '', text: '腾讯任务', onclick: () => seg.set('tencent') }),
-          h('button', { class: s === 'loomy' ? 'on' : '', text: 'Loomy', onclick: () => { seg.set('loomy'); loadLoomy(); loadCredits(); } }),
-          h('button', { class: s === 'ext' ? 'on' : '', text: '外部平台', onclick: () => { seg.set('ext'); loadExt(); } }),
-          h('button', { class: s === 'zai' ? 'on' : '', text: 'Z.AI', onclick: () => { seg.set('zai'); loadZai(); } }),
+          h('button', { class: s === 'tencent' ? 'on' : '', text: '腾讯任务', onclick: () => setSeg('tencent') }),
+          h('button', { class: s === 'loomy' ? 'on' : '', text: 'Loomy', onclick: () => setSeg('loomy') }),
         ),
       ),
-      s === 'tencent' ? tencentSeg() : s === 'loomy' ? loomySeg() : s === 'zai' ? zaiSegment() : extSeg(),
+      s === 'tencent' ? tencentSeg() : loomySeg(),
     );
   },
 });

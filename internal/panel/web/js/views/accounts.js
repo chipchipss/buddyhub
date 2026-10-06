@@ -1,18 +1,38 @@
 /* ══════════════════════════════════════════════════════════════════
    views/accounts.js · 账号
-   两个视角：账号池（可运维的卡片）/ 全部平台目录（跨平台只读总览）。
-   状态一律单色表达：实心点=可用 · 空心环=冷却 · 虚线环=停用。
+   所有平台账号的**唯一管理地**：
+     账号池   —— 腾讯 WorkBuddy 对话真账号（可运维卡片）
+     Z.AI     —— Z.AI 账号池（Plan JWT / API Key）
+     外部平台 —— extstore 账号（扫码/授权/逐字段入池）
+     全部平台 —— 跨平台只读目录（点击进对应管理分段）
+   hash 子状态（#accounts?tab=pool 等）可深链、可刷新保持。
+   状态一律单色三档：实心点=可用 · 空心环=冷却 · 虚线/灰点=停用（见 status.js）。
    ══════════════════════════════════════════════════════════════════ */
 
-import { h, icon, signal, api, toast, ago, dur, fmtToken, fmtMs, fmtRate, confirmDialog } from '../kernel.js';
-import { defineView, navigate } from '../shell.js';
+import { h, icon, signal, api, toast, ago, fmtToken, fmtMs, fmtRate, confirmDialog } from '../kernel.js';
+import { defineView, navigate, parseHash, setHashSeg } from '../shell.js';
 import { overview, refreshOverview } from '../store.js';
 import { openAccountDrawer } from '../drawers.js';
 import { loadPlatforms, platName } from '../platforms.js';
+import { statusOf, statusChip } from '../status.js';
+import { zaiSegment } from './zai-segment.js';
+import { extSegment } from './ext-segment.js';
 
-const tab = signal('pool');          // pool | dir
+const TABS = ['pool', 'zai', 'ext', 'dir'];
+const tab = signal('pool');          // pool | zai | ext | dir
 const dir = signal(null);
 const dirPlat = signal('all');
+
+// hash 子状态：#accounts?tab=ext —— 深链/刷新/后退都落在同一段
+export function syncTabFromHash() {
+  const seg = parseHash().seg || 'pool';
+  if (TABS.includes(seg)) tab.set(seg);
+}
+function setTab(v) {
+  tab.set(v);
+  setHashSeg('accounts', v);
+  if (v === 'dir') loadDir();
+}
 
 async function loadDir(quiet = true) {
   try {
@@ -20,26 +40,6 @@ async function loadDir(quiet = true) {
     dir.set(await api('accounts/dir'));
   }
   catch (e) { if (!quiet) toast(e.message, 'fail'); }
-}
-
-function coolSec(a) {
-  const bl = (new Date(a.breaker_until || 0) - Date.now()) / 1000;
-  const dg = (new Date(a.degrade_until || 0) - Date.now()) / 1000;
-  return Math.max(a.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
-}
-
-function statusOf(a) {
-  if (a.disabled) return { cls: 'dot off', label: '已禁用', note: a.reason || '' };
-  const cool = coolSec(a);
-  if (cool > 0) {
-    const bl = (new Date(a.breaker_until || 0) - Date.now()) / 1000;
-    const dg = (new Date(a.degrade_until || 0) - Date.now()) / 1000;
-    const kind = bl > Math.max(a.cool_remaining_sec || 0, dg) ? '熔断'
-      : dg > (a.cool_remaining_sec || 0) ? '降权'
-      : a.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却';
-    return { cls: 'dot ring', label: `${kind} · ${dur(cool)}`, note: a.reason || '' };
-  }
-  return { cls: 'dot', label: '可用', note: '' };
 }
 
 async function act(uid, path, body, okMsg) {
@@ -62,7 +62,7 @@ function accountCard(a) {
   const total = a.credits_total || 0;
   const pct = total > 0 ? Math.min(100, Math.round((a.credits || 0) / total * 100))
     : Math.round((a.credits || 0) / Math.max(1, ...(overview()?.accounts || []).map(s => s.credits || 0)) * 100);
-  const frozen = a.disabled || coolSec(a) > 0;
+  const frozen = a.disabled || st.level !== 'ok';
 
   const btn = (label, onclick, cls = '') => h('button', {
     class: 'btn ' + cls,
@@ -75,8 +75,7 @@ function accountCard(a) {
         h('div', { class: 'nm', text: a.nickname || '未命名' }),
         h('div', { class: 'id', text: a.uid }),
       ),
-      h('span', { class: 'chip' + (a.disabled ? ' faint' : st.label === '可用' ? ' strong' : ''), title: st.note },
-        h('i', { class: st.cls }), st.label),
+      statusChip(st),
     ),
 
     h('div', { class: 'credits' },
@@ -155,16 +154,27 @@ function dirView() {
           p.api_model ? h('span', { class: 'chip', text: 'API ' + p.api_model }) : h('span', { class: 'chip faint', text: '无对话 API' }),
           h('span', { class: 'grow' }),
           h('span', { class: 'hint', text: `${accts.length} 个账号` }),
-          h('button', { class: 'btn sm ghost', onclick: () => navigate(p.manage_to?.replace('#', '') || 'accounts') }, '平台管理 →'),
+          h('button', {
+            class: 'btn sm ghost',
+            // 后端下发 manage_to（#accounts / #accounts?seg=zai|ext / #config）；
+            // 同视图跳转时按平台落到真实分段，异视图直接导航。
+            onclick: () => {
+              const to = p.manage_to || '#accounts';
+              if (to.startsWith('#accounts')) {
+                const seg = (to.split('?seg=')[1]) || 'pool';
+                setTab(TABS.includes(seg) ? seg : 'pool');
+              } else {
+                navigate(to.slice(1));
+              }
+            },
+          }, '管理 →'),
         ),
         accts.length
           ? h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
             h('thead', null, h('tr', null, h('th', { text: '账号' }), h('th', { text: '状态' }), h('th', { text: '额度' }), h('th', { text: '备注' }))),
             h('tbody', null, ...accts.map(a => h('tr', null,
               h('td', null, h('div', { style: { fontWeight: '550' }, text: a.label || a.id }), h('div', { class: 'muted', style: { font: '10.5px var(--mono)' }, text: a.id })),
-              h('td', null, h('span', { class: 'chip' + (a.status === 'healthy' ? ' strong' : ' faint') },
-                h('i', { class: a.status === 'healthy' ? 'dot' : a.status === 'cooling' ? 'dot ring' : 'dot off' }),
-                a.status === 'healthy' ? '正常' : a.status === 'cooling' ? '冷却' : '停用')),
+              h('td', null, statusChip(statusOf(a))),
               h('td', { class: 'num', text: a.quota || '—' }),
               h('td', { class: 'muted', text: a.detail || '' }),
             ))),
@@ -180,25 +190,41 @@ export default defineView({
   title: '账号',
   icon: 'accounts',
   group: '账号',
-  keywords: '账号 池 目录 平台',
+  keywords: '账号 池 目录 平台 zai 外部',
   sub() {
+    const t = tab.peek();
+    if (t === 'zai') return 'Z.AI 账号池';
+    if (t === 'ext') return '外部平台账号';
+    if (t === 'dir') return '全部平台目录';
     const d = overview();
     if (!d) return '正在连接…';
     return `${d.total} 个账号 · ${d.healthy} 可用 · ${d.cooling} 冷却 · ${d.disabled} 禁用`;
   },
-  tick() { refreshOverview(); if (tab.peek() === 'dir') loadDir(); },
+  tick() {
+    const t = tab.peek();
+    if (t === 'pool' || t === 'dir') refreshOverview();
+    if (t === 'dir') loadDir();
+    if (t === 'ext') { /* extSegment 自带 tick 数据源（ext 订阅在视图内轮询） */ }
+  },
   render() {
-    const isPool = tab() === 'pool';
+    syncTabFromHash();
+    const t = tab();
+    const segBtn = (v, label) => h('button', { class: t === v ? 'on' : '', text: label, onclick: () => setTab(v) });
     return h('div', { class: 'view stack' },
       h('div', { class: 'row' },
         h('div', { class: 'seg' },
-          h('button', { class: isPool ? 'on' : '', text: '账号池', onclick: () => tab.set('pool') }),
-          h('button', { class: isPool ? '' : 'on', text: '全部平台', onclick: () => { tab.set('dir'); loadDir(); } }),
+          segBtn('pool', '账号池'),
+          segBtn('zai', 'Z.AI'),
+          segBtn('ext', '外部平台'),
+          segBtn('dir', '全部平台'),
         ),
         h('span', { class: 'grow' }),
         h('button', { class: 'btn sm ghost', onclick: () => { refreshOverview(); loadDir(); } }, icon('refresh'), '刷新'),
       ),
-      isPool ? poolView() : dirView(),
+      t === 'pool' ? poolView()
+        : t === 'zai' ? zaiSegment()
+          : t === 'ext' ? extSegment()
+            : dirView(),
     );
   },
 });

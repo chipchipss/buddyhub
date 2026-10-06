@@ -1,9 +1,12 @@
 /* ══════════════════════════════════════════════════════════════════
-   views/zai-segment.js · 自动化 → Z.AI（ZCode）
+   views/zai-segment.js · 账号 → Z.AI（ZCode）
    Z.AI 账号池：Plan（JWT，需验证码）与 API Key 回退通道的统一管理面。
+   由 views/accounts.js 装配（也可独立复用）。
    ══════════════════════════════════════════════════════════════════ */
 
 import { h, icon, signal, api, toast, confirmDialog, copyText } from '../kernel.js';
+import { flowStore, pollLoop } from '../loginflow.js';
+import { statusOf } from '../status.js';
 
 const zai = signal(null);
 const zaiErr = signal('');
@@ -12,36 +15,24 @@ const addName = signal('');
 const addSecret = signal('');
 const addProvider = signal('zai');
 const oauth = signal(null);   // { url, flowId, status }
-let oauthTimer = null;
 
-function stopOAuthPoll() { if (oauthTimer) { clearInterval(oauthTimer); oauthTimer = null; } }
-
-/* 进行中的 OAuth 流程 id 落 localStorage。
+/* 进行中的 OAuth 流程 id 落 localStorage（loginflow.js 统一件）。
    用户在智谱页面登录期间如果刷新/切走了面板，模块状态会丢——服务端那条流程
    还在（15 分钟 TTL），但前端不知道 flow_id 就再也轮询不到了，表现是
    「登录完成了却一直没入池」。存下来，回来时自动续上。 */
-const LS_OAUTH = 'buddyhub.zaiOAuth';
+const zaiFlow = flowStore('zaiOAuth');
+const ZAI_FLOW_TTL = 15 * 60 * 1000;
+let oauthLoop = null;
 
-function saveOAuthFlow(flowId) {
-  try { localStorage.setItem(LS_OAUTH, JSON.stringify({ flowId, at: Date.now() })); } catch { /* 私密模式 */ }
-}
-function loadOAuthFlow() {
-  let raw;
-  try { raw = localStorage.getItem(LS_OAUTH); } catch { return ''; }
-  if (!raw) return '';
-  try {
-    const v = JSON.parse(raw);
-    if (!v || !v.flowId || Date.now() - v.at > 15 * 60 * 1000) { clearOAuthFlow(); return ''; }
-    return v.flowId;
-  } catch { clearOAuthFlow(); return ''; }
-}
-function clearOAuthFlow() {
-  try { localStorage.removeItem(LS_OAUTH); } catch { /* 私密模式 */ }
-}
+function stopOAuthPoll() { if (oauthLoop) { oauthLoop.finish(); oauthLoop = null; } }
+
+function saveOAuthFlow(flowId) { zaiFlow.set({ flowId, at: Date.now() }); }
+function loadOAuthFlow() { const v = zaiFlow.getFresh(ZAI_FLOW_TTL); return v ? v.flowId : ''; }
+function clearOAuthFlow() { zaiFlow.clear(); }
 
 /** resumeOAuth 页面加载后恢复未完成的 OAuth 轮询（有则续上）。 */
 export function resumeOAuth() {
-  if (oauthTimer) return;
+  if (oauthLoop) return;
   const flowId = loadOAuthFlow();
   if (!flowId) return;
   oauth.set({ flowId, status: '继续等待智谱页面完成登录…' });
@@ -51,24 +42,28 @@ export function resumeOAuth() {
 // pollOAuth 轮询一条流程直到完成/失败。
 function pollOAuth(flowId) {
   stopOAuthPoll();
-  oauthTimer = setInterval(async () => {
-    const cur = oauth.peek();
-    if (!cur || !cur.flowId) return;
-    try {
-      const p = await api('zai/oauth/poll?flow_id=' + encodeURIComponent(flowId));
-      if (!p.done) return;
-      stopOAuthPoll();
-      clearOAuthFlow();
-      oauth.set(null);
-      addOpen.set(false);
-      toast(p.message || '账号已入池');
-      await loadZai();
-    } catch (e) {
-      stopOAuthPoll();
-      clearOAuthFlow();
-      oauth.set({ status: '授权失败：' + e.message });
-    }
-  }, 3000);
+  oauthLoop = pollLoop();
+  oauthLoop.register({
+    every: 3000,
+    run: async () => {
+      const cur = oauth.peek();
+      if (!cur || !cur.flowId) return;
+      try {
+        const p = await api('zai/oauth/poll?flow_id=' + encodeURIComponent(flowId));
+        if (!p.done) return;
+        stopOAuthPoll();
+        clearOAuthFlow();
+        oauth.set(null);
+        addOpen.set(false);
+        toast(p.message || '账号已入池');
+        await loadZai();
+      } catch (e) {
+        stopOAuthPoll();
+        clearOAuthFlow();
+        oauth.set({ status: '授权失败：' + e.message });
+      }
+    },
+  });
 }
 
 /** 发起 OAuth 免密登录：拿授权链接 → 轮询 → 完成后自动兑换回退 Key 并入池。 */
@@ -86,14 +81,6 @@ async function startOAuth() {
     oauth.set({ status: '发起失败：' + e.message });
   }
 }
-
-const STATUS_LABEL = {
-  active: ['可用', 'strong'],
-  cooling: ['冷却中', ''],
-  exhausted: ['额度用完', 'faint'],
-  invalid: ['凭证失效', 'faint'],
-  disabled: ['风控禁用', 'faint'],
-};
 
 export async function loadZai(quiet = true) {
   try {
@@ -128,11 +115,10 @@ function fmtNum(n) {
   return String(n);
 }
 
+// 状态 chip 用统一组件（status.js）：active→可用 / cooling→冷却中 /
+// exhausted→额度用完 / invalid→凭证失效 / disabled→已停用。
 function statusChip(a) {
-  const [label, cls] = STATUS_LABEL[a.status] || [a.status, 'faint'];
-  return h('span', { class: 'chip ' + cls, title: a.last_error || '' },
-    h('i', { class: a.status === 'active' ? 'dot' : a.status === 'cooling' ? 'dot ring' : 'dot off' }),
-    label + (a.cool_remaining_sec ? ` · ${Math.round(a.cool_remaining_sec / 60)}分` : ''));
+  return statusOf(a);
 }
 
 function accountCard(a) {

@@ -118,7 +118,7 @@ function buildTopbar() {
         onclick: () => openPalette(),
       }, icon('search')),
       themeBtn,
-      h('button', { class: 'btn sm', onclick: doRefreshAll }, icon('refresh'), '刷新'),
+      h('button', { class: 'btn sm', onclick: doRefreshAll, title: '向所有上游发起一次余额查询（结果写回账号卡）' }, icon('refresh'), '刷新余额'),
       h('button', { class: 'btn sm primary', onclick: () => openAddAccount() }, icon('plus'), '添加账号'),
     ),
   );
@@ -174,10 +174,39 @@ function fmtUptime(sec) {
 /* ── 路由 ─────────────────────────────────────────────────────── */
 let activeEffect = null;
 
+/** parseHash() —— 解析 #view?seg=xxx 形态的 hash。
+ *  返回 { view, seg }：view = 视图 id；seg = 子状态（无则 null）。
+ *  子状态让视图内部分段可深链、刷新可保持、后退可用。 */
+export function parseHash() {
+  const raw = (location.hash || '#overview').slice(1);
+  const q = raw.indexOf('?');
+  if (q < 0) return { view: raw || 'overview', seg: null };
+  const view = raw.slice(0, q) || 'overview';
+  let seg = null;
+  for (const kv of raw.slice(q + 1).split('&')) {
+    const [k, v] = kv.split('=');
+    if (k === 'seg' || k === 'tab') seg = v;
+  }
+  return { view, seg };
+}
+
+/** setHashSeg(view, seg) —— 写入视图的子状态段（不触发导航，只改地址栏）。 */
+export function setHashSeg(view, seg) {
+  const target = '#' + view + (seg ? '?seg=' + seg : '');
+  if (location.hash !== target) history.replaceState(null, '', target);
+}
+
 export function navigate(id) {
   if (!views.has(id)) id = views.keys().next().value;
-  if (location.hash !== '#' + id) history.replaceState(null, '', '#' + id);
-  viewId.set(id);
+  const cur = parseHash();
+  if (cur.view !== id) {
+    history.replaceState(null, '', '#' + id);
+    viewId.set(id);
+  } else if (cur.seg) {
+    // 同视图跳转（如目录页「管理 →」）：清掉旧子状态，落到默认分段
+    history.replaceState(null, '', '#' + id);
+    viewId.set(id);
+  }
 }
 
 function mountView(id) {
@@ -215,10 +244,10 @@ function paletteCommands() {
   }
   const acts = [
     ['刷新全部余额', 'refresh', () => api('balance_all', { method: 'POST' }).then(() => { refreshOverview(); toast('余额已刷新'); }).catch(e => toast(e.message, 'fail'))],
-    ['全部签到', 'checkin', () => api('checkin_all', { method: 'POST' }).then(() => toast('全部签到已开始，结果见日志')).catch(e => toast(e.message, 'fail'))],
-    ['全部保活', 'power', () => api('keepalive_all', { method: 'POST' }).then(() => toast('保活已开始')).catch(e => toast(e.message, 'fail'))],
-    ['旅行巡检', 'ticket', () => api('travel_all', { method: 'POST' }).then(() => toast('旅行巡检已开始')).catch(e => toast(e.message, 'fail'))],
-    ['活跃上报', 'scan', () => api('activity_all', { method: 'POST' }).then(() => toast('活跃上报已开始')).catch(e => toast(e.message, 'fail'))],
+    ['全部签到', 'checkin', () => api('checkin_all', { method: 'POST' }).then(() => toast('全部签到已开始', undefined, { action: { label: '查看日志', onclick: () => navigate('logs') } })).catch(e => toast(e.message, 'fail'))],
+    ['全部保活', 'power', () => api('keepalive_all', { method: 'POST' }).then(() => toast('保活已开始', undefined, { action: { label: '查看日志', onclick: () => navigate('logs') } })).catch(e => toast(e.message, 'fail'))],
+    ['旅行巡检', 'ticket', () => api('travel_all', { method: 'POST' }).then(() => toast('旅行巡检已开始', undefined, { action: { label: '查看日志', onclick: () => navigate('logs') } })).catch(e => toast(e.message, 'fail'))],
+    ['活跃上报', 'scan', () => api('activity_all', { method: 'POST' }).then(() => toast('活跃上报已开始', undefined, { action: { label: '查看日志', onclick: () => navigate('logs') } })).catch(e => toast(e.message, 'fail'))],
     ['添加账号', 'plus', () => openAddAccount()],
     ['切换明暗主题', 'moon', () => toggleTheme()],
     ['查看运行日志', 'logs', () => navigate('logs')],
@@ -308,8 +337,8 @@ export function startShell() {
   mountView(viewId.peek());
 
   addEventListener('hashchange', () => {
-    const id = (location.hash || '#overview').slice(1);
-    if (views.has(id)) viewId.set(id);
+    const { view } = parseHash();
+    if (views.has(view)) viewId.set(view);
   });
 
   addEventListener('keydown', ev => {

@@ -469,12 +469,20 @@ input[type="checkbox"] { width: auto; accent-color: var(--fg-2); }
   border-radius: var(--pill);
   box-shadow: var(--shadow-pop), inset 0 1px 0 var(--hi);
   font-size: 13px; max-width: min(560px, 90vw);
+  display: flex; align-items: center; gap: 12px;
+  pointer-events: auto;                       /* 容器是 none，toast 本身要能点动作 */
   /* 过渡而非关键帧：连续弹多条时能平滑改道，不会从零重播 */
   opacity: 0;
   transform: translateY(10px) scale(.98);
   transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
   will-change: opacity, transform;
 }
+.toast-act {
+  flex: none; padding: 3px 10px; font-size: 12px;
+  border: 1px solid var(--edge-2); border-radius: var(--pill);
+  background: transparent; color: var(--fg-2); cursor: pointer;
+}
+.toast-act:hover { color: var(--fg); background: var(--glass); }
 .toast.in { opacity: 1; transform: none; }
 .toast.out {                                  /* 退出更快：系统响应要利落 */
   opacity: 0; transform: translateY(6px) scale(.99);

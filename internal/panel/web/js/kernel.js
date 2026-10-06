@@ -278,12 +278,20 @@ document.addEventListener('visibilitychange', () => {
   for (const t of liveToasts) t.onVisibility(document.hidden);
 });
 
-export function toast(msg, kind) {
+export function toast(msg, kind, opts = {}) {
   const host = document.getElementById('toasts');
   if (!host) return;
   while (host.childElementCount >= MAX_TOASTS) host.firstElementChild?.remove();
 
-  const el = h('div', { class: 'toast' + (kind === 'fail' ? ' fail' : ''), text: msg });
+  // opts.action = { label, onclick }：可选的跟随动作（如批量操作后「查看日志」），
+  // 让 fire-and-forget 的操作有闭环入口，不必自己去翻日志页。
+  const el = h('div', { class: 'toast' + (kind === 'fail' ? ' fail' : '') },
+    h('span', { text: msg }),
+    opts.action ? h('button', {
+      class: 'toast-act', text: opts.action.label,
+      onclick: ev => { ev.stopPropagation(); el.remove(); opts.action.onclick(); },
+    }) : null,
+  );
   host.append(el);
   requestAnimationFrame(() => el.classList.add('in'));
 
@@ -605,13 +613,9 @@ export function fmtRate(r) { return r ? Number(r).toFixed(1) + ' tok/s' : '—';
 
 export function fmtK(n) { n = Number(n || 0); return n >= 1000 ? Math.round(n / 1000) + 'K' : String(n); }
 
-export function fmtTok(n) {
-  n = Number(n || 0);
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
-  return String(n);
-}
+// fmtTok 与 fmtToken 是同一件事的两个名字（历史遗留，用量视图用的是短名）。
+// 保留别名避免全量替换，但实现只此一份。
+export const fmtTok = fmtToken;
 
 export function uptime(sec) {
   const up = Math.floor(sec || 0);

@@ -9,6 +9,7 @@ import { h, icon, signal, api, apiUpload, toast, openDrawer, closeDrawer, copyTe
 import { qrMatrix, qrSVG } from './qr.js';
 import { refreshOverview } from './store.js';
 import { navigate } from './shell.js';
+import { flowStore, pollLoop } from './loginflow.js';
 import { extAddPanel, stopExtAddTimers } from './views/ext-add.js';
 import { zaiAddForm } from './views/zai-segment.js';
 
@@ -20,17 +21,38 @@ const loginState = signal('');
 const status = signal({ kind: '', text: '' });
 const loomyMethod = signal('detect');
 const loomyInfo = signal(null);
-let pollTimer = null;
 
-function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+// 腾讯 OAuth 会话持久化：用户去浏览器登录期间页面可能刷新（或弹窗被 5s tick
+// 重建的是外层、这里状态在模块级已安全，但**页面级重载**会全丢）。会话存
+// localStorage（后端 loginTTL 15 分钟），回来时自动续上轮询——与 ext-add /
+// zai 的做法统一（loginflow.js）。
+const tencentFlow = flowStore('tencentLogin');
+const TENCENT_FLOW_TTL = 15 * 60 * 1000;
+let pollLoopCtl = null;
+
+function stopPoll() { if (pollLoopCtl) { pollLoopCtl.stop(); pollLoopCtl = null; } }
+
+/** resumeTencentLogin() —— 页面重载后把未完成的腾讯授权轮询续上。 */
+function resumeTencentLogin() {
+  if (pollLoopCtl) return;                 // 已在轮询
+  const saved = tencentFlow.getFresh(TENCENT_FLOW_TTL);
+  if (!saved) return;
+  loginState.set(saved.state);
+  loginUrl.set(saved.url);
+  startLoginPoll();
+}
 
 export function openAddAccount() {
   addTab.set('tencent');
-  loginUrl.set('');
   status.set({ kind: '', text: '' });
   loomyInfo.set(null);
+  if (!loginState.peek()) resumeTencentLogin();  // 有进行中的授权则恢复显示
   renderAdd();
 }
+
+// 页面加载即尝试续上未完成的腾讯授权轮询（即使抽屉没打开也继续收尾——
+// 用户在浏览器里完成登录后回来，账号应当已经入池，而不是停在「等待授权」）。
+resumeTencentLogin();
 
 function setStatus(kind, text) { status.set({ kind, text }); }
 
@@ -137,6 +159,7 @@ function tencentPanel() {
               const r = await api('login/start', { method: 'POST', body: JSON.stringify({ realm: realm.peek() }) });
               loginState.set(r.state);
               loginUrl.set(r.url);
+              tencentFlow.set({ state: r.state, url: r.url, at: Date.now() });
               setStatus('', '');
               renderAdd();
               startLoginPoll();
@@ -151,25 +174,35 @@ function tencentPanel() {
 
 function startLoginPoll() {
   stopPoll();
-  pollTimer = setInterval(async () => {
-    if (!loginState.peek()) return;
-    try {
-      const r = await api('login/poll?state=' + encodeURIComponent(loginState.peek()));
-      if (r.done) {
-        stopPoll();
-        setStatus('', `已添加 ${r.nickname || r.uid}${r.realm === 'global' ? '（国际版）' : ''}` +
-          (r.credits >= 0 ? ` · 积分 ${r.credits}` : '') + '，账号已载入池中');
-        loginUrl.set('');
+  const state = loginState.peek();
+  if (!state) return;
+  pollLoopCtl = pollLoop();
+  pollLoopCtl.register({
+    every: 3000,
+    run: async () => {
+      if (!loginState.peek()) { pollLoopCtl.finish(); return; }
+      try {
+        const r = await api('login/poll?state=' + encodeURIComponent(loginState.peek()));
+        if (r.done) {
+          pollLoopCtl.finish();
+          tencentFlow.clear();
+          setStatus('', `已添加 ${r.nickname || r.uid}${r.realm === 'global' ? '（国际版）' : ''}` +
+            (r.credits >= 0 ? ` · 积分 ${r.credits}` : '') + '，账号已载入池中');
+          loginState.set('');
+          loginUrl.set('');
+          renderAdd();
+          await refreshOverview();
+          setTimeout(() => closeDrawer(), 1600);
+        }
+      } catch (e) {
+        pollLoopCtl.finish();
+        tencentFlow.clear();
+        setStatus('fail', e.message + '（关闭后重新添加）');
+        loginState.set('');
         renderAdd();
-        await refreshOverview();
-        setTimeout(() => closeDrawer(), 1600);
       }
-    } catch (e) {
-      stopPoll();
-      setStatus('fail', e.message + '（关闭后重新添加）');
-      renderAdd();
-    }
-  }, 3000);
+    },
+  });
 }
 
 function loomyPanel() {

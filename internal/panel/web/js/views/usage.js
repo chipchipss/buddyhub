@@ -7,6 +7,7 @@
 
 import { h, svgEl, icon, signal, api, toast, fmtTok, fmtMs, fmtRate } from '../kernel.js';
 import { defineView } from '../shell.js';
+import { platforms, loadPlatforms, platName } from '../platforms.js';
 
 const seg = signal('usage');
 const hours = signal(72);
@@ -25,6 +26,20 @@ async function loadUsage(quiet = true) {
 async function loadPk(quiet = true) {
   try { pk.set(await api('packages')); }
   catch (e) { if (!quiet) toast(e.message, 'fail'); }
+}
+
+/* 用量平台筛选清单：注册表驱动（新增平台自动出现）。
+   腾讯按域分两项（cn/global）；有对话前缀的其余平台各一项；
+   codex / free 无独立 realm 分组但用量按前缀统计，同样列出。 */
+function usagePlatOptions() {
+  const opts = [['all', '全部平台'], ['cn', platName('workbuddy') + ' CN'], ['global', platName('workbuddy') + ' Global']];
+  const seen = new Set(['workbuddy']);
+  for (const p of platforms.peek()) {
+    if (p.group !== 'gateway' || !p.prefix || seen.has(p.id)) continue;
+    seen.add(p.id);
+    opts.push([p.id, p.name]);
+  }
+  return opts;
 }
 
 /* ── 过滤（平台维度在本地重算，避免重复拉取）───────────────────── */
@@ -198,8 +213,7 @@ function usageSeg() {
         h('select', {
           class: 'input', style: { width: 'auto' },
           onchange: ev => { plat.set(ev.target.value); },
-        }, ...[['all', '全部平台'], ['cn', '腾讯 CN'], ['global', '腾讯 Global'], ['loomy', 'Loomy'], ['qoder', 'Qoder'], ['codex', 'Codex'], ['zai', 'Z.AI'], ['free', '免费池']]
-          .map(([v, n]) => h('option', { value: v, selected: v === plat(), text: n }))),
+        }, ...usagePlatOptions()),
         h('button', { class: 'btn sm', onclick: () => loadUsage(false) }, icon('refresh'), '刷新'),
       ),
       h('div', { class: 'body' }, d ? chart(d.series || []) : h('div', { class: 'busy', text: '读取用量' })),
@@ -268,7 +282,7 @@ function pkSeg() {
         h('select', {
           class: 'input', style: { width: 'auto' },
           onchange: ev => pkPlat.set(ev.target.value),
-        }, ...[['all', '全部平台'], ['workbuddy', '腾讯'], ['loomy', 'Loomy'], ['qoder', 'Qoder'], ['zai', 'Z.AI']]
+        }, ...[['all', '全部平台'], ['workbuddy', platName('workbuddy')], ['loomy', platName('loomy')], ['qoder', platName('qoder')], ['zai', platName('zai')]]
           .map(([v, n]) => h('option', { value: v, selected: v === pkPlat(), text: n }))),
         h('button', { class: 'btn sm', onclick: () => loadPk(false) }, icon('refresh'), '刷新'),
       ),
@@ -318,6 +332,7 @@ export default defineView({
     return d ? `请求 ${fmtTok((d.totals || {}).requests)} · token ${fmtTok((d.totals || {}).total_tokens)}` : '正在读取…';
   },
   render() {
+    loadPlatforms();
     const s = seg();
     if (s === 'usage' && !usage()) loadUsage();
     if (s === 'pk' && !pk()) loadPk();
