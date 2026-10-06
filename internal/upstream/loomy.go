@@ -73,6 +73,10 @@ type LoomyClient struct {
 	mu      sync.Mutex
 }
 
+// loomyDialIPs loomyad.xunfei.cn 的直连 IP，按实测链路质量排序
+// （.245 8/8、.244 4/8，2026-10-04 实测）。两个都试过再报错。
+var loomyDialIPs = []string{"114.118.75.245", "114.118.75.244"}
+
 // NewLoomyClient 创建客户端。
 func NewLoomyClient(baseURL string) *LoomyClient {
 	if baseURL == "" {
@@ -86,18 +90,23 @@ func NewLoomyClient(baseURL string) *LoomyClient {
 				KeepAlive: 30 * time.Second,
 			}
 			if addr == "loomyad.xunfei.cn:443" {
-				// 直连公网真实 IP，避免 VPN/代理 Fake-IP (198.18.*) 导致的握手超时
-				conn, err := dialer.DialContext(ctx, network, "114.118.75.245:443")
-				if err == nil {
-					return conn, nil
+				// 直连公网真实 IP，避免 VPN/代理 Fake-IP (198.18.*) 导致的握手超时。
+				// 该域名 DNS 轮询 .244 / .245 两个 IP，.244 在部分机房（实测
+				// Contabo DE）握手成功率只有 ~50%，随机踩中就 TLS handshake
+				// timeout。故按实测成功率排序直连，且**不回落 DNS**——回落即随机。
+				for _, ip := range loomyDialIPs {
+					if conn, err := dialer.DialContext(ctx, network, ip+":443"); err == nil {
+						return conn, nil
+					}
 				}
+				return nil, fmt.Errorf("loomyad.xunfei.cn: 直连 IP 均不可达 %v", loomyDialIPs)
 			}
 			return dialer.DialContext(ctx, network, addr)
 		},
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          10,
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
+		TLSHandshakeTimeout:   20 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig: &tls.Config{
 			ServerName: "loomyad.xunfei.cn",
@@ -107,7 +116,7 @@ func NewLoomyClient(baseURL string) *LoomyClient {
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		HTTP: &http.Client{
 			Transport: tr,
-			Timeout:   15 * time.Second,
+			Timeout:   20 * time.Second,
 		},
 	}
 }
@@ -487,8 +496,72 @@ func loomyEnvelope(body []byte) (code, desc string, data json.RawMessage, err er
 	return env.Code, env.Desc, env.Data, nil
 }
 
+// creditCacheTTL 积分明细缓存有效期。
+//
+// loomyad.xunfei.cn 从海外机房访问链路极不稳定：同一小时内实测 .245 8/8、
+// 半小时后 2/12，.244 同期 3/12，两个 IP 都在抖（DNS 只有这两个 A 记录，
+// 换 IP 无解）。面板每次刷新都查一次，不缓存等于把抖动原样糊到 UI 上，
+// 用户看到的就是「一会正常一会 TLS handshake timeout」。
+const creditCacheTTL = 5 * time.Minute
+
+// creditStaleTTL 缓存最长保鲜期：重试全败时宁可给略旧的真数，也不给红字。
+const creditStaleTTL = 30 * time.Minute
+
+type creditEntry struct {
+	at time.Time
+	d  LoomyCreditDetail
+}
+
+// 缓存是包级的：extstore 每次查余额都 NewLoomyClient()，挂在实例上等于没缓存。
+var (
+	creditMu    sync.Mutex
+	creditCache = map[string]creditEntry{}
+)
+
 // GetCreditDetail 查询双积分池明细（只读，走 /points/records，无副作用）。
+//
+// 带 5 分钟缓存 + 3 次重试：上游抖动是常态，单次失败不代表账号有问题。
 func (c *LoomyClient) GetCreditDetail(session string) (*LoomyCreditDetail, error) {
+	if d, ok := lookupCredit(session, creditCacheTTL); ok {
+		return d, nil
+	}
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		if i > 0 {
+			time.Sleep(time.Duration(i) * 400 * time.Millisecond)
+		}
+		d, err := c.getCreditDetailOnce(session)
+		if err == nil {
+			creditMu.Lock()
+			creditCache[session] = creditEntry{at: time.Now(), d: *d}
+			creditMu.Unlock()
+			return d, nil
+		}
+		lastErr = err
+	}
+	if d, ok := lookupCredit(session, creditStaleTTL); ok {
+		return d, nil
+	}
+	return nil, lastErr
+}
+
+// lookupCredit 取缓存副本（maxAge 内），返回拷贝避免调用方改到共享数据。
+func lookupCredit(session string, maxAge time.Duration) (*LoomyCreditDetail, bool) {
+	if session == "" {
+		return nil, false
+	}
+	creditMu.Lock()
+	defer creditMu.Unlock()
+	e, ok := creditCache[session]
+	if !ok || time.Since(e.at) > maxAge {
+		return nil, false
+	}
+	d := e.d
+	return &d, true
+}
+
+// getCreditDetailOnce 单次真实请求（无缓存无重试）。
+func (c *LoomyClient) getCreditDetailOnce(session string) (*LoomyCreditDetail, error) {
 	req, err := http.NewRequest(http.MethodGet, c.BaseURL+"/api/v1/points/records?pageNo=1&pageSize=1&recordType=all", nil)
 	if err != nil {
 		return nil, err
