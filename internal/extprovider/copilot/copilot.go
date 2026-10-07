@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -212,6 +213,14 @@ type DeviceFlow struct {
 	// 生效），随后才转为 authorization_pending。实测首次轮询命中该错误，故把它当作
 	// 「暂未生效」而非终态；连续超过 badCodeTolerance 次才判定设备码真的无效。
 	badCodeStreak int
+
+	// mu 保护节流状态：面板重建会让同一会话出现叠加的轮询，只靠前端守不住节奏。
+	mu sync.Mutex
+	// curInterval 当前生效的轮询间隔（秒）。收到 slow_down 时按 RFC 8628 加 5 秒。
+	curInterval int
+	// nextPollAt 早于它就本地回 pending，不发上游——上游被问烦只会一直回
+	// slow_down，用户明明已在浏览器授权，token 却永远换不出来。
+	nextPollAt time.Time
 }
 
 // badCodeTolerance incorrect_device_code 的容忍次数（超过即判定设备码无效）。
@@ -262,6 +271,7 @@ func StartDeviceFlow(ctx context.Context) (*DeviceFlow, error) {
 	return &DeviceFlow{
 		DeviceCode: doc.DeviceCode, UserCode: doc.UserCode,
 		VerificationURI: doc.VerificationURI, ExpiresIn: doc.ExpiresIn, Interval: doc.Interval,
+		curInterval: doc.Interval,
 	}, nil
 }
 
@@ -274,10 +284,18 @@ type PollResult struct {
 	// 只给日志用：用户报「授权完了还一直显示等待授权」时，唯一能区分
 	// 「上游说还没授权」和「我们压根没在轮询」的就是它。
 	Status string
+	// RetryIn 本地节流：距下一次允许问上游还有多少秒（>0 时调用方按它排下次轮询）。
+	RetryIn int
 }
 
 // Poll 轮询授权状态；未完成时 Done=false（调用方按 Interval 重试）。
 func (f *DeviceFlow) Poll(ctx context.Context) (*PollResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if due := time.Until(f.nextPollAt); due > 0 {
+		return &PollResult{Done: false, Status: "throttled", RetryIn: int(due/time.Second) + 1}, nil
+	}
 	payload, _ := json.Marshal(map[string]string{
 		"client_id":   ClientID,
 		"device_code": f.DeviceCode,
@@ -307,6 +325,21 @@ func (f *DeviceFlow) Poll(ctx context.Context) (*PollResult, error) {
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("轮询回执解析失败：%w", err)
+	}
+
+	// 记下这次真实发问的节奏。**只在上游明说 slow_down 时**才本地退避：
+	// authorization_pending 期间调用方有自己的节奏，抢着问无害；而收到 slow_down
+	// 后还按原速问，GitHub 只会一直回 slow_down——用户明明已在浏览器点过授权，
+	// token 却永远换不出来（实测就是卡在这里）。按 RFC 8628 每次加 5 秒。
+	if doc.Error == "slow_down" {
+		if f.curInterval <= 0 {
+			f.curInterval = f.Interval
+		}
+		if f.curInterval <= 0 {
+			f.curInterval = 5
+		}
+		f.curInterval += 5
+		f.nextPollAt = time.Now().Add(time.Duration(f.curInterval) * time.Second)
 	}
 
 	switch doc.Error {

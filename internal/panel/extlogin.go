@@ -59,6 +59,11 @@ func newSessionID() string {
 type extLoginSession struct {
 	provider  string
 	createdAt time.Time
+	// ttl 会话存活窗口；0 = 用默认 extLoginTTL。设备码流程按上游有效期放宽，
+	// 见 window()。
+	ttl time.Duration
+	// retryIn 上游/本地节流要求的下次轮询等待秒数，随 poll 回执带给前端。
+	retryIn int
 	// errStreak 连续轮询失败次数：单次网络抖动继续轮询，连续失败才判定终态
 	// ——否则用户看到的是永远转圈，永远不知道错在哪。
 	errStreak int
@@ -93,12 +98,55 @@ var (
 )
 
 func reapExtLoginSessions() {
-	cutoff := time.Now().Add(-extLoginTTL)
+	now := time.Now()
 	for k, s := range extLoginSessions {
-		if s.createdAt.Before(cutoff) {
+		if now.Sub(s.createdAt) > s.window() {
 			delete(extLoginSessions, k)
 		}
 	}
+}
+
+// window 这次登录会话允许存活的时长。
+//
+// 默认 extLoginTTL，但设备码类流程按**上游自己的有效期**放宽：GitHub 给 15 分钟，
+// 而面板只留 10 分钟——用户在第 11 分钟点完授权回来，设备码已被我们丢弃，
+// 浏览器显示「已连接」而池子里没有账号，正是这类投诉的成因。
+func (s *extLoginSession) window() time.Duration {
+	if s.ttl > 0 {
+		return s.ttl
+	}
+	return extLoginTTL
+}
+
+// deviceLoginWindow 把上游下发的 expires_in（秒）折成会话时长，夹在
+// [extLoginTTL, 20 分钟] 内：不短于默认档，也不让会话无限期挂着占内存。
+func deviceLoginWindow(expiresIn int) time.Duration {
+	if expiresIn <= 0 {
+		return extLoginTTL
+	}
+	w := time.Duration(expiresIn) * time.Second
+	if w < extLoginTTL {
+		return extLoginTTL
+	}
+	if w > 20*time.Minute {
+		return 20 * time.Minute
+	}
+	return w
+}
+
+// setRetryIn / takeRetryIn 记录上游要求的下次轮询等待秒数（锁内改，轮询会重叠）。
+func (s *extLoginSession) setRetryIn(sec int) {
+	extLoginMu.Lock()
+	defer extLoginMu.Unlock()
+	s.retryIn = sec
+}
+
+func (s *extLoginSession) takeRetryIn() int {
+	extLoginMu.Lock()
+	defer extLoginMu.Unlock()
+	n := s.retryIn
+	s.retryIn = 0
+	return n
 }
 
 func getExtLoginSession(id string) *extLoginSession {
@@ -108,7 +156,7 @@ func getExtLoginSession(id string) *extLoginSession {
 	if s == nil {
 		return nil
 	}
-	if time.Since(s.createdAt) > extLoginTTL {
+	if time.Since(s.createdAt) > s.window() {
 		delete(extLoginSessions, id)
 		return nil
 	}
@@ -216,6 +264,7 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 		}
 		id := putExtLoginSession(&extLoginSession{
 			provider: provider, createdAt: time.Now(), flow: flow,
+			ttl: deviceLoginWindow(flow.ExpiresIn),
 		})
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":               true,
@@ -236,6 +285,7 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 		}
 		id := putExtLoginSession(&extLoginSession{
 			provider: provider, createdAt: time.Now(), clineFlow: flow,
+			ttl: deviceLoginWindow(flow.ExpiresIn),
 		})
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":               true,
@@ -390,7 +440,11 @@ func (p *Panel) extLoginPoll(w http.ResponseWriter, r *http.Request) {
 			sess.lastNote = note
 			log.Printf("panel: %s 登录进行中：%s", provider, note)
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "done": false, "status": note})
+		resp := map[string]any{"ok": true, "done": false, "status": note}
+		if n := sess.takeRetryIn(); n > 0 {
+			resp["retry_in"] = n
+		}
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 	if cred == nil {
@@ -520,9 +574,17 @@ func pollCopilotCode(ctx context.Context, sess *extLoginSession) (cred *extLogin
 		return nil, true, res.Error
 	}
 	if !res.Done {
+		// 节流提示带回去：前端固定 2s 一轮会把上游问烦（一直回 slow_down，永远换
+		// 不到 token），这里告诉它下次至少等多久。
+		if res.RetryIn > 0 {
+			sess.setRetryIn(res.RetryIn)
+		}
 		// 把上游原始状态带进 note：lastNote 只在**变化**时记日志，因此第一次
 		// 轮询必然留一行——用户报「授权完了却一直显示等待授权」时，先要能区分
 		// 「上游说还没授权」和「我们压根没在轮询」。
+		if res.Status == "throttled" {
+			return nil, false, "pending（本地节流，这一轮没问上游）"
+		}
 		return nil, false, "pending（上游 " + res.Status + "）"
 	}
 	c := res.Cred

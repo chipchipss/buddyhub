@@ -51,7 +51,7 @@ export function stopExtAddTimers() {
 
 // clearLoginTimer 只停定时器，不动登录状态（被新会话顶掉时用）。
 function clearLoginTimer() {
-  if (loginTimer) { clearInterval(loginTimer); loginTimer = null; }
+  if (loginTimer) { clearTimeout(loginTimer); loginTimer = null; }
 }
 
 /* ── 未完成登录的持久化 ─────────────────────────────────────────
@@ -313,10 +313,10 @@ export function extAddPanel(onAdded, opts = {}) {
 
   // 轮询循环与面板实例解耦：面板被重建也不影响它跑完。
   function startPolling(spec, d) {
-    const every = Math.max(2, d.interval || 2) * 1000;
+    const baseEvery = Math.max(2, d.interval || 2) * 1000;
     const deadline = Date.now() + (d.expires_in || 600) * 1000;
 
-    loginTimer = setInterval(async () => {
+    const tick = async () => {
       // 已被别的登录顶掉 → 只停自己的定时器，别去动 activeLogin（那是新会话的）
       if (!activeLogin || activeLogin.d.session !== d.session) { clearLoginTimer(); return; }
       if (Date.now() > deadline) {
@@ -344,6 +344,9 @@ export function extAddPanel(onAdded, opts = {}) {
       }
       if (!r.done) {
         if (r.status && r.status !== 'pending') setLoginStatus(STATUS_WORDS[r.status] || r.status);
+        // 后端要退避就按它给的秒数等：设备码类上游被问烦只会一直回 slow_down，
+        // 用户明明已在浏览器点过授权，令牌却永远换不出来。
+        loginTimer = setTimeout(tick, r.retry_in ? Math.max(baseEvery, r.retry_in * 1000) : baseEvery);
         return;
       }
       stopExtAddTimers();
@@ -352,7 +355,8 @@ export function extAddPanel(onAdded, opts = {}) {
       setLoginStatus(`已入池：${(r.account || {}).label || (r.account || {}).id || ''}`);
       toast(`${specFor(provider).name} 账号已入池`);
       await onAdded?.();
-    }, every);
+    };
+    loginTimer = setTimeout(tick, baseEvery);
   }
 
   // 当前面板实例的展示位（模块级：面板重建时被新实例覆盖）

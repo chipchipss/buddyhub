@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/chipchipss/buddyhub/internal/extprovider/copilot"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
@@ -560,5 +561,82 @@ func TestRaccoonLoginFallsBackToDigestID(t *testing.T) {
 	want := "raccoon-" + raccoon.TokenDigest(token)
 	if acct["id"] != want {
 		t.Fatalf("兜底 ID = %v，期望 %v", acct["id"], want)
+	}
+}
+
+/* ── 设备码节流与会话窗口 ─────────────────────────────────────── */
+
+// 实测：GitHub 回 slow_down 后若仍按原速追问，它会一直只回 slow_down——浏览器
+// 那边早已显示授权成功，面板却永远换不到 token。第二次轮询必须由后端挡下来，
+// 并把「下次至少等多久」回给前端。
+func TestCopilotLoginSlowDownThrottlesSecondPoll(t *testing.T) {
+	var mu sync.Mutex
+	tokenHits := 0
+	copilot.SetHTTPClient(&http.Client{Transport: roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.Contains(r.URL.Path, "/login/device/code"):
+			return jsonResponse(200, `{"device_code":"d","user_code":"U-1",`+
+				`"verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}`), nil
+		case strings.Contains(r.URL.Path, "/login/oauth/access_token"):
+			mu.Lock()
+			tokenHits++
+			mu.Unlock()
+			return jsonResponse(200, `{"error":"slow_down"}`), nil
+		}
+		return jsonResponse(404, `{}`), nil
+	})})
+	t.Cleanup(func() { copilot.SetHTTPClient(&http.Client{}) })
+
+	p := loginTestPanel(t)
+	_, start := loginPost(t, p, "copilot", "start", "")
+	sess := start["session"].(string)
+
+	rec1, doc1 := loginPost(t, p, "copilot", "poll", `{"session":"`+sess+`"}`)
+	if rec1.Code != 200 || doc1["done"] != false {
+		t.Fatalf("首轮应仍在进行中: code=%d doc=%v", rec1.Code, doc1)
+	}
+
+	rec2, doc2 := loginPost(t, p, "copilot", "poll", `{"session":"`+sess+`"}`)
+	if rec2.Code != 200 || doc2["done"] != false {
+		t.Fatalf("次轮不该终态: code=%d doc=%v", rec2.Code, doc2)
+	}
+	if ri, ok := doc2["retry_in"].(float64); !ok || ri <= 0 {
+		t.Fatalf("次轮应带回退避秒数，得到 %v", doc2["retry_in"])
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if tokenHits != 1 {
+		t.Errorf("被节流的那轮不该打上游：tokenHits=%d", tokenHits)
+	}
+}
+
+// 会话窗口要跟着上游设备码有效期放宽：GitHub 给 15 分钟，面板只留 10 分钟的话，
+// 用户在第 11 分钟点完授权回来，设备码已被丢弃——表现就是「授权成功但账号不存在」。
+func TestDeviceLoginWindowFollowsUpstreamExpiry(t *testing.T) {
+	cases := []struct {
+		name string
+		in   int
+		want time.Duration
+	}{
+		{"GitHub 15 分钟", 900, 15 * time.Minute},
+		{"短于默认档就抬到默认档", 120, extLoginTTL},
+		{"过长要封顶", 7200, 20 * time.Minute},
+		{"上游没给就用默认档", 0, extLoginTTL},
+	}
+	for _, c := range cases {
+		if got := deviceLoginWindow(c.in); got != c.want {
+			t.Errorf("%s: deviceLoginWindow(%d) = %v，期望 %v", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+func TestExtLoginSessionWindowDefaultsToTTL(t *testing.T) {
+	s := &extLoginSession{provider: extstore.PCopilot, createdAt: time.Now()}
+	if s.window() != extLoginTTL {
+		t.Errorf("未设 ttl 时应回落默认窗口，得到 %v", s.window())
+	}
+	s.ttl = 15 * time.Minute
+	if s.window() != 15*time.Minute {
+		t.Errorf("应使用上游窗口，得到 %v", s.window())
 	}
 }
