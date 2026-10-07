@@ -455,3 +455,53 @@ func TestNextWakeExtCheckinSlot(t *testing.T) {
 		}
 	}
 }
+
+// TestWaitSlotDispatchesAtWallClock 未到点的槽位分段睡到点后返回 true（派发）。
+func TestWaitSlotDispatchesAtWallClock(t *testing.T) {
+	defer func(old time.Duration) { slotWaitSlice = old }(slotWaitSlice)
+	slotWaitSlice = 10 * time.Millisecond
+
+	next := time.Now().Add(35 * time.Millisecond)
+	start := time.Now()
+	if !waitSlot(context.Background(), next, make(chan struct{})) {
+		t.Fatal("到点应返回 true")
+	}
+	if d := time.Since(start); d < 30*time.Millisecond {
+		t.Errorf("提前派发：等了 %v，槽位还在 %v 之后", d, time.Until(next))
+	}
+}
+
+// TestWaitSlotPastSlotDispatchesImmediately 已过点的槽位不睡负时长，立即返回派发
+// （迟到补跑的宽限由 awaitWakeupGrace 判定）。分段版在此处读的是墙钟：唤醒后第一
+// 次检查就能看到过点，不再按睡眠前算好的剩余单调时长续睡。
+func TestWaitSlotPastSlotDispatchesImmediately(t *testing.T) {
+	defer func(old time.Duration) { slotWaitSlice = old }(slotWaitSlice)
+	slotWaitSlice = 20 * time.Millisecond
+
+	start := time.Now()
+	if !waitSlot(context.Background(), time.Now().Add(-3*time.Hour), make(chan struct{})) {
+		t.Fatal("已过点的槽位应立即派发")
+	}
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Errorf("已过点仍睡了 %v", d)
+	}
+}
+
+// TestWaitSlotCancelAndRearm 退出信号与重排通知都要中断等待返回 false。
+func TestWaitSlotCancelAndRearm(t *testing.T) {
+	defer func(old time.Duration) { slotWaitSlice = old }(slotWaitSlice)
+	slotWaitSlice = 5 * time.Millisecond
+	next := time.Now().Add(time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if waitSlot(ctx, next, make(chan struct{})) {
+		t.Fatal("ctx 已取消应返回 false")
+	}
+
+	rearm := make(chan struct{}, 1)
+	rearm <- struct{}{}
+	if waitSlot(context.Background(), next, rearm) {
+		t.Fatal("重排通知应返回 false（让调用方重算 nextWake）")
+	}
+}

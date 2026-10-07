@@ -294,6 +294,40 @@ func awaitWakeupGrace(ctx context.Context, planned time.Time) bool {
 	return sleepCtx(ctx, wakeupGraceDelay)
 }
 
+// slotWaitSlice 槽位等待的分片时长：Windows Modern Standby 下挂钟会被冻结，
+// 单个「一次性睡到点」的长 timer 在唤醒后可能既不错过也不立即到期——它的剩余
+// 量是按睡眠前的单调时钟算的，于是数小时后的槽位实际会拖到唤醒后再补一大段
+// 才触发（实测形态：09:00 槽位在唤醒 + 剩余单调片之后才跑）。改为每片重新
+// 按墙钟算一次剩余，最坏漂移一片时长（90s），迟到部分交给 awaitWakeupGrace
+// 的补跑宽限处理。测试可缩短（与 wakeupGraceDelay「测试可缩短」同口径）。
+var slotWaitSlice = 90 * time.Second
+
+// waitSlot 分段等待到 next（每片重读墙钟）。返回 true 表示已到点应当派发；
+// 返回 false 表示 ctx 已取消或排程变更（调用方 return / 重算 nextWake）。
+// next 已过期时立即返回 true（不睡负时长）。
+func waitSlot(ctx context.Context, next time.Time, rearm <-chan struct{}) bool {
+	for {
+		remaining := time.Until(next)
+		if remaining <= 0 {
+			return true // 墙钟已过点：派发（迟到量由 awaitWakeupGrace 判定）
+		}
+		if remaining > slotWaitSlice {
+			remaining = slotWaitSlice
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-rearm:
+			timer.Stop()
+			return false
+		case <-timer.C:
+			// 一片睡完：回到循环顶重读墙钟，睡眠冻结过的单调时钟在这里被纠正。
+		}
+	}
+}
+
 // Run 主循环，阻塞直到 ctx 取消。
 // Reconfigure 触发 rearmSchedule 时提前唤醒重算（新时点/开关立即生效）。
 func (s *Scheduler) Run(ctx context.Context) {
@@ -308,27 +342,25 @@ func (s *Scheduler) Run(ctx context.Context) {
 				continue
 			}
 		}
-		timer := time.NewTimer(time.Until(next))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-s.rearmSchedule:
-			timer.Stop() // 排程已变：重算下一次唤醒
-		case <-timer.C:
-			// 到点任务在排程时确定（不依赖唤醒时刻的小时数），迟到唤醒也不会漏跑。
-			// 迟到唤醒（睡眠跨过槽位时刻，timer 在唤醒瞬间才到期）先等网络宽限：
-			// 唤醒瞬间 DNS 未就绪，零宽限派发等于把唯一一次补跑机会打在注定失败
-			// 的窗口里（issue #152）；准点触发零延迟不受影响。
-			if !awaitWakeupGrace(ctx, next) {
-				return // ctx 取消：放弃本批，优雅退出
+		// 分段墙钟等待（见 waitSlot）：不把槽位压在一次性长 timer 上。
+		if !waitSlot(ctx, next, s.rearmSchedule) {
+			if ctx.Err() != nil {
+				return // 退出信号：优雅停机
 			}
-			// 唤醒时全部并行派发：每类一个 goroutine，慢任务族（如活跃上报
-			// 多号 × 间隔 ≈ 数分钟睡眠）不再阻塞同槽其他任务族；返回前等全部
-			// 任务收尾（下一轮 nextWake 照旧从"现在"起算，多轮重叠的风险与
-			// 串行版相同——nextWake 只挑现在之后的时点）。
-			s.runBatch(ctx, kinds)
+			continue // 排程已变：重算下一次唤醒
 		}
+		// 到点任务在排程时确定（不依赖唤醒时刻的小时数），迟到唤醒也不会漏跑。
+		// 迟到唤醒（睡眠跨过槽位时刻，分段等待在唤醒后才看到过点）先等网络宽限：
+		// 唤醒瞬间 DNS 未就绪，零宽限派发等于把唯一一次补跑机会打在注定失败
+		// 的窗口里（issue #152）；准点触发零延迟不受影响。
+		if !awaitWakeupGrace(ctx, next) {
+			return // ctx 取消：放弃本批，优雅退出
+		}
+		// 唤醒时全部并行派发：每类一个 goroutine，慢任务族（如活跃上报
+		// 多号 × 间隔 ≈ 数分钟睡眠）不再阻塞同槽其他任务族；返回前等全部
+		// 任务收尾（下一轮 nextWake 照旧从"现在"起算，多轮重叠的风险与
+		// 串行版相同——nextWake 只挑现在之后的时点）。
+		s.runBatch(ctx, kinds)
 	}
 }
 
