@@ -165,6 +165,7 @@ func reapExtLoginSessions() {
 	for k, s := range extLoginSessions {
 		if now.Sub(s.createdAt) > s.window() {
 			delete(extLoginSessions, k)
+			settleWindowExpired(k, s)
 		}
 	}
 }
@@ -235,9 +236,24 @@ func getExtLoginSession(id string) *extLoginSession {
 	}
 	if time.Since(s.createdAt) > s.window() {
 		delete(extLoginSessions, id)
+		settleWindowExpired(id, s)
 		return nil
 	}
 	return s
+}
+
+// settleWindowExpired 会话自己过窗时留一条终态原因（**必须在持有 extLoginMu 时调用**）。
+//
+// 静默丢弃是「账号不存在」式误判的另一半：用户在外面磨蹭到窗口之外才回来，
+// 界面只会说「会话不存在，请重新发起」，看不出到底是没授权、被拒、还是过期。
+// 有了这条原因，晚到的 poll 与后台自驱退出时说的都是同一件事实。
+func settleWindowExpired(id string, s *extLoginSession) {
+	if _, ok := extLoginSettled[id]; ok {
+		return // 已有终态（入池回执或失败原因），不覆盖
+	}
+	reason := "授权窗口已过（" + s.window().Round(time.Second).String() + " 内没有完成授权），请重新发起"
+	extLoginSettled[id] = settledLogin{provider: s.provider, fail: reason, at: time.Now()}
+	log.Printf("panel: %s 登录失败（会话 %s）：%s", s.provider, shortID(id), reason)
 }
 
 // bumpErrStreak / resetErrStreak 在锁内改计数：轮询可能重叠（前端 2s 一次、

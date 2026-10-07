@@ -580,6 +580,36 @@ func TestCopilotBackgroundTerminalReasonReachesLatePoll(t *testing.T) {
 	}
 }
 
+// 会话**自己过窗**时也必须留一条终态原因。
+//
+// 2026-10-08 实测：设备码在 00:48 发起、15 分钟窗口内没人授权，后台与前端后来
+// 都只看到「登录会话不存在或已过期，请重新发起」——到底是没授权、被拒、还是过期，
+// 界面分不出来，用户只会认为登录器坏了。过窗那一刻就该写下「授权窗口已过」。
+func TestCopilotWindowExpiryGivesReasonNotMissingSession(t *testing.T) {
+	copilotMock(t, 1<<20, false) // 永远 authorization_pending：没人来授权
+	p := loginTestPanel(t)
+	_, start := loginPost(t, p, "copilot", "start", "")
+	session := start["session"].(string)
+
+	s := getExtLoginSession(session)
+	if s == nil {
+		t.Fatal("会话应已登记")
+	}
+	s.ttl = 300 * time.Millisecond // 直接压窗口，不为测试等 15 分钟
+	time.Sleep(400 * time.Millisecond)
+
+	rec, _ := loginPost(t, p, "copilot", "poll", `{"session":"`+session+`"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("过窗后的 poll 该拿 400 + 原因，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "授权窗口已过") {
+		t.Fatalf("该说清是窗口过期，而不是「会话不存在」: %s", rec.Body.String())
+	}
+	if p.extManager().Find(extstore.PCopilot, "octocat") != nil {
+		t.Fatal("没人授权不该入池")
+	}
+}
+
 /* ── 通用行为 ────────────────────────────────────────────────── */
 
 func TestExtLoginUnsupportedProvider(t *testing.T) {
