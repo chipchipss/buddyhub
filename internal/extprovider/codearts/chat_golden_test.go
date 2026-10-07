@@ -98,40 +98,81 @@ func TestSignChatAddsDateAndTokenWithoutHost(t *testing.T) {
 	_ = in
 }
 
-// TestSignChatAgentChannelNoModelHeaders 两条通道的签名头集合必须**不同**：
-// agent 通道（老套餐模型）不含 model-id 三头，benefit 通道（免费模型）必须含。
-// 这是「踩空后表现很像没权限」的坑——漏三头上游报 "model is not registered"，
-// 老套餐模型带三头反而 "unsupported model"（参考项目两条通道严格区分的实证）。
+// TestSignChatAgentChannelNoModelHeaders 两条通道的签名头集合**不同**：
+// agent 通道不带 model-id 三头，benefit 通道带且值等于模型名。
+// 注：实测本个人版账号两条通道对已注册模型都回 200，所以这条断言锁的是
+// **请求形状**（与参考实现对齐），不是成败判据。
 func TestSignChatAgentChannelNoModelHeaders(t *testing.T) {
 	agent := DefaultChatProfile().headers("openpangu-2.0-pro", false)
 	for _, k := range []string{"model-id", "model-name", "x-model-id"} {
 		if _, ok := agent[k]; ok {
-			t.Errorf("agent 通道签名头集合不该含 %s（会触发 unsupported model）: %+v", k, agent)
+			t.Errorf("agent 通道签名头集合不该含 %s: %+v", k, agent)
 		}
 	}
-	benefit := DefaultChatProfile().headers("deepseek-v4-flash-0731", true)
+	benefit := DefaultChatProfile().headers("deepseek-v4-flash", true)
 	for _, k := range []string{"model-id", "model-name", "x-model-id"} {
-		if v, ok := benefit[k]; !ok || v != "deepseek-v4-flash-0731" {
+		if v, ok := benefit[k]; !ok || v != "deepseek-v4-flash" {
 			t.Errorf("benefit 通道必须把 %s 签进去且值等于模型名，实际: %+v", k, benefit)
 		}
 	}
 }
 
-// TestIsBenefitModelRouting 兜底目录里的免费模型判 benefit，老套餐判 agent；
-// 未知新模型名保守按 benefit（与参考项目 AGENT_MODELS 判据一致）。
+// TestIsBenefitModelRouting 兜底目录内的模型走 agent 通道；未知名字保守按
+// benefit（与参考项目判据一致）。
 func TestIsBenefitModelRouting(t *testing.T) {
 	cases := map[string]bool{
-		"openpangu-2.0-pro":    false,
-		"openpangu-2.0-flash":  false,
-		"GLM-5.2":              false,
-		"deepseek-v4-flash-0731": true,
-		"deepseek-v4-pro-0813": true,
-		"glm-5.3-flash":        true,
-		"never-seen-model-x":   true,
+		"openpangu-2.0-pro":   false,
+		"openpangu-2.0-flash": false,
+		"GLM-5.2":             false,
+		"deepseek-v4-flash":   false,
+		"glm-5.3":             false,
+		"never-seen-model-x":  true,
 	}
 	for name, want := range cases {
 		if got := IsBenefitModel(name); got != want {
 			t.Errorf("IsBenefitModel(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// TestFallbackModelsAreLiveNames 目录钉在**逐个实测过**的名字上。
+// 这条测试的存在理由：上一版目录抄参考项目的带日期名
+// （deepseek-v4-flash-0731 / glm-5.3-flash 等），上游已全部 404
+// 「Route missed for model」，而 /v1/models 照列不误——用户点了就必失败，
+// 且失败原因会被下一个账号的账号级错误覆盖成「assign a seat」，
+// 把可用账号误诊成坏账号。名字还**大小写敏感**（glm-5.3 可用、GLM-5.3 是
+// 404），所以不许"顺手规范一下大小写"。
+func TestFallbackModelsAreLiveNames(t *testing.T) {
+	var got []string
+	for _, m := range FallbackModels {
+		got = append(got, m.ID)
+	}
+	want := []string{"openpangu-2.0-pro", "openpangu-2.0-flash", "GLM-5.2", "deepseek-v4-flash", "glm-5.3"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("目录与实测名单不符：got=%v want=%v", got, want)
+	}
+}
+
+// TestModelUnregistered 分清「模型名不存在」与「账号没权限」——前者换号无用、
+// 且不该记在账号健康上，后者才是账号级故障。
+func TestModelUnregistered(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{"InferHub 路由未命中", 404,
+			`{"error_code":"InferHub.002002009.404","error_msg":"The model is not registered, please request other model","details":[{"error_msg":"Route missed for model: glm-5.3-flash"}]}`, true},
+		{"ModelArts 非法模型", 404, `{"error_code":"ModelArts.81009","error_msg":"Invalid model."}`, true},
+		{"403 未分配席位＝账号级", 403,
+			`{"error_code":"TM.00001005","error_msg":"Access denied. Contact your organization administrator to assign a seat to you."}`, false},
+		{"200 正常", 200, `{"choices":[]}`, false},
+		{"404 但不含模型判据", 404, `<html>not found</html>`, false},
+	}
+	for _, c := range cases {
+		if got := ModelUnregistered(c.status, []byte(c.body)); got != c.want {
+			t.Errorf("%s: ModelUnregistered = %v, want %v", c.name, got, c.want)
 		}
 	}
 }

@@ -22,13 +22,18 @@ package codearts
 // 验证**，只能靠官方向量的黄金测试兜底（见 signChatGoldenTest）。
 //
 // ── 两条模型通道（agent / benefit）──────────────────────────────
-// 上游模型分两条计费通道，签名头集合**不同**（实测 + 参考项目实证）：
+// 上游模型分两条计费通道，签名头集合**不同**（参考项目实证）：
 //
 //   - agent 通道（老套餐模型，如 openpangu-2.0-pro / GLM-5.2）：签名头不含
 //     model-id / model-name / x-model-id 三头，模型名只走 body。
-//   - benefit 通道（免费额度模型，如 deepseek-v4-flash-0731）：body 带
-//     maas_type=benefit，且三模型头**必须参与签名**——缺了报 "model is not
-//     registered"；agent 模型带三头反而报 "unsupported model"。
+//   - benefit 通道（免费额度模型）：body 带 maas_type=benefit，且三模型头
+//     **参与签名**。
+//
+// 实测（2026-10-08，个人版账号，逐模型 × 两条通道各发一次）：**两条通道对
+// 已注册的模型名都回 200**，对未注册的名字两条通道都回同一个 404——也即
+// 对本账号而言通道选择**不影响成败**，成败只由模型名是否注册决定（见
+// ModelUnregistered）。参考项目里"agent 模型带三头会判 unsupported model"
+// 在本账号复现不出来，因此通道判据保留但不作为修复手段。
 //
 // 通路由模型名决定（IsBenefitModel：兜底目录里的 benefit 模型 + 未知新模型
 // 保守按 benefit），见 BuildChatRequest 的 ChatOptions。
@@ -90,15 +95,12 @@ type ChatHeaderProfile struct {
 
 // ChatOptions 一次对话的通道选择（见包注释「两条通道」）。
 //
-// Benefit=true 时出站体注入 maas_type=benefit，且三个模型头（model-id /
-// model-name / x-model-id）必须**参与签名**——上游缺这三个头就报
-// "model is not registered"。Agent 通道的模型名走普通路径即可，签名头
-// 集合与 Benefit 不同（Benefit 头在签名前就要注入）。
+// Benefit=true 时出站体注入 maas_type=benefit，并把三个模型头（model-id /
+// model-name / x-model-id）纳入签名。实测本账号两条通道对已注册模型都回
+// 200，所以这个开关不改变成败（见 FallbackModels 上方注）。
 type ChatOptions struct {
 	// Benefit 走免费额度通道（签到领取的模型族）。
 	Benefit bool
-	// 模型名透传给上游 model-id/model-name/x-model-id 三头。
-	Model string
 }
 
 // DefaultChatProfile 默认指纹档（与参考实现 HeaderProfile::default 一致）。
@@ -113,11 +115,9 @@ func DefaultChatProfile() ChatHeaderProfile {
 // headers 构造参与签名的客户端指纹头。
 //
 // 三个模型头（model-id / model-name / x-model-id）**是否参与签名**由
-// benefit 决定：
-//   - benefit 通道（免费模型）：三个模型头**必须**进签名——上游缺它们就报
-//     "model is not registered"（参考项目 BENEFIT_MODELS 实测）。
-//   - agent 通道（老套餐模型）：模型名只走 body，不进签名；强行带上这三个
-//     头反而会被判 "unsupported model"（参考项目两条通道严格区分的原因）。
+// benefit 决定——这是参考项目里两条通道的写法差异。实测（2026-10-08）
+// 本个人版账号带与不带都回 200，所以这一支不是成败关键，保留只为与
+// 参考实现的请求形状一致。
 func (p ChatHeaderProfile) headers(model string, benefit bool) map[string]string {
 	h := map[string]string{
 		"Content-Type":   "application/json",
@@ -247,7 +247,7 @@ func signChatCanonical(method, uri, query string, headers map[string]string,
 //
 // `model` 是**上游模型名**（前缀剥掉后的裸名）。opts.Benefit 决定通道：
 // 免费模型注入 `maas_type: benefit` 并把模型三头纳入签名（见 headers 注释）；
-// 普通模型一律按 agent 通道签（带 benefit 头反而 "unsupported model"）。
+// 其余按 agent 通道签。实测本账号两条通道对已注册模型都回 200。
 func BuildChatRequest(cred *Credential, model string, payload []byte, stream bool, opts ChatOptions) (string, map[string]string, []byte, error) {
 	if model == "" {
 		return "", nil, nil, fmt.Errorf("CodeArts 模型名为空")
@@ -308,20 +308,44 @@ type Model struct {
 }
 
 // FallbackModels 兜底模型目录（云端同步失败时，/v1/models 至少能列出这些）。
-// 与参考项目 FALLBACK_AGENT_MODELS + BENEFIT_MODELS 一致。
+//
+// **逐名实测过**（2026-10-08，个人版账号，非流式最小请求）：下面 5 个都回
+// HTTP 200 出正文。参考项目 BENEFIT_MODELS 里的带日期名
+// （deepseek-v4-flash-0731 / deepseek-v4-pro-0813 / glm-5.3-flash）上游已
+// 全部 404「Route missed for model」，列进目录等于保证失败，故删掉。
+// 注意模型名**大小写敏感**：glm-5.3 可用，GLM-5.3 是 404。
 var FallbackModels = []Model{
 	{ID: "openpangu-2.0-pro", Name: "openpangu-2.0-pro"},
 	{ID: "openpangu-2.0-flash", Name: "openpangu-2.0-flash"},
 	{ID: "GLM-5.2", Name: "GLM-5.2"},
-	{ID: "deepseek-v4-flash-0731", Name: "deepseek-v4-flash-0731", Benefit: true},
-	{ID: "deepseek-v4-pro-0813", Name: "deepseek-v4-pro-0813", Benefit: true},
-	{ID: "glm-5.3-flash", Name: "glm-5.3-flash", Benefit: true},
+	{ID: "deepseek-v4-flash", Name: "deepseek-v4-flash"},
+	{ID: "glm-5.3", Name: "glm-5.3"},
+}
+
+// ModelUnregistered 判断一次对话失败是不是**模型名在上游不存在**。
+//
+// 这是**账号无关**的判定：路由表在上游 InferHub/ModelArts 侧，换账号不会改变
+// 结果（账号级权限问题走的是另一个码 403 TM.00001005「assign a seat」）。
+// 实测两条文案：
+//
+//	404 InferHub.002002009.404  "The model is not registered … Route missed for model: X"
+//	404 ModelArts.81009         "Invalid model."
+//
+// 调用方据此**停止换号重试**并且**不给账号记失败**——把健康账号因为用户点了
+// 一个不存在的模型而退避，等于用一次误伤换来一条无关的错误信息。
+func ModelUnregistered(status int, raw []byte) bool {
+	if status != http.StatusNotFound {
+		return false
+	}
+	s := string(raw)
+	return strings.Contains(s, "is not registered") ||
+		strings.Contains(s, "Route missed for model") ||
+		strings.Contains(s, "Invalid model")
 }
 
 // IsBenefitModel 该裸模型名是否走 benefit 通道（免费额度模型）。
-// 未知模型名默认按 benefit 处理——参考项目同款判据：agent 通道模型会显式
-// 出现在 AgentCenter 目录里，没见过的名字（多为新增免费模型）一律按
-// benefit 头签名，否则上游报 "model is not registered"。
+// 未知模型名默认按 benefit 处理——与参考项目同款判据。实测这一支不影响成败
+// （未注册的名字两条通道同一个 404），保留只为形状一致。
 func IsBenefitModel(bare string) bool {
 	for _, m := range FallbackModels {
 		if m.ID == bare {

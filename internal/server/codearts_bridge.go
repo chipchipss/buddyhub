@@ -27,6 +27,10 @@ import (
 
 // codeartsChatStream 转发到 CodeArts。返回 false = 无可用账号。
 func (h *Handler) codeartsChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
+	// 每次进入先清掉上一次的失败原因：它是**上一次请求**的事实，
+	// 挂在字段里跨请求复用就会把「这个模型不存在」讲成「上一个账号的权限问题」。
+	h.lastCodeArtsErr = ""
+
 	if h.cfg.ExtAccounts == nil {
 		return false
 	}
@@ -66,6 +70,23 @@ func (h *Handler) codeartsChatStream(w http.ResponseWriter, r *http.Request, bod
 		if resp.StatusCode >= 400 {
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
+
+			// 404「模型名在上游不存在」是**路由表级**判定，与账号无关：换下一个
+			// 账号只会多打一发上游，而 lastErr 会被那个账号自己的账号级错误
+			//（如 403 未分配席位）覆盖——用户看到的是"assign a seat"，真正原因
+			// 却是"这个模型没注册"。实测就是这么把可用户误诊成坏账号的。
+			if codearts.ModelUnregistered(resp.StatusCode, raw) {
+				reason := modelMissingReason(bareModel)
+				h.lastCodeArtsErr = reason
+				log.Printf("codearts-bridge: model=%s 上游未注册（HTTP %d），不换号: %s",
+					bareModel, resp.StatusCode, shorten(string(raw), 160))
+				// 直接回 404 并标记「已服务」：走 dispatch 的 503 会把它说成
+				// "没有可用账号"，那是另一件事。**不**给账号记失败——健康账号
+				// 不该因为用户点了不存在的模型被退避。
+				writeOpenAIError(w, http.StatusNotFound, "model_not_found", reason)
+				return true
+			}
+
 			lastErr = "上游 HTTP " + itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
 			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("codearts-bridge: %s 上游 %d: %s", a.ID, resp.StatusCode, shorten(string(raw), 200))
@@ -78,6 +99,16 @@ func (h *Handler) codeartsChatStream(w http.ResponseWriter, r *http.Request, bod
 	}
 	h.lastCodeArtsErr = lastErr
 	return false
+}
+
+// modelMissingReason 未注册模型的用户可读原因，带上实测可用的模型名。
+func modelMissingReason(model string) string {
+	avail := make([]string, 0, len(codearts.FallbackModels))
+	for _, m := range codearts.FallbackModels {
+		avail = append(avail, m.ID)
+	}
+	return "模型 " + model + " 在 CodeArts 上游未注册（404 Route missed，与账号无关，换号也没用）；" +
+		"实测可用: " + strings.Join(avail, " / ") + "（模型名大小写敏感）"
 }
 
 // forwardCodeArts 流式逐帧（回写 model）/ 非流式本地聚合。
