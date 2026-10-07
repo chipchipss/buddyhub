@@ -189,6 +189,16 @@ func (c *Client) Do(ctx context.Context, body []byte) (*Result, error) {
 			continue
 
 		case FailRiskControl:
+			if usedPlan && len(c.SystemBlocks) == 0 {
+				// Plan 通道缺身份块（system_file）时上游几乎必判 3012 —— 这是本地
+				// 配置缺失而非账号真被风控。若照常 BanForRisk，首个请求就会团灭整池
+				// 且需人工逐个恢复；也不能继续换号重试（重复打上游只会加剧风控）。
+				// 故：记一次普通失败、立即返回可操作的配置提示、不动账号可用性。
+				_ = c.Pool.Store().Update(acc.ID, func(a *Account) {
+					a.MarkFail("3012：Plan 通道疑似缺 system_file 身份块")
+				})
+				return nil, fmt.Errorf("Plan 通道被上游判 3012 风控，且未配置身份块（schedule.zai.system_file）——已停止重试、账号未禁用，请补齐身份块后重试")
+			}
 			_ = c.Pool.Store().Update(acc.ID, func(a *Account) {
 				a.BanForRisk("上游风控（3012/405 unusual activity）")
 			})

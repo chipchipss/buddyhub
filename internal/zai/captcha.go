@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +27,18 @@ const (
 	defaultPoolMax  = 12
 	defaultTokenTTL = 100 * time.Second // verifyParam 实际有效期约 2 分钟，留安全余量
 )
+
+// regionFallbacks 求解区域候选。
+//
+// 上游 client/configs 声明 region=cn，但该 scene（11xygtvd）在部分出口 IP 上用
+// cn 只会返回**降级 token**（只有 certifyId、无 securityToken，上游必然判 3007），
+// 换 sgp 才拿得到完整 token。故按 [配置区域, sgp, cn] 依次尝试，命中即缓存，
+// 之后直接走 last-good 区域，避免每次都白解一遍 cn。
+var regionFallbacks = []string{"sgp", "cn"}
+
+// errDegradedParam 求解器返回了降级 token（缺 securityToken）。这是**确定性**
+// 失败——同区域再解还是短的，故 solve 遇到它立即换区域，不空耗 solveRetries。
+var errDegradedParam = errors.New("求解结果过短，疑似降级")
 
 // SolverConfig 外部验证码求解器配置。
 //
@@ -87,7 +100,9 @@ type CaptchaManager struct {
 	pool     []captchaToken
 	refill   bool
 	lastErr  string
-	cfgCache struct {
+	// lastRegion 最近一次求解成功的区域；非空时优先复用（跳过已知降级的区域）。
+	lastRegion string
+	cfgCache   struct {
 		scene, region, prefix string
 		at                    time.Time
 	}
@@ -307,23 +322,63 @@ func (m *CaptchaManager) fetchConfig(ctx context.Context) captchaCfg {
 	return c
 }
 
-// solve 跑一次外部求解器，解析 stdout 的 VERIFY_PARAM=。
+// solve 跑外部求解器，解析 stdout 的 VERIFY_PARAM=。
+//
+// 按 regionCandidates 依次尝试各区域：某区域返回降级 token（errDegradedParam）
+// 是确定性失败，立即换下一个区域而不空耗重试；其余错误（启动失败/超时无输出）
+// 在同区域内重试至多 solveRetries 次。命中后把区域记为 last-good，后续直接复用。
 func (m *CaptchaManager) solve(ctx context.Context, cfg captchaCfg) (captchaToken, error) {
 	var lastErr error
-	for attempt := 1; attempt <= solveRetries; attempt++ {
-		param, err := m.runSolver(ctx, cfg)
-		if err == nil && param != "" {
-			return captchaToken{param: param, region: cfg.region, bornAt: time.Now()}, nil
-		}
-		if err == nil {
-			err = fmt.Errorf("求解器未输出 VERIFY_PARAM")
-		}
-		lastErr = err
-		if ctx.Err() != nil {
-			break
+	for _, region := range m.regionCandidates(cfg.region) {
+		rcfg := captchaCfg{scene: cfg.scene, region: region, prefix: cfg.prefix}
+		for attempt := 1; attempt <= solveRetries; attempt++ {
+			param, err := m.runSolver(ctx, rcfg)
+			if err == nil && param != "" {
+				m.setLastRegion(region)
+				return captchaToken{param: param, region: region, bornAt: time.Now()}, nil
+			}
+			if err == nil {
+				err = fmt.Errorf("求解器未输出 VERIFY_PARAM")
+			}
+			lastErr = err
+			if ctx.Err() != nil {
+				return captchaToken{}, fmt.Errorf("验证码求解失败：%w", lastErr)
+			}
+			if errors.Is(err, errDegradedParam) {
+				break // 该区域确定性降级：换区域，别在同区域空转
+			}
 		}
 	}
-	return captchaToken{}, fmt.Errorf("验证码求解失败（%d 次）：%w", solveRetries, lastErr)
+	return captchaToken{}, fmt.Errorf("验证码求解失败：%w", lastErr)
+}
+
+// regionCandidates 去重后的区域尝试顺序：last-good → 配置区域 → 兜底(sgp/cn)。
+func (m *CaptchaManager) regionCandidates(primary string) []string {
+	m.mu.Lock()
+	last := m.lastRegion
+	m.mu.Unlock()
+	out := make([]string, 0, len(regionFallbacks)+2)
+	seen := map[string]bool{}
+	add := func(r string) {
+		r = strings.TrimSpace(r)
+		if r == "" || seen[r] {
+			return
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	add(last)
+	add(primary)
+	for _, r := range regionFallbacks {
+		add(r)
+	}
+	return out
+}
+
+func (m *CaptchaManager) setLastRegion(region string) {
+	m.mu.Lock()
+	m.lastRegion = region
+	m.mu.Unlock()
 }
 
 func (m *CaptchaManager) runSolver(ctx context.Context, cfg captchaCfg) (string, error) {
@@ -357,8 +412,8 @@ func (m *CaptchaManager) runSolver(ctx context.Context, cfg captchaCfg) (string,
 		return "", fmt.Errorf("求解器无输出（退出码 %v）", cmd.ProcessState)
 	}
 	if len(param) < 200 {
-		// 短参数是降级结果（缺 securityToken），上游必然 3007 —— 直接判失败重解
-		return "", fmt.Errorf("求解结果过短（%d 字符），疑似降级", len(param))
+		// 短参数是降级结果（缺 securityToken），上游必然 3007 —— 确定性失败，换区域再解
+		return "", fmt.Errorf("%w（%d 字符）", errDegradedParam, len(param))
 	}
 	return param, nil
 }

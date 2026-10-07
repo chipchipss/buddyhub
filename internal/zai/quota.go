@@ -84,8 +84,14 @@ func (c *Client) FetchQuota(ctx context.Context, id string) *QuotaResult {
 	if billingStatus == http.StatusUnauthorized || billingStatus == http.StatusForbidden {
 		lower := lowerString(billingBody)
 		if !containsAny(lower, []string{"captcha", "verify"}) {
-			_ = st.Update(id, func(a *Account) { a.Invalidate("额度查询被拒：凭证失效") })
-			return &QuotaResult{Error: "凭证失效（HTTP " + itoa(billingStatus) + "）"}
+			// billing 族是无验证码、无身份块保护的裸接口，上游 WAF 对 Go 客户端 TLS
+			// 指纹敏感，会随机吐 401/403——同一凭证同一时刻换 HTTP 库/UA 立刻 200。
+			// 这不是凭证失效，而是「这一路额度查询暂不可用」。凭证是否真死只由
+			// messages 通道（带验证码 + 身份块）判定（见 runtime.go 的 FailInvalid）。
+			// 故这里**绝不改动账号状态**：否则 5 分钟一轮的后台轮询会凭空把整池
+			// 打成 INVALID，令账号不可选、通道整体下线（曾观测：3 号全 INVALID，
+			// 而其 JWT 直连 billing/current 实为 200）。
+			return &QuotaResult{Error: "额度查询暂不可用（HTTP " + itoa(billingStatus) + "，凭证未判定失效）"}
 		}
 	}
 

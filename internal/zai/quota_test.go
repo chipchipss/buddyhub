@@ -157,7 +157,10 @@ func TestFetchQuotaWritesSnapshot(t *testing.T) {
 	}
 }
 
-func TestFetchQuotaMarksInvalidOnAuthFailure(t *testing.T) {
+func TestFetchQuotaDoesNotInvalidateOnBillingAuthFailure(t *testing.T) {
+	// billing 族是无验证码/无身份块的裸接口，上游 WAF 对 Go 客户端 TLS 指纹敏感，
+	// 会随机 401/403——同一凭证换 HTTP 库实为 200。凭证是否真死只由 messages 通道
+	// 判定，故后台额度轮询**绝不因 billing 401 把账号打成 INVALID**，否则会凭空下线整池。
 	billing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
 		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
@@ -166,16 +169,16 @@ func TestFetchQuotaMarksInvalidOnAuthFailure(t *testing.T) {
 	SetEndpoints("", "", "", billing.URL)
 
 	st, _ := NewStore(filepath.Join(t.TempDir(), "acc.json"))
-	acc := NewAccount("失效号", "header."+b64(`{"sub":"u2"}`)+".sig")
+	acc := NewAccount("被WAF误杀号", "header."+b64(`{"sub":"u2"}`)+".sig")
 	_ = st.Add(acc)
 	client := NewClient(NewPool(st, 2), nil, nil)
 
 	res := client.FetchQuota(context.Background(), acc.ID)
 	if res.Error == "" {
-		t.Fatal("401 应返回错误")
+		t.Fatal("billing 401 应回额度不可用错误（供面板显示）")
 	}
-	if got := st.Get(acc.ID).Status; got != StatusInvalid {
-		t.Fatalf("401 应标记 invalid，got %s", got)
+	if got := st.Get(acc.ID).Status; got == StatusInvalid {
+		t.Fatalf("billing 401 不得把账号判为凭证失效，got %s", got)
 	}
 }
 

@@ -152,8 +152,11 @@ func (s *Store) Update(id string, fn func(*Account)) error {
 func (s *Store) SetEnabled(id string, enabled bool) error {
 	return s.Update(id, func(a *Account) {
 		a.Enabled = enabled
-		if enabled && a.Status == StatusDisabled {
-			// 人工确认恢复：风控封禁只有人能解除
+		// 人工确认恢复：风控封禁(DISABLED)只有人能解除；凭证失效(INVALID)也给人工
+		// 复核入口——失效常由上游 WAF 抖动 / billing 误判造成，若凭证真死，下一次
+		// 对话会重新判失效（自愈），故人工放行是安全且必要的恢复通道。
+		// 冷却(COOLING)/额度用完(EXHAUSTED)属时间/额度驱动，不归人工 toggle 强解。
+		if enabled && (a.Status == StatusDisabled || a.Status == StatusInvalid) {
 			a.Status = StatusActive
 			a.LastError = ""
 		}
