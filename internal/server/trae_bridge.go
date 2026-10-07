@@ -171,9 +171,10 @@ func newChunkID() string {
 /* ── 模型目录（实时拉取 + 10 分钟缓存） ───────────────────────── */
 
 var (
-	traeCatMu   sync.Mutex
-	traeCatAt   time.Time
-	traeCatMods []trae.Model
+	traeCatMu             sync.Mutex
+	traeCatAt             time.Time
+	traeCatMods           []trae.Model
+	traeCatDegradedLogged bool // 降级日志只记一次，避免每次 /v1/models 刷屏
 )
 
 func (h *Handler) traeCatalog() []trae.Model {
@@ -208,18 +209,49 @@ func (h *Handler) traeCatalog() []trae.Model {
 	mods, err := trae.ListModels(ctx, cred)
 	if err != nil {
 		log.Printf("trae-bridge: 拉取模型目录失败: %v", err)
-		traeCatMu.Lock()
-		prev := traeCatMods
-		traeCatMu.Unlock()
-		return prev
+		return traeCatalogFallback("实时拉取失败")
 	}
 	if len(mods) == 0 {
-		return nil
+		return traeCatalogFallback("实时拉取为空")
 	}
 	traeCatMu.Lock()
 	traeCatMods, traeCatAt = mods, time.Now()
 	traeCatMu.Unlock()
 	return mods
+}
+
+// traeStaticCatalog 经实测核实的可服务模型（对话端点回真实内容才算数，不臆造）。
+//
+// 用途：本账号的目录端点 `get_detail_param` 恒 500（与 body / X-Uid / IDE 版本头
+// 无关，已逐一试过），但**对话通道 token 存活、chat 可出内容**。没有这份兜底，
+// trae 模型就不进 /v1/models、也就永远派发不到那条其实能用的 chat 链路。
+var traeStaticCatalog = []trae.Model{
+	{ID: "glm-5.3", Name: "GLM-5.3"},
+	{ID: "glm-5.2", Name: "GLM-5.2"},
+	{ID: "glm-5", Name: "GLM-5"},
+}
+
+// traeCatalogFallback 目录实时拉取不可用时的回退：先用上一份好缓存（keep-last-good），
+// 没有则用静态兜底名单。一次性记一条降级日志，便于面板/排查看到"目录降级"而非静默 0。
+func traeCatalogFallback(reason string) []trae.Model {
+	traeCatMu.Lock()
+	usingStatic := false
+	prev := traeCatMods
+	if prev == nil {
+		prev = traeStaticCatalog
+		usingStatic = true
+	}
+	firstDegrade := !traeCatDegradedLogged
+	traeCatDegradedLogged = true
+	traeCatMu.Unlock()
+	if firstDegrade {
+		if usingStatic {
+			log.Printf("trae-bridge: 模型目录降级到静态兜底名单（%s，仅列实测可服务模型）", reason)
+		} else {
+			log.Printf("trae-bridge: 模型目录降级到上一份缓存（%s）", reason)
+		}
+	}
+	return prev
 }
 
 // traeModelPrefix Trae 路由前缀。

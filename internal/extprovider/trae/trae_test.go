@@ -193,6 +193,10 @@ func TestPayloadDropsNonWhitelistedKeys(t *testing.T) {
 
 func TestPayloadDefaultsAndSampling(t *testing.T) {
 	out := prep(t, `{"model":"m","messages":[],"temperature":0.5,"seed":7,"stop":"END","n":"2"}`, "")
+	// app_id 是上游 binding 必填：缺它整条对话被拒 4001，且它不由入站提供、恒为常量。
+	if out["app_id"] != AppID {
+		t.Fatalf("app_id = %v，期望常量 %s（上游 binding 必填）", out["app_id"], AppID)
+	}
 	if out["function"] != soloFunction {
 		t.Fatalf("function = %v，期望 %s", out["function"], soloFunction)
 	}

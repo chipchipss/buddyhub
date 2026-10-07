@@ -62,6 +62,7 @@ func PrepareBody(source []byte, resolvedModel string) ([]byte, error) {
 	}
 
 	out := map[string]any{
+		"app_id":      AppID, // 上游 binding 必填：缺它整条对话 4001 "missing required parameter app_id"
 		"function":    soloFunction,
 		"stream":      true, // 上游只支持流式；非流式由网关本地聚合
 		"config_name": model,

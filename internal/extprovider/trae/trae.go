@@ -744,6 +744,10 @@ func applySoloHeaders(req *http.Request, cred *Credential, stream bool) {
 		req.Header.Set("Accept", "application/json")
 	}
 	req.Header.Set("User-Agent", UserAgent)
+	// 上游按 IDE 版本门控下发模型表（get_detail_param）；缺这两个版本头会让
+	// 目录侧拿不到对应表（实测 500/空）。IDEVersionCode 即上游观测到的表键。
+	req.Header.Set("X-Ide-Version", IDEVersion)
+	req.Header.Set("X-Ide-Version-Code", IDEVersionCode)
 	req.Header.Set("Authorization", "Cloud-IDE-JWT "+cred.AccessToken)
 	req.Header.Set("X-Cloudide-Token", cred.AccessToken)
 	req.Header.Set("X-Ide-Token", cred.AccessToken)
