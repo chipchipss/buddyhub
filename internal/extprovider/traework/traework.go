@@ -49,12 +49,28 @@ const (
 	CheckinStatusPath = "/trae/api/v2/ug/checkin_credits/status"
 	CheckinClaimPath  = "/trae/api/v2/ug/checkin_credits/claim"
 
-	IDEVersion  = "0.1.56"
 	SessionMode = "work"
 
 	// AuthStorageKey 官方客户端 storage.json 里的登录态键（手工填凭据时对照）。
 	AuthStorageKey = "iCubeAuthInfo://icube.cloudide"
+
+	// defaultIDEVersion 内置默认档（对齐官方 SOLO 客户端）。
+	defaultIDEVersion = "0.1.56"
 )
+
+// IDEVersion 申报的 SOLO 客户端版本（User-Agent `TRAE-SOLO-CN/<ver>`）。
+// 可由 config ext_versions 覆盖而无需重新编译；空值回落内置默认。
+var IDEVersion = defaultIDEVersion
+
+// SetIDEVersion 应用版本覆盖（空值回落内置默认），返回生效值供启动日志打印。
+func SetIDEVersion(v string) string {
+	if s := strings.TrimSpace(v); s != "" {
+		IDEVersion = s
+	} else {
+		IDEVersion = defaultIDEVersion
+	}
+	return IDEVersion
+}
 
 // StaticModels 拉不到目录时的兜底（官方客户端观测值）。
 var StaticModels = []string{

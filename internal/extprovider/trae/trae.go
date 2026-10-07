@@ -73,13 +73,15 @@ const (
 	// ClientIDSolo SOLO 谱系的 client_id（公开值）。
 	ClientIDSolo = "en1oxy7wnw8j9n"
 
-	IDEVersion     = "0.1.61"
-	IDEVersionCode = "20260820"
-	AppID          = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
-	DeviceBrand    = "83DG"
-	OSVersion      = "Windows 11 Pro"
-	UserAgent      = "Trae/0.1.61"
-	PluginVersion  = "1.0.0"
+	// 内置默认版本指纹（对齐官方 SOLO 客户端；config ext_versions 空值时回落这里）。
+	defaultIDEVersion     = "0.1.61"
+	defaultIDEVersionCode = "20260820"
+
+	AppID         = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
+	DeviceBrand   = "83DG"
+	OSVersion     = "Windows 11 Pro"
+	UserAgent     = "Trae/0.1.61"
+	PluginVersion = "1.0.0"
 	// 授权页按这几个参数判客户端形态（漏了直接 404）
 	DeviceType = "windows"
 	Env        = "prod"
@@ -88,6 +90,29 @@ const (
 	// LoginTTL 一次登录会话的有效期。
 	LoginTTL = 15 * time.Minute
 )
+
+// IDEVersion / IDEVersionCode 申报给上游的客户端版本指纹。
+// IDEVersionCode 是模型目录的表键（X-Ide-Version-Code）。版本随官方客户端漂移，
+// 故可由 config ext_versions 覆盖而无需重新编译；空值回落内置默认。
+var (
+	IDEVersion     = defaultIDEVersion
+	IDEVersionCode = defaultIDEVersionCode
+)
+
+// SetFingerprints 应用版本覆盖（空值回落内置默认），返回生效值供启动日志打印。
+func SetFingerprints(ideVersion, ideVersionCode string) (string, string) {
+	if s := strings.TrimSpace(ideVersion); s != "" {
+		IDEVersion = s
+	} else {
+		IDEVersion = defaultIDEVersion
+	}
+	if s := strings.TrimSpace(ideVersionCode); s != "" {
+		IDEVersionCode = s
+	} else {
+		IDEVersionCode = defaultIDEVersionCode
+	}
+	return IDEVersion, IDEVersionCode
+}
 
 // Credential 落进 extstore 的凭据形态。
 type Credential struct {

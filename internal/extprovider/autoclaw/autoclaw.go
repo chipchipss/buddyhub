@@ -101,11 +101,6 @@ const (
 	AuthAppID  = "100003"
 	AuthAppKey = "38d2391985e2369a5fb8227d8e6cd5e5"
 
-	// ClientVersion 申报的客户端版本。**它是模型目录的版本门控**：
-	// 不带时上游只下发 3–4 条模型，看起来像账号没有这些模型。
-	// 值跟着真实客户端走；过时的症状是目录回落成旧清单而不是报错。
-	ClientVersion = "1.18.5"
-
 	SourceID = "autoclaw"
 
 	sendCodePath = "/userapi/v1/agent-send-code"
@@ -115,7 +110,26 @@ const (
 	refreshPath = "/userapi/v1/refresh"
 	// refreshFallbackPath 签名校验失败（code 400002）时的降级路径。
 	refreshFallbackPath = "/userapi/v1/agent-refresh"
+
+	// defaultClientVersion ClientVersion 的内置默认档（对齐真实桌面客户端）。
+	defaultClientVersion = "1.18.5"
 )
+
+// ClientVersion 申报的客户端版本。**它是模型目录的版本门控**：不带时上游只下发
+// 3–4 条模型，看起来像账号没有这些模型。值跟着真实客户端走；过时的症状是目录回落
+// 成旧清单而不是报错，所以做成可配（config ext_versions）而不是只能重编译。
+// 空值回落内置默认。
+var ClientVersion = defaultClientVersion
+
+// SetClientVersion 应用版本覆盖（空值回落内置默认），返回生效值供启动日志打印。
+func SetClientVersion(v string) string {
+	if s := strings.TrimSpace(v); s != "" {
+		ClientVersion = s
+	} else {
+		ClientVersion = defaultClientVersion
+	}
+	return ClientVersion
+}
 
 // Credential 落进 extstore 的凭据形态。
 type Credential struct {

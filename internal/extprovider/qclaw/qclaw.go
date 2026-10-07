@@ -61,9 +61,6 @@ const (
 	// JPrxSignatureKey JPRX 签名盐（内嵌在官方客户端里，非秘密）。
 	JPrxSignatureKey = "7fcd3045-3171-482b-9be4-0430bf8553b5"
 
-	WebVersion    = "1.4.0"
-	ClientVersion = "0.2.36.629"
-
 	// 业务命令号。
 	CmdWXLoginState   = "4050"
 	CmdWXLogin        = "4026"
@@ -76,7 +73,34 @@ const (
 
 	jprxRndChars = "abcdefghijklmnopqrstuvwxyz0123456789"
 	jprxRndLen   = 32
+
+	// 内置默认版本指纹（对齐官方客户端；config ext_versions 空值时回落这里）。
+	defaultWebVersion    = "1.4.0"
+	defaultClientVersion = "0.2.36.629"
 )
+
+// WebVersion / ClientVersion 申报给上游的客户端版本（web_version 体字段、
+// User-Agent 与 X-QClaw-Version 头）。可由 config ext_versions 覆盖而无需重新编译；
+// 空值回落内置默认。
+var (
+	WebVersion    = defaultWebVersion
+	ClientVersion = defaultClientVersion
+)
+
+// SetFingerprints 应用版本覆盖（空值回落内置默认），返回生效值供启动日志打印。
+func SetFingerprints(webVersion, clientVersion string) (string, string) {
+	if s := strings.TrimSpace(webVersion); s != "" {
+		WebVersion = s
+	} else {
+		WebVersion = defaultWebVersion
+	}
+	if s := strings.TrimSpace(clientVersion); s != "" {
+		ClientVersion = s
+	} else {
+		ClientVersion = defaultClientVersion
+	}
+	return WebVersion, ClientVersion
+}
 
 // StaticModels 上游 4320 拿不到时的兜底名单（官方客户端观测值）。
 var StaticModels = []string{

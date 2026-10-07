@@ -34,11 +34,27 @@ const (
 	DefaultAKSecret = "zsak6eadrbawz683wf5r3m2snrwj868r"
 	DefaultAppID    = "GM3LOOMY"
 	WebModelID      = "Web"
-	ClientVersion   = "1.0.0"
 	ClientUA        = "Loomy|Desktop|Electron|macOS"
 	SessionExpire   = 14 * 24 * 3600
 	requestTimeout  = 30 * time.Second
+
+	// defaultClientVersion 内置默认档。
+	defaultClientVersion = "1.0.0"
 )
+
+// ClientVersion 申报的桌面端版本（登录体 version 字段）。可由 config ext_versions
+// 覆盖而无需重新编译；空值回落内置默认。
+var ClientVersion = defaultClientVersion
+
+// SetClientVersion 应用版本覆盖（空值回落内置默认），返回生效值供启动日志打印。
+func SetClientVersion(v string) string {
+	if s := strings.TrimSpace(v); s != "" {
+		ClientVersion = s
+	} else {
+		ClientVersion = defaultClientVersion
+	}
+	return ClientVersion
+}
 
 // Identity 每账号设备身份（首登生成、持久化复用，保持设备一致性）。
 type Identity struct {

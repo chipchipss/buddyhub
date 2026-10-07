@@ -56,10 +56,27 @@ const (
 	ModelsPath = "/v1/model/builtin"
 
 	// 客户端指纹默认值，照参考实现的 config 默认档。
-	DefaultPluginName    = "snap_vscode"
-	DefaultPluginVersion = "26.9.101"
-	DefaultLanguage      = "en-us"
+	DefaultPluginName = "snap_vscode"
+	DefaultLanguage   = "en-us"
+
+	// defaultPluginVersion DefaultPluginVersion 的内置默认档。
+	defaultPluginVersion = "26.9.101"
 )
+
+// DefaultPluginVersion 申报的插件版本（client_version / plugin-version 头，且参与
+// 签名）。它随官方插件发布漂移，做成可配（config ext_versions）是为了跟版本不必
+// 重新编译；空值回落内置默认。
+var DefaultPluginVersion = defaultPluginVersion
+
+// SetPluginVersion 应用版本覆盖（空值回落内置默认），返回生效值供启动日志打印。
+func SetPluginVersion(v string) string {
+	if s := strings.TrimSpace(v); s != "" {
+		DefaultPluginVersion = s
+	} else {
+		DefaultPluginVersion = defaultPluginVersion
+	}
+	return DefaultPluginVersion
+}
 
 // ChatHeaderProfile 一次对话请求的客户端指纹头（全部参与签名）。
 type ChatHeaderProfile struct {

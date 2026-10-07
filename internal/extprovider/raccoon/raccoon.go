@@ -39,7 +39,6 @@ const (
 	PointsPrefix   = "/api/web/points/v1"
 	DesktopPrefix  = "/api/web/desktop/v1"
 	ClientPlatform = "desktop-windows"
-	ClientVersion  = "v1.0.35"
 	RequestTimeout = 60 * time.Second
 
 	// PhoneCipherSecret 手机号 AES-128-CFB 加密密钥（客户端硬编码公开常量，
@@ -47,7 +46,24 @@ const (
 	PhoneCipherSecret = "senseraccoon2023"
 	LoginRewardPoints = 3000
 	LoginRewardEvent  = "桌面端登录奖励"
+
+	// defaultClientVersion 内置默认档（对齐官方桌面客户端）。
+	defaultClientVersion = "v1.0.35"
 )
+
+// ClientVersion 申报的桌面端版本（X-Client-Version 头）。可由 config ext_versions
+// 覆盖而无需重新编译；空值回落内置默认。
+var ClientVersion = defaultClientVersion
+
+// SetClientVersion 应用版本覆盖（空值回落内置默认），返回生效值供启动日志打印。
+func SetClientVersion(v string) string {
+	if s := strings.TrimSpace(v); s != "" {
+		ClientVersion = s
+	} else {
+		ClientVersion = defaultClientVersion
+	}
+	return ClientVersion
+}
 
 // Credential Raccoon 凭据（JWT access_token + refresh_token 轮换）。
 type Credential struct {

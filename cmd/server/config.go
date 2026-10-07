@@ -218,6 +218,28 @@ type Config struct {
 		PassthroughIP bool `json:"passthrough_ip"`
 	} `json:"upstream"`
 
+	// ExtVersions 扩展通道（trae/accio/cline/…）申报给上游的客户端版本指纹覆盖。
+	// 逐项「空 = 沿用代码内置默认（对齐官方分发形态）」。官方客户端一升级，这些值
+	// 就过时（autoclaw 的目录版本门控、trae 的 X-Ide-Version-Code 表键都会退化），
+	// 以前只能改代码重编译；现在改 config 重启即可。启动日志 [ext-fp] 行打印生效值。
+	ExtVersions struct {
+		AccioAppVersion       string `json:"accio_app_version"`
+		AutoClawClientVersion string `json:"autoclaw_client_version"`
+		ClineClientVersion    string `json:"cline_client_version"`
+		CodeArtsPluginVersion string `json:"codearts_plugin_version"`
+		CopilotChatEditor     string `json:"copilot_chat_editor_version"`
+		CopilotChatPlugin     string `json:"copilot_chat_plugin_version"`
+		LoomyClientVersion    string `json:"loomy_client_version"`
+		MarvisClientVersion   string `json:"marvis_client_version"`
+		MarvisPlatformVersion string `json:"marvis_client_platform_version"`
+		QClawClientVersion    string `json:"qclaw_client_version"`
+		QClawWebVersion       string `json:"qclaw_web_version"`
+		RaccoonClientVersion  string `json:"raccoon_client_version"`
+		TraeIDEVersion        string `json:"trae_ide_version"`
+		TraeIDEVersionCode    string `json:"trae_ide_version_code"`
+		TraeWorkIDEVersion    string `json:"traework_ide_version"`
+	} `json:"ext_versions"`
+
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`

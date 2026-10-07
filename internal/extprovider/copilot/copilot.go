@@ -50,11 +50,40 @@ const (
 
 	// 对话头：vscode-chat 集成标识 + VS Code 形态（模型可用性最好）。
 	integrationID  = "vscode-chat"
-	chatEditorVer  = "vscode/1.99.3"
-	chatPluginVer  = "copilot-chat/0.26.7"
-	chatUA         = "GitHubCopilotChat/0.26.7"
 	chatAPIVersion = "2025-04-01"
+
+	// 对话流版本指纹的内置默认档（config ext_versions 空值时回落）。
+	defaultChatEditorVer = "vscode/1.99.3"
+	defaultChatPluginVer = "copilot-chat/0.26.7"
 )
+
+// chatEditorVer / chatPluginVer 对话流申报的编辑器与插件版本：GitHub 按这两个头
+// 加 UA 识别客户端形态，模型可用性随版本漂移，所以做成可配（config ext_versions）
+// 而不是只能重编译。
+var (
+	chatEditorVer = defaultChatEditorVer
+	chatPluginVer = defaultChatPluginVer
+)
+
+// chatUA 由 chatPluginVer 推导：官方扩展的 UA 就是插件版本号，两者必须同源。
+func chatUA() string {
+	return "GitHubCopilotChat/" + strings.TrimPrefix(chatPluginVer, "copilot-chat/")
+}
+
+// SetFingerprints 应用对话流的版本覆盖（空值回落内置默认），返回生效值供启动日志打印。
+func SetFingerprints(chatEditor, chatPlugin string) (string, string) {
+	if s := strings.TrimSpace(chatEditor); s != "" {
+		chatEditorVer = s
+	} else {
+		chatEditorVer = defaultChatEditorVer
+	}
+	if s := strings.TrimSpace(chatPlugin); s != "" {
+		chatPluginVer = s
+	} else {
+		chatPluginVer = defaultChatPluginVer
+	}
+	return chatEditorVer, chatPluginVer
+}
 
 var httpClient = &http.Client{Timeout: 0, Transport: newTransport()}
 
@@ -467,7 +496,7 @@ func applyChatHeaders(req *http.Request, cred *Credential) {
 	req.Header.Set("editor-version", chatEditorVer)
 	req.Header.Set("editor-plugin-version", chatPluginVer)
 	req.Header.Set("x-github-api-version", chatAPIVersion)
-	req.Header.Set("user-agent", chatUA)
+	req.Header.Set("user-agent", chatUA())
 }
 
 func truncate(s string, n int) string {

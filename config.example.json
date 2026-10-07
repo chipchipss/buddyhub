@@ -40,6 +40,23 @@
     "device_token_file": "",
     "passthrough_ip": false
   },
+  "ext_versions": {
+    "accio_app_version": "",
+    "autoclaw_client_version": "",
+    "cline_client_version": "",
+    "codearts_plugin_version": "",
+    "copilot_chat_editor_version": "",
+    "copilot_chat_plugin_version": "",
+    "loomy_client_version": "",
+    "marvis_client_version": "",
+    "marvis_client_platform_version": "",
+    "qclaw_client_version": "",
+    "qclaw_web_version": "",
+    "raccoon_client_version": "",
+    "trae_ide_version": "",
+    "trae_ide_version_code": "",
+    "traework_ide_version": ""
+  },
   "features": {
     "sanitize_blacklist_fingerprints": true
   },

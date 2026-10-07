@@ -58,8 +58,6 @@ const (
 
 	// ClientType 产品面标识。**缺了它免费池一律 403**。
 	ClientType = "cline-sdk"
-	// ClientVersion 对齐官方客户端形态（实测非必需，但更贴近官方、无代价）。
-	ClientVersion = "3.0.62"
 
 	// 计费池前缀（网关侧选择器，出站前剥掉）。
 	FreePrefix  = "cline-free/"
@@ -74,7 +72,25 @@ const (
 	modelsPath          = "/ai/cline/recommended-models"
 	userMePath          = "/users/me"
 	userPlanPath        = "/users/me/plan"
+
+	// defaultClientVersion 内置默认档（对齐官方客户端形态）。
+	defaultClientVersion = "3.0.62"
 )
+
+// ClientVersion 申报的客户端版本（实测非必需，但更贴近官方、无代价），走
+// X-CLIENT-VERSION 与 User-Agent。可由 config ext_versions 覆盖而无需重新编译；
+// 空值回落内置默认。
+var ClientVersion = defaultClientVersion
+
+// SetClientVersion 应用版本覆盖（空值回落内置默认），返回生效值供启动日志打印。
+func SetClientVersion(v string) string {
+	if s := strings.TrimSpace(v); s != "" {
+		ClientVersion = s
+	} else {
+		ClientVersion = defaultClientVersion
+	}
+	return ClientVersion
+}
 
 // Credential 落进 extstore 的凭据形态。
 type Credential struct {

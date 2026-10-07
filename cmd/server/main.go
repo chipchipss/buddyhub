@@ -22,10 +22,15 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extprovider/accio"
 	"github.com/chipchipss/buddyhub/internal/extprovider/autoclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
+	"github.com/chipchipss/buddyhub/internal/extprovider/codearts"
 	"github.com/chipchipss/buddyhub/internal/extprovider/copilot"
 	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
+	"github.com/chipchipss/buddyhub/internal/extprovider/loomy"
+	"github.com/chipchipss/buddyhub/internal/extprovider/marvis"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qclaw"
+	"github.com/chipchipss/buddyhub/internal/extprovider/raccoon"
 	"github.com/chipchipss/buddyhub/internal/extprovider/trae"
+	"github.com/chipchipss/buddyhub/internal/extprovider/traework"
 	"github.com/chipchipss/buddyhub/internal/livecfg"
 	"github.com/chipchipss/buddyhub/internal/panel"
 	"github.com/chipchipss/buddyhub/internal/pool"
@@ -324,6 +329,10 @@ func main() {
 		}
 	}
 
+	// 扩展通道申报的客户端版本指纹（config ext_versions）：空值沿用内置默认。
+	// 生效值一律打印——上游按这些头判客户端形态，出事时需要能确认线上报的是哪个版本。
+	log.Printf("[ext-fp] %s", strings.Join(applyExtVersions(cfg), " "))
+
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -441,6 +450,36 @@ func main() {
 		log.Fatalf("http: %v", err)
 	}
 	log.Printf("bye")
+}
+
+// applyExtVersions 把 config ext_versions 的版本覆盖下发到各扩展通道，返回生效指纹
+// 清单（启动日志用）。逐项「空 = 不覆盖」，通道保持代码内置默认（对齐官方分发形态）。
+// 官方客户端升级后这些值会过时（autoclaw 的版本门控、trae 的目录表键都会退化），
+// 有了它改指纹只需重启，不必改代码重编译。
+func applyExtVersions(cfg *Config) []string {
+	v := cfg.ExtVersions
+	out := make([]string, 0, 16)
+	add := func(label, value string) { out = append(out, label+"="+value) }
+	add("accio.app_version", accio.SetAppVersion(v.AccioAppVersion))
+	add("autoclaw.client_version", autoclaw.SetClientVersion(v.AutoClawClientVersion))
+	add("cline.client_version", cline.SetClientVersion(v.ClineClientVersion))
+	add("codearts.plugin_version", codearts.SetPluginVersion(v.CodeArtsPluginVersion))
+	ce, cp := copilot.SetFingerprints(v.CopilotChatEditor, v.CopilotChatPlugin)
+	add("copilot.chat_editor_version", ce)
+	add("copilot.chat_plugin_version", cp)
+	add("loomy.client_version", loomy.SetClientVersion(v.LoomyClientVersion))
+	mv, mp := marvis.SetVersions(v.MarvisClientVersion, v.MarvisPlatformVersion)
+	add("marvis.client_version", mv)
+	add("marvis.client_platform_version", mp)
+	qw, qc := qclaw.SetFingerprints(v.QClawWebVersion, v.QClawClientVersion)
+	add("qclaw.web_version", qw)
+	add("qclaw.client_version", qc)
+	add("raccoon.client_version", raccoon.SetClientVersion(v.RaccoonClientVersion))
+	iv, ic := trae.SetFingerprints(v.TraeIDEVersion, v.TraeIDEVersionCode)
+	add("trae.ide_version", iv)
+	add("trae.ide_version_code", ic)
+	add("traework.ide_version", traework.SetIDEVersion(v.TraeWorkIDEVersion))
+	return out
 }
 
 // panelListenPath 从 listen 地址提取 ":port" 形式，用于启动日志拼面板 URL
@@ -572,6 +611,7 @@ func restartRequiredFields(c *Config) []string {
 		out = append(out, "upstash")
 	}
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
+	out = append(out, "ext_versions")
 	return out
 }
 

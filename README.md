@@ -794,6 +794,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
+| `ext_versions.*` | 空 | 扩展通道申报给上游的客户端版本指纹：`accio_app_version`、`autoclaw_client_version`、`cline_client_version`、`codearts_plugin_version`、`copilot_chat_editor_version` / `copilot_chat_plugin_version`、`loomy_client_version`、`marvis_client_version` / `marvis_client_platform_version`、`qclaw_client_version` / `qclaw_web_version`、`raccoon_client_version`、`trae_ide_version` / `trae_ide_version_code`、`traework_ide_version`。空 = 内置默认（对齐官方分发形态）；官方客户端一升级这些值就过时（autoclaw 靠它做模型目录门控、trae 的 `X-Ide-Version-Code` 是目录表键），改这里即可跟版本，不必重新编译。启动日志 `[ext-fp]` 行打印当前生效值；改动需重启 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `prompt.mode` | `custom` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
 | `prompt.file` | 空 | 提示词文件路径；空 = 内置默认（约 2KB）；路径非空但不可读 → 启动报错 |

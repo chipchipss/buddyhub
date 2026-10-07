@@ -91,11 +91,27 @@ const (
 	ClientID     = "accio-work"
 	Tenant       = "accio-agent"
 	IaiTag       = "phoenix-desktop"
-	AppVersion   = "0.32.6"
 	AppKey       = "35298846"
 	AcceptLang   = "en"
 	CallbackPath = "/auth/callback-accio"
+
+	// defaultAppVersion 内置默认档（对齐官方桌面客户端）。
+	defaultAppVersion = "0.32.6"
 )
+
+// AppVersion 申报给网关的桌面端版本（x-app-version 头）。随官方客户端漂移，
+// 故可由 config ext_versions 覆盖而无需重新编译；空值回落内置默认。
+var AppVersion = defaultAppVersion
+
+// SetAppVersion 应用版本覆盖（空值回落内置默认），返回生效值供启动日志打印。
+func SetAppVersion(v string) string {
+	if s := strings.TrimSpace(v); s != "" {
+		AppVersion = s
+	} else {
+		AppVersion = defaultAppVersion
+	}
+	return AppVersion
+}
 
 // Credential 落进 extstore 的凭据形态。
 type Credential struct {

@@ -69,13 +69,36 @@ type Credential struct {
 	Nickname string `json:"nickname,omitempty"`
 }
 
-// clientFingerprint 客户端指纹常量（照抄参考实现 config.example.toml 的默认档）。
+// clientFingerprint 客户端指纹默认档（照抄参考实现 config.example.toml）。
 const (
-	clientVersion     = "1.0.0.10371"
-	clientPlatform    = "Mac"
-	clientPlatformVer = "1.0.0.10634"
-	osVersion         = "macOS-15.6.1-arm64-arm-64bit"
+	clientPlatform = "Mac"
+	osVersion      = "macOS-15.6.1-arm64-arm-64bit"
+
+	defaultClientVersion     = "1.0.0.10371"
+	defaultClientPlatformVer = "1.0.0.10634"
 )
+
+// clientVersion / clientPlatformVer 申报的客户端版本，写进请求体。可由 config
+// ext_versions 覆盖而无需重新编译；空值回落内置默认。
+var (
+	clientVersion     = defaultClientVersion
+	clientPlatformVer = defaultClientPlatformVer
+)
+
+// SetVersions 应用版本覆盖（空值回落内置默认），返回生效值供启动日志打印。
+func SetVersions(version, platformVersion string) (string, string) {
+	if s := strings.TrimSpace(version); s != "" {
+		clientVersion = s
+	} else {
+		clientVersion = defaultClientVersion
+	}
+	if s := strings.TrimSpace(platformVersion); s != "" {
+		clientPlatformVer = s
+	} else {
+		clientPlatformVer = defaultClientPlatformVer
+	}
+	return clientVersion, clientPlatformVer
+}
 
 // genUskey 生成一个**每请求唯一**的 uskey。
 //
