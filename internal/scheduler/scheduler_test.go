@@ -280,7 +280,17 @@ func TestRunKeepaliveRefreshesTokens(t *testing.T) {
 	}
 }
 
+// noSessionDeadDedup 关掉 pool 的 12153 间隔去重，单测纯计数推进（去重本身在
+// internal/pool 有专测 TestNoteSessionDeadCollapsesBurst）。
+func noSessionDeadDedup(t *testing.T) {
+	t.Helper()
+	old := pool.SetSessionDeadProbeForTest(0)
+	t.Cleanup(func() { pool.SetSessionDeadProbeForTest(old) })
+}
+
 func TestRunKeepaliveSessionDeadDisables(t *testing.T) {
+	noSessionDeadDedup(t)
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
 		w.Write([]byte(`{"code":12153,"msg":"Offline user session not found"}`))
@@ -320,6 +330,8 @@ func TestRunKeepaliveSessionDeadDisables(t *testing.T) {
 // TestRunKeepaliveSessionDeadResetBySuccess 两次 12153 后刷新成功 → 计数清零，
 // 再来的 12153 从第 1 次重新计（不会因历史失败被继续追杀）。
 func TestRunKeepaliveSessionDeadResetBySuccess(t *testing.T) {
+	noSessionDeadDedup(t)
+
 	var fails atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if fails.Add(1) == 3 { // 第 3 次（本次调度循环的第二轮）刷新成功

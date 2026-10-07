@@ -25,6 +25,8 @@ func (p *Pool) Disable(uid, reason string) {
 // 成功，是历史误判的受害者）。改为连续 sessionDeadThreshold 次才禁用：
 // 计数 +1，达到阈值 → Disable（reason=12153 session dead）并清计数；
 // refresh 成功 / 任意成功 / 手工复活 → ClearSessionDead 清计数。
+// 同一故障事件的多路 12153（请求内轮换重试、并发请求、keepalive 撞在途流量）按
+// sessionDeadProbe 间隔折叠成一次——否则阈值会被毫秒级打满，等价于旧的首击即禁用。
 // 返回 true 表示本次已达阈值并完成禁用。
 // 即使账号已 disabled，计数仍累计并返回 false 前 N-1 次——但 keepalive 会跳过
 // disabled 号，实际只有「已 disabled 后复活且计数未清」这类场景才会走到这里。
@@ -35,6 +37,14 @@ func (p *Pool) NoteSessionDead(uid string) bool {
 	if !ok {
 		return false
 	}
+	// 间隔内的重复上报不推进判死计数（见 sessionDeadProbe）：同一次故障事件的多路
+	// 12153（请求内轮换重试 / 并发请求 / keepalive 撞流量）只算一次。
+	// 仅在计数已在途（fails>0）时生效——成功清计数后的第一次 12153 永远算数。
+	if e.sessionDeadFails > 0 && sessionDeadProbe > 0 &&
+		time.Since(e.sessionDeadAt) < sessionDeadProbe {
+		return false
+	}
+	e.sessionDeadAt = time.Now()
 	e.sessionDeadFails++
 	if e.sessionDeadFails < sessionDeadThreshold {
 		return false

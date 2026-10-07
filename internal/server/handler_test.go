@@ -755,8 +755,18 @@ func TestChatSessionDeadThresholdNotReached(t *testing.T) {
 	}
 }
 
-// TestChatSessionDeadDisablesAtThird 连续第 3 次 12153 → 禁用，reason 落 12153 口径。
+// noSessionDeadDedup 关掉 pool 的 12153 间隔去重，单测纯计数推进（去重另有专测：
+// pool 的 TestNoteSessionDeadCollapsesBurst 与本文件的 TestChatSessionDeadBurstCollapses）。
+func noSessionDeadDedup(t *testing.T) {
+	t.Helper()
+	old := pool.SetSessionDeadProbeForTest(0)
+	t.Cleanup(func() { pool.SetSessionDeadProbeForTest(old) })
+}
+
+// TestChatSessionDeadDisablesAtThird 关掉间隔去重后连续第 3 次 12153 → 禁用，
+// reason 落 12153 口径。
 func TestChatSessionDeadDisablesAtThird(t *testing.T) {
+	noSessionDeadDedup(t)
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: sessionDeadUpstream(t)})
 	for i := 0; i < pool.SessionDeadThreshold(); i++ {
@@ -771,9 +781,28 @@ func TestChatSessionDeadDisablesAtThird(t *testing.T) {
 	}
 }
 
+// TestChatSessionDeadBurstCollapses 一次故障事件的多路 12153（同一请求内的轮换
+// 重试、并发请求同时撞上上游闪断）折叠成一次：远多于阈值的连发也不禁用——否则
+// 阈值会被毫秒级打满，等价于刚修掉的「首击即禁用」。
+func TestChatSessionDeadBurstCollapses(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: sessionDeadUpstream(t)})
+	for i := 0; i < pool.SessionDeadThreshold()*3; i++ {
+		chatOnce(t, h)
+	}
+	st, _ := p.Status("u1")
+	if st.Disabled {
+		t.Fatalf("同一事件内的连发不该禁用: %+v", st)
+	}
+	if got := p.Pick(); got == nil || got.UID != "u1" {
+		t.Fatalf("未达阈值的账号应保持可选, got %+v", got)
+	}
+}
+
 // TestChatSuccessResetsSessionDeadCount 中途一次成功即证明 session 未死，计数归零：
 // 2 次 12153 + 1 次成功 + 2 次 12153 不该禁用（抖动型 12153 永不累计到阈值）。
 func TestChatSuccessResetsSessionDeadCount(t *testing.T) {
+	noSessionDeadDedup(t)
 	var failNext bool
 	up := newFakeUpstream(t, func(string) (int, string, bool) {
 		if failNext {

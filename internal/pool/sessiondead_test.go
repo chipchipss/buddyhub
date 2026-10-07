@@ -3,12 +3,23 @@ package pool
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/chipchipss/buddyhub/internal/auth"
 )
 
+// noSessionDeadDedup 关掉 12153 的间隔去重，单测纯计数语义（去重另有专测
+// TestNoteSessionDeadCollapsesBurst）。
+func noSessionDeadDedup(t *testing.T) {
+	t.Helper()
+	old := sessionDeadProbe
+	sessionDeadProbe = 0
+	t.Cleanup(func() { sessionDeadProbe = old })
+}
+
 // TestNoteSessionDeadThresholdNotReached 前 2 次连续 12153 不 Disable（误判防护）。
 func TestNoteSessionDeadThresholdNotReached(t *testing.T) {
+	noSessionDeadDedup(t)
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	if p.NoteSessionDead("u1") {
@@ -32,6 +43,7 @@ func TestNoteSessionDeadThresholdNotReached(t *testing.T) {
 
 // TestNoteSessionDeadDisablesAtThird 连续第 3 次 12153 → 禁用并清计数。
 func TestNoteSessionDeadDisablesAtThird(t *testing.T) {
+	noSessionDeadDedup(t)
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.NoteSessionDead("u1")
@@ -54,6 +66,7 @@ func TestNoteSessionDeadDisablesAtThird(t *testing.T) {
 
 // TestClearSessionDeadResetsCount 中间成功（refresh 成功）清计数，后续从 1 重新计。
 func TestClearSessionDeadResetsCount(t *testing.T) {
+	noSessionDeadDedup(t)
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.NoteSessionDead("u1")
@@ -73,6 +86,7 @@ func TestClearSessionDeadResetsCount(t *testing.T) {
 // TestNoteSuccessClearsSessionDeadCount 任意成功（chat 成功）也是 session 未死的强证据，
 // 同样清计数——与 refresh 成功口径一致。
 func TestNoteSuccessClearsSessionDeadCount(t *testing.T) {
+	noSessionDeadDedup(t)
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.NoteSessionDead("u1")
@@ -85,6 +99,7 @@ func TestNoteSuccessClearsSessionDeadCount(t *testing.T) {
 
 // TestReviveDisabled 复活入口：清 disabled + reason + 误判计数，账号回到池子。
 func TestReviveDisabled(t *testing.T) {
+	noSessionDeadDedup(t)
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.NoteSessionDead("u1")
@@ -158,5 +173,42 @@ func TestStatusDisabledReasonClearedByRevive(t *testing.T) {
 	}
 	if st.Reason != "" {
 		t.Errorf("revive 后 reason=%q want 空", st.Reason)
+	}
+}
+
+// TestNoteSessionDeadCollapsesBurst 同一次故障事件的多路 12153（并发请求、请求内
+// 轮换重试、keepalive 撞在途流量）折叠成一次：间隔内的重复上报不推进计数——否则
+// 阈值会被毫秒级打满，等价于刚修掉的「首击即禁用」。跨过间隔的下一次上报才算数，
+// 所以真正的死 session 仍然有界出池（≈ (阈值-1)×间隔 的持续流量）。
+func TestNoteSessionDeadCollapsesBurst(t *testing.T) {
+	old := sessionDeadProbe
+	sessionDeadProbe = 30 * time.Millisecond
+	t.Cleanup(func() { sessionDeadProbe = old })
+
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+
+	// 突发：一次性打满阈值次数的上报，只算第 1 次。
+	for i := 0; i < sessionDeadThreshold; i++ {
+		if p.NoteSessionDead("u1") {
+			t.Fatalf("突发内第 %d 次上报不该触发禁用", i+1)
+		}
+	}
+	if st, _ := p.Status("u1"); st.Disabled {
+		t.Fatal("突发不应禁用")
+	}
+
+	// 跨间隔累计：突发=1，再跨 (阈值-1) 个间隔才判死。
+	for extra := 1; extra < sessionDeadThreshold; extra++ {
+		time.Sleep(35 * time.Millisecond)
+		got := p.NoteSessionDead("u1")
+		want := extra == sessionDeadThreshold-1
+		if got != want {
+			t.Fatalf("跨间隔第 %d 次上报 disabled=%v want %v", extra, got, want)
+		}
+	}
+	st, _ := p.Status("u1")
+	if !st.Disabled || st.DisabledReason != sessionDeadReason {
+		t.Fatalf("跨满阈值应禁用: %+v", st)
 	}
 }

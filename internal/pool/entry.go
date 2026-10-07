@@ -203,6 +203,9 @@ type entry struct {
 	// 重学（再吃 2 次失败才禁用，期间每次都白打一轮上游）；清零点（refresh/chat 成功、
 	// 手工复活）同样落盘，重启后不残留旧计数。
 	sessionDeadFails int
+	// sessionDeadAt 上一次**推进**判死计数的时刻（运行态，不持久化：去重间隔只有
+	// 60s，重启丢掉无关紧要）。用于折叠同一次故障事件的重复上报，见 sessionDeadProbe。
+	sessionDeadAt time.Time
 	// consecutiveFails 连续失败计数（连败降权，issue #114）——「不知道原因的兜底」：
 	// 覆盖 ErrClient（未知 4xx）与传输层失败（连不上上游）这类 applyErrorPolicy
 	// default 分支不罚号的形态。与 sessionDeadFails 同构但独立计数：12153 的终态
@@ -484,8 +487,26 @@ const sessionDeadThreshold = 3
 // sessionDeadReason 12153 判定为 session 死亡时的持久化 reason。
 const sessionDeadReason = "12153 session dead"
 
+// sessionDeadProbe 两次**计入判死进度**的 12153 之间必须拉开的最小间隔。
+// 没有它，阈值会被同一次故障事件打满：一次请求内部的轮换重试、并发请求同时撞上
+// 上游闪断、keepalive 槽位与在途流量同时命中——都会把 3 次计数在毫秒级吃满，等价于
+// 旧的「首击即禁用」。间隔内的重复上报只丢不累计（对齐 cerber 的 PenalizeDetail：
+// 冷却中到来的失败是同一次故障的重复，不推进连击）。
+// 代价是有界且可接受：真正的死 session 在持续流量下 ≈ 2×间隔才出池（0/60/120s 三次
+// 计入），在稀疏流量下按各次事件的到达时间自然累计。
+// 测试可置 0 关掉去重（与 wakeupGraceDelay「测试可缩短」同口径）。
+var sessionDeadProbe = 60 * time.Second
+
 // SessionDeadThreshold 暴露连续 12153 的禁用阈值（供 scheduler 日志/运维文档引用）。
 func SessionDeadThreshold() int { return sessionDeadThreshold }
+
+// SetSessionDeadProbeForTest 跨包测试钩子：改 12153 判死的间隔去重窗口，返回旧值
+// 供调用方复位（传 0 = 关掉去重，回到纯计数语义）。生产代码不调用。
+func SetSessionDeadProbeForTest(d time.Duration) time.Duration {
+	old := sessionDeadProbe
+	sessionDeadProbe = d
+	return old
+}
 
 // softStreakShiftMax 软冷却退避的最大左移位数（防 1<<streak 溢出成负数/零）。
 // 无论 streak 累积多少，封顶逻辑总会先生效，此值只是溢出兜底。

@@ -104,6 +104,7 @@ func TestTransitionDisablePreservesBreaker(t *testing.T) {
 // 计数，达阈值后经 disableLocked：冷却域一并清零，不得留下「disabled 但仍 cooling」
 // 的杂交态（此前 handler 走 Disable、阈值路径却残留冷却，同一信号不同处置）。
 func TestTransitionSessionDeadDisableClearsCooling(t *testing.T) {
+	noSessionDeadDedup(t)
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Cooldown("u1", CoolSoft, time.Hour, "429 rate limit") // 软冷却中
