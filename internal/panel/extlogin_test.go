@@ -163,7 +163,7 @@ func TestRaccoonLoginSuccessAddsAccount(t *testing.T) {
 	}
 }
 
-func TestRaccoonLoginSessionConsumed(t *testing.T) {
+func TestRaccoonLoginLatePollReturnsReceiptNotSecondWrite(t *testing.T) {
 	token := fakeJWT(map[string]any{"sub": "u1", "exp": 1893456000})
 	raccoon.SetHTTPClient(&http.Client{Transport: roundTripFn(func(r *http.Request) (*http.Response, error) {
 		return jsonResponse(200, `{"code":0,"data":{"status":"success","access_token":"`+token+`"}}`), nil
@@ -174,11 +174,25 @@ func TestRaccoonLoginSessionConsumed(t *testing.T) {
 	_, start := loginPost(t, p, "raccoon", "start", "")
 	session := start["session"].(string)
 
-	loginPost(t, p, "raccoon", "poll", `{"session":"`+session+`"}`)
-	// 会话用后即焚：重复 poll 必须报过期，否则会反复写库
-	rec, _ := loginPost(t, p, "raccoon", "poll", `{"session":"`+session+`"}`)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("已消费的会话应 404，得到 %d", rec.Code)
+	_, first := loginPost(t, p, "raccoon", "poll", `{"session":"`+session+`"}`)
+	if first["done"] != true {
+		t.Fatalf("首次 poll 应完成入池，得到 %v", first)
+	}
+	acct, _ := first["account"].(map[string]any)
+
+	// 会话用后即焚，但**焚的是会话、不是结果**：入池之后重复 poll 既不该再写
+	// 一遍库，也不该报「会话不存在」——那会把一次成功的登录在界面上显示成失败。
+	// 后台自驱先一步入池时，前端撞上的正是这条路。
+	rec, second := loginPost(t, p, "raccoon", "poll", `{"session":"`+session+`"}`)
+	if rec.Code != http.StatusOK || second["done"] != true {
+		t.Fatalf("晚到的 poll 应拿到入池回执，得到 %d %v", rec.Code, second)
+	}
+	late, _ := second["account"].(map[string]any)
+	if late == nil || late["id"] != acct["id"] {
+		t.Fatalf("回执账号与首次不一致: %v vs %v", late, acct)
+	}
+	if n := len(p.extManager().List()); n != 1 {
+		t.Fatalf("重复 poll 不该再写库，账号数 %d", n)
 	}
 }
 
@@ -465,6 +479,104 @@ func TestCopilotLoginTransientErrorKeepsPending(t *testing.T) {
 	rec, _ := loginPost(t, p, "copilot", "poll", `{"session":"`+session+`"}`)
 	if rec.Code == 200 {
 		t.Fatalf("连续失败 %d 次后应报错，得到: %s", maxLoginErrStreak, rec.Body.String())
+	}
+}
+
+/* ── 后端自驱：用户不回面板也能入池 ──────────────────────────── */
+
+// copilotMock 一套设备码上游：pending 几次之后放行令牌，interval 压到 1 秒
+// 让后台自驱在测试里跑得起来。declined=true 时令牌换取直接回 access_denied。
+func copilotMock(t *testing.T, pendingFirst int, declined bool) *int {
+	t.Helper()
+	polls := 0
+	copilot.SetHTTPClient(&http.Client{Transport: roundTripFn(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.Contains(r.URL.Path, "/login/device/code"):
+			return jsonResponse(200, `{"device_code":"dev-1","user_code":"ABCD-1234",`+
+				`"verification_uri":"https://github.com/login/device","expires_in":900,"interval":1}`), nil
+		case strings.Contains(r.URL.Path, "/login/oauth/access_token"):
+			polls++
+			if declined {
+				return jsonResponse(200, `{"error":"access_denied"}`), nil
+			}
+			if polls <= pendingFirst {
+				return jsonResponse(200, `{"error":"authorization_pending"}`), nil
+			}
+			return jsonResponse(200, `{"access_token":"gho_x"}`), nil
+		case strings.Contains(r.URL.Path, "copilot_internal/v2/token"):
+			return jsonResponse(200, `{"token":"cop_tok","expires_at":1893456000}`), nil
+		case strings.Contains(r.URL.Path, "/user"):
+			return jsonResponse(200, `{"login":"octocat","plan":{"name":"pro"}}`), nil
+		}
+		return jsonResponse(404, `{}`), nil
+	})})
+	t.Cleanup(func() { copilot.SetHTTPClient(&http.Client{}) })
+	return &polls
+}
+
+// waitUntil 每 100ms 判一次，到点还没成立就 fail。
+func waitUntil(t *testing.T, within time.Duration, what string, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if ok() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("超时（%s）：%s", within, what)
+}
+
+// 用户点「开始授权」→ 去浏览器输设备码 → 授权完就不回面板了（关抽屉会调
+// stopExtAddTimers，切页面/直接忘了也一样）。原来入池**只由前端 poll 驱动**，
+// 前端一停就没人再问上游：GitHub 那边照样通过，回来面板却说「账号不存在」。
+// 现在后端自己把这轮问完。
+func TestCopilotBackgroundDrivesLoginWithoutFrontendPoll(t *testing.T) {
+	copilotMock(t, 2, false)
+	p := loginTestPanel(t)
+	_, start := loginPost(t, p, "copilot", "start", "")
+	session := start["session"].(string)
+
+	// 之后**一次 poll 都不发**，只看账号有没有被后台问出来
+	waitUntil(t, 10*time.Second, "后台自驱没把账号问进池", func() bool {
+		return p.extManager().Find(extstore.PCopilot, "octocat") != nil
+	})
+
+	// 前端晚一步回来 poll：会话已被后台丢弃，但该拿到**入池回执**而不是
+	// 「会话不存在，请重新发起」——成功被显示成失败最误导人。
+	rec, doc := loginPost(t, p, "copilot", "poll", `{"session":"`+session+`"}`)
+	if rec.Code != http.StatusOK || doc["done"] != true {
+		t.Fatalf("晚到的 poll 该拿到 done:true，得到 %d %v", rec.Code, doc)
+	}
+	acct, _ := doc["account"].(map[string]any)
+	if acct == nil || acct["id"] != "octocat" {
+		t.Fatalf("回执账号不对: %v", doc)
+	}
+	// 幂等认领：后台与回执这条路径不能把同一个号写两遍
+	if n := len(p.extManager().List()); n != 1 {
+		t.Fatalf("账号被写了 %d 遍，应为 1", n)
+	}
+}
+
+// 后台先一步问出**终态失败**时，前端晚到的 poll 要拿到那句原因。
+// 把「用户在浏览器里点了拒绝」讲成「会话过期，请重新发起」，用户会一遍遍重跑。
+func TestCopilotBackgroundTerminalReasonReachesLatePoll(t *testing.T) {
+	copilotMock(t, 0, true)
+	p := loginTestPanel(t)
+	_, start := loginPost(t, p, "copilot", "start", "")
+	session := start["session"].(string)
+
+	waitUntil(t, 10*time.Second, "后台没问出终态", func() bool {
+		return p.extManager().Find(extstore.PCopilot, "octocat") == nil &&
+			settledFailure(session, extstore.PCopilot) != ""
+	})
+
+	rec, _ := loginPost(t, p, "copilot", "poll", `{"session":"`+session+`"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("应把失败原因回成 400，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "拒绝") {
+		t.Fatalf("原因丢了: %s", rec.Body.String())
 	}
 }
 

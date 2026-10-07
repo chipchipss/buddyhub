@@ -57,6 +57,16 @@ func newSessionID() string {
 }
 
 type extLoginSession struct {
+	// id 会话 ID（putExtLoginSession 登记时回填）。后台自驱轮询只认这个 ID，
+	// 醒来第一件事是拿它回表核对会话还在不在。
+	id string
+	// settled 已经落成账号。前端轮询与后台自驱是同一次登录的两个驱动者，
+	// 谁先拿到令牌谁落库，另一个必须**不再重复入池**。
+	settled bool
+	// pollMu 按会话串行化「问上游」这个动作。两个驱动者同时 Poll 时，各家
+	// DeviceFlow 的节流状态字段是裸写的，且令牌换取会撞车。
+	// **绝不可在持有 extLoginMu 时取它。**
+	pollMu    sync.Mutex
 	provider  string
 	createdAt time.Time
 	// ttl 会话存活窗口；0 = 用默认 extLoginTTL。设备码流程按上游有效期放宽，
@@ -96,6 +106,59 @@ var (
 	extLoginMu       sync.Mutex
 	extLoginSessions = map[string]*extLoginSession{}
 )
+
+// extLoginSettledTTL 已入池会话的回执保留时长。
+const extLoginSettledTTL = 10 * time.Minute
+
+// extLoginSettled 记「这个会话已经落成账号了」的回执，键为会话 ID。
+//
+// 为什么需要：后台自驱轮询可能比前端先一步拿到令牌并入池，会话随即被丢弃；
+// 前端下一次 poll 就会撞上「登录会话不存在或已过期，请重新发起」——账号明明
+// 已经在池子里，界面却报失败。留一条短期回执，让晚到的 poll 也能拿到
+// done:true + 账号信息。
+var extLoginSettled = map[string]settledLogin{}
+
+type settledLogin struct {
+	provider string
+	account  map[string]any
+	// fail 终态失败原因。后台先一步问出「授权被拒 / 设备码过期」并丢弃会话时，
+	// 前端晚到的 poll 要拿到这句原因，而不是「会话不存在，请重新发起」。
+	fail string
+	at   time.Time
+}
+
+// rememberOutcome 记一次登录终态（入池回执或失败原因），顺带清掉过期的。
+func rememberOutcome(id, provider string, account map[string]any, fail string) {
+	extLoginMu.Lock()
+	defer extLoginMu.Unlock()
+	now := time.Now()
+	for k, v := range extLoginSettled {
+		if now.Sub(v.at) > extLoginSettledTTL {
+			delete(extLoginSettled, k)
+		}
+	}
+	extLoginSettled[id] = settledLogin{provider: provider, account: account, fail: fail, at: now}
+}
+
+// settledResult 取该会话的入池回执；没有或已过期返回 nil。
+func settledResult(id, provider string) map[string]any {
+	return lookupOutcome(id, provider).account
+}
+
+// settledFailure 取该会话的终态失败原因；没有则空串。
+func settledFailure(id, provider string) string {
+	return lookupOutcome(id, provider).fail
+}
+
+func lookupOutcome(id, provider string) settledLogin {
+	extLoginMu.Lock()
+	defer extLoginMu.Unlock()
+	v, ok := extLoginSettled[id]
+	if !ok || time.Since(v.at) > extLoginSettledTTL || v.provider != provider {
+		return settledLogin{}
+	}
+	return v
+}
 
 func reapExtLoginSessions() {
 	now := time.Now()
@@ -149,6 +212,20 @@ func (s *extLoginSession) takeRetryIn() int {
 	return n
 }
 
+// markNote 记一次中间态并返回「值不值得打这行日志」。
+//
+// 必须锁内做：前端 poll 与后台自驱共用同一个 lastNote，两处裸写是数据竞争
+// （go test -race 直接报），而且会互相把对方的状态变化吞掉，日志少一半。
+func (s *extLoginSession) markNote(note string) bool {
+	extLoginMu.Lock()
+	defer extLoginMu.Unlock()
+	if note == "pending" || note == s.lastNote {
+		return false
+	}
+	s.lastNote = note
+	return true
+}
+
 func getExtLoginSession(id string) *extLoginSession {
 	extLoginMu.Lock()
 	defer extLoginMu.Unlock()
@@ -198,6 +275,7 @@ func putExtLoginSession(s *extLoginSession) string {
 	id := newSessionID()
 	extLoginMu.Lock()
 	reapExtLoginSessions()
+	s.id = id
 	extLoginSessions[id] = s
 	extLoginMu.Unlock()
 	return id
@@ -276,6 +354,9 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 			"expires_in":       flow.ExpiresIn,
 			"hint":             "在 GitHub 页面输入设备码并授权",
 		})
+		// 后端自己把这轮问完：用户授权后不回面板（关抽屉 / 切页面 / 直接忘了）
+		// 也照样入池。见 driveDeviceLogin。
+		p.driveDeviceLogin(id)
 
 	case extstore.PCline:
 		flow, err := cline.StartDeviceFlow(ctx)
@@ -298,6 +379,7 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 			"expires_in":       flow.ExpiresIn,
 			"hint":             "在浏览器打开链接、输入设备码并确认",
 		})
+		p.driveDeviceLogin(id)
 
 	case extstore.PQClaw:
 		flow, err := qclaw.StartLogin(ctx, "")
@@ -400,6 +482,17 @@ func (p *Panel) extLoginPoll(w http.ResponseWriter, r *http.Request) {
 	code := body.Code
 	sess := getExtLoginSession(body.Session)
 	if sess == nil || sess.provider != provider {
+		// 后台自驱可能已经先一步问出终态并丢弃了会话。那时该把**那句结果**给
+		// 前端——入池回执，或者失败原因。反过来把「用户拒绝授权」讲成「会话
+		// 不存在请重新发起」，是把已知事实藏起来让用户重跑一遍。
+		if acct := settledResult(body.Session, provider); acct != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "done": true, "account": acct})
+			return
+		}
+		if fail := settledFailure(body.Session, provider); fail != "" {
+			writeErr(w, http.StatusBadRequest, fail)
+			return
+		}
 		writeErr(w, http.StatusNotFound, "登录会话不存在或已过期，请重新发起")
 		return
 	}
@@ -417,10 +510,9 @@ func (p *Panel) extLoginPoll(w http.ResponseWriter, r *http.Request) {
 		cred, done, note = pollRaccoonQr(ctx, sess)
 	case extstore.PQoder:
 		cred, done, note = pollQoderDevice(ctx, sess)
-	case extstore.PCopilot:
-		cred, done, note = pollCopilotCode(ctx, sess)
-	case extstore.PCline:
-		cred, done, note = pollClineCode(ctx, sess)
+	case extstore.PCopilot, extstore.PCline:
+		// 与后台自驱共用同一个入口，两条驱动路径不会走成两套判据
+		cred, done, note = pollDeviceCode(ctx, sess)
 	case extstore.PQClaw:
 		cred, done, note = completeQClaw(ctx, sess, code)
 	case extstore.PTrae:
@@ -436,8 +528,7 @@ func (p *Panel) extLoginPoll(w http.ResponseWriter, r *http.Request) {
 		// pending 是常态（前端每 2–5 秒轮一次），只在状态**变化**时记一行——
 		// 「已扫码待确认」「上游瞬时错误」这类中间态是排障时仅有的线索，
 		// 而每次都记会把日志淹掉。
-		if note != "pending" && note != sess.lastNote {
-			sess.lastNote = note
+		if sess.markNote(note) {
 			log.Printf("panel: %s 登录进行中：%s", provider, note)
 		}
 		resp := map[string]any{"ok": true, "done": false, "status": note}
@@ -450,35 +541,153 @@ func (p *Panel) extLoginPoll(w http.ResponseWriter, r *http.Request) {
 	if cred == nil {
 		// 终态失败：这是「授权完了却没入池」最该看到的一条日志。
 		log.Printf("panel: %s 登录失败（会话 %s）：%s", provider, shortID(body.Session), note)
+		rememberOutcome(body.Session, provider, nil, note)
 		dropExtLoginSession(body.Session)
 		writeErr(w, http.StatusBadRequest, note)
 		return
 	}
 
 	// 落库：与手工添加同一条路径，入池后立即可用。
-	raw, err := json.Marshal(cred.cred)
+	acct, err := p.settleLogin(sess, cred)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	dropExtLoginSession(body.Session)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "done": true, "account": acct})
+}
+
+// settleLogin 把一次成功登录落成账号，**幂等认领**：同一次登录有两个驱动者
+// （前端轮询 + 后台自驱），谁先拿到令牌谁落库，另一个拿到同一份回执。
+// 重复入池会把凭据写成两份、面板出现两个同名账号。
+func (p *Panel) settleLogin(s *extLoginSession, cred *extLoginCred) (map[string]any, error) {
+	extLoginMu.Lock()
+	if s.settled {
+		extLoginMu.Unlock()
+		if acct := settledResult(s.id, s.provider); acct != nil {
+			return acct, nil
+		}
+		return map[string]any{"id": cred.id, "label": cred.label, "provider": s.provider}, nil
+	}
+	s.settled = true
+	extLoginMu.Unlock()
+
+	raw, err := json.Marshal(cred.cred)
+	if err != nil {
+		return nil, err
 	}
 	label := cred.label
 	if label == "" {
 		label = cred.id
 	}
-	if err := p.extManager().Add(provider, cred.id, label, raw); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
+	if err := p.extManager().Add(s.provider, cred.id, label, raw); err != nil {
+		extLoginMu.Lock()
+		s.settled = false // 没落成了，另一个驱动者还有机会
+		extLoginMu.Unlock()
+		return nil, err
 	}
-	dropExtLoginSession(body.Session)
+	acct := map[string]any{
+		"id": cred.id, "label": label, "provider": s.provider, "note": cred.note,
+	}
+	rememberOutcome(s.id, s.provider, acct, "")
+	log.Printf("panel: %s 账号已通过登录入池 %s", s.provider, cred.id)
+	return acct, nil
+}
 
-	log.Printf("panel: %s 账号已通过登录入池 %s", provider, cred.id)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":   true,
-		"done": true,
-		"account": map[string]any{
-			"id": cred.id, "label": label, "provider": provider, "note": cred.note,
-		},
-	})
+// pollDeviceCode 设备码类流程的一次轮询（copilot / cline）。
+// 前端 poll 与后台自驱共用这一份判据，避免两条路径走成两套语义。
+//
+// 按会话串行：两个驱动者可能同时问上游，而各家 DeviceFlow 的 Poll 不承诺
+// 并发安全（节流状态字段是裸写的）。同时问还会让令牌换取撞车。
+func pollDeviceCode(ctx context.Context, s *extLoginSession) (cred *extLoginCred, done bool, note string) {
+	s.pollMu.Lock()
+	defer s.pollMu.Unlock()
+	switch s.provider {
+	case extstore.PCopilot:
+		return pollCopilotCode(ctx, s)
+	case extstore.PCline:
+		return pollClineCode(ctx, s)
+	}
+	return nil, false, "pending"
+}
+
+// driveDeviceLogin 让**后端**替用户把设备码流程问到底。
+//
+// 为什么必须后端自驱：入池原来只由前端 poll 驱动，而前端一停（关掉添加账号
+// 抽屉会调 stopExtAddTimers、切走页面、甚至只是用户授权完没回来）就没人再问
+// 上游。设备码在 GitHub 那边照样被接受——浏览器显示「Congratulations, you're
+// all set!」，回来面板却说「账号不存在」。这条差距不是重试间隔能修的：只要
+// 驱动者在浏览器里，登录成功就仍然是「看用户回不回来」。
+//
+// 只做设备码两家用（copilot / cline）：其余平台的完成动作各有各的一次性
+// 凭据（QClaw 要用户贴回 code、Trae/Accio 走本机回环回调），后台代问会把
+// 那些流程搞成竞态。
+func (p *Panel) driveDeviceLogin(id string) {
+	go func() {
+		for {
+			// 先睡再问：刚发起时上游必然回 authorization_pending，
+			// 立刻问一次只是白加一发请求。
+			time.Sleep(deviceDriveWait(id))
+
+			sess := getExtLoginSession(id)
+			if sess == nil {
+				return // 前端已入池 / 已终态 / 会话过期
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			cred, done, note := pollDeviceCode(ctx, sess)
+			cancel()
+
+			if done {
+				if cred == nil {
+					log.Printf("panel: %s 登录失败（会话 %s，后台轮询）：%s", sess.provider, shortID(id), note)
+					// 留回执：前端下一次 poll 会撞上会话已消失，那时该看到
+					// 「用户拒绝授权」这句原因，而不是「请重新发起」。
+					rememberOutcome(id, sess.provider, nil, note)
+					dropExtLoginSession(id)
+					return
+				}
+				if _, err := p.settleLogin(sess, cred); err != nil {
+					log.Printf("panel: %s 后台入池失败：%v", sess.provider, err)
+					rememberOutcome(id, sess.provider, nil, "入池失败："+err.Error())
+				}
+				dropExtLoginSession(id)
+				return
+			}
+			if sess.markNote(note) {
+				log.Printf("panel: %s 登录进行中（后台轮询）：%s", sess.provider, note)
+			}
+		}
+	}()
+}
+
+// deviceDriveWait 后台下一轮询问的间隔：上游 interval 与本地节流取大者。
+// 会话已经没了就退到最小值——调用方醒来会立刻回表核对并退出。
+//
+// 字段必须在**一次持锁**里直接读：改调用任何自带 extLoginMu 的方法都是锁内
+// 取锁，自驱循环当场死锁。
+func deviceDriveWait(id string) time.Duration {
+	extLoginMu.Lock()
+	defer extLoginMu.Unlock()
+	s := extLoginSessions[id]
+	if s == nil {
+		return time.Second
+	}
+	sec := s.retryIn
+	switch s.provider {
+	case extstore.PCopilot:
+		if s.flow != nil && s.flow.Interval > 0 && sec < s.flow.Interval {
+			sec = s.flow.Interval
+		}
+	case extstore.PCline:
+		if s.clineFlow != nil && s.clineFlow.Interval > 0 && sec < s.clineFlow.Interval {
+			sec = s.clineFlow.Interval
+		}
+	}
+	d := time.Duration(sec) * time.Second
+	if d < time.Second {
+		d = time.Second
+	}
+	return d
 }
 
 // extLoginCred 一次成功登录的产物（凭据 + 账号标识）。
