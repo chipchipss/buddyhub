@@ -722,21 +722,80 @@ func TestChatAllUnavailableReturns503(t *testing.T) {
 	}
 }
 
-func TestChatSessionDeadDisables(t *testing.T) {
-	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+// sessionDeadUpstream 恒返 12153 的上游（ErrSessionDead 形态）。
+func sessionDeadUpstream(t *testing.T) *upstream.Client {
+	t.Helper()
+	return newFakeUpstream(t, func(string) (int, string, bool) {
 		return 401, `{"code":12153,"msg":"Offline user session not found"}`, false
 	})
-	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: up})
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+}
+
+func chatOnce(t *testing.T, h http.Handler) int {
+	t.Helper()
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != 503 {
-		t.Errorf("code=%d", rec.Code)
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	return rec.Code
+}
+
+// TestChatSessionDeadThresholdNotReached 单次/两次 12153 不禁用：12153 会被网络抖动、
+// 上游闪断、refresh 竞态临时触发，一次即永久杀号会误伤健康账号（旧行为是首击即 Disable）。
+func TestChatSessionDeadThresholdNotReached(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: sessionDeadUpstream(t)})
+	if code := chatOnce(t, h); code != 503 {
+		t.Errorf("code=%d want 503", code)
+	}
+	chatOnce(t, h)
+	st, _ := p.Status("u1")
+	if st.Disabled {
+		t.Fatalf("连续 2 次 12153 不应禁用（阈值 %d）: %+v", pool.SessionDeadThreshold(), st)
+	}
+	if got := p.Pick(); got == nil || got.UID != "u1" {
+		t.Fatalf("未达阈值的账号应保持可选, got %+v", got)
+	}
+}
+
+// TestChatSessionDeadDisablesAtThird 连续第 3 次 12153 → 禁用，reason 落 12153 口径。
+func TestChatSessionDeadDisablesAtThird(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: sessionDeadUpstream(t)})
+	for i := 0; i < pool.SessionDeadThreshold(); i++ {
+		chatOnce(t, h)
 	}
 	st, _ := p.Status("u1")
 	if !st.Disabled {
-		t.Errorf("account should be disabled: %+v", st)
+		t.Fatalf("连续 %d 次 12153 应禁用: %+v", pool.SessionDeadThreshold(), st)
+	}
+	if st.DisabledReason != "12153 session dead" {
+		t.Errorf("disabled_reason=%q want 12153 session dead", st.DisabledReason)
+	}
+}
+
+// TestChatSuccessResetsSessionDeadCount 中途一次成功即证明 session 未死，计数归零：
+// 2 次 12153 + 1 次成功 + 2 次 12153 不该禁用（抖动型 12153 永不累计到阈值）。
+func TestChatSuccessResetsSessionDeadCount(t *testing.T) {
+	var failNext bool
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		if failNext {
+			return 401, `{"code":12153,"msg":"Offline user session not found"}`, false
+		}
+		return 200, sseOK, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	failNext = true
+	chatOnce(t, h)
+	chatOnce(t, h)
+	failNext = false
+	chatOnce(t, h) // 成功 → ClearSessionDead（NoteSuccess 路径）
+	failNext = true
+	chatOnce(t, h)
+	chatOnce(t, h)
+
+	st, _ := p.Status("u1")
+	if st.Disabled {
+		t.Fatalf("成功应清计数，此后 2 次 12153 不该禁用: %+v", st)
 	}
 }
 

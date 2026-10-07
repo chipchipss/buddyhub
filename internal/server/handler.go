@@ -1138,7 +1138,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
-					h.cfg.Pool.Disable(acct.UID, "refresh session dead")
+					// 与 chat 错误路径、keepalive 同一口径：连续计数判死，单次抖动 12153
+					// 不永久杀号。达阈值时 reason 统一为「12153 session dead」。
+					if h.cfg.Pool.NoteSessionDead(acct.UID) {
+						log.Printf("WARN: [server] chat refresh acct=%s: 连续 %d 次 12153 session dead — 已禁用（自动续期同样失败，登录态可能已作废，需重新登录/重新导入凭证）",
+							logfmt.Label(acct.UID, acct.Nickname), pool.SessionDeadThreshold())
+					}
 				} else {
 					h.cfg.Pool.NoteError(acct.UID)
 				}
@@ -1431,7 +1436,8 @@ func rotateBackoff(i int, ctx context.Context) bool {
 //     起 · softStreak 指数、封顶 soft_rate_max 的既有 CooldownSoftRate 有界退避。
 //     基数经 jitterDur 抖动（防多账号同相位冷却到期再聚团）。
 //   - ErrNotFound → Cooldown(CoolSoft, notFoundCooldown 固定 60s)：短冷却防雪崩。
-//   - ErrSessionDead → Disable：session 死亡，永久禁用（需人工重登）。
+//   - ErrSessionDead → NoteSessionDead：连续 12153 计数达阈值(3)才 Disable（单次抖动
+//     不杀号；chat/refresh 成功与手工复活均清计数）。
 //   - ErrContentBlocked → 不罚账号；passthrough 首遇触发降级重试，最终仍拦则回 400。
 //   - ErrBadParams → 不罚账号（同 ErrContentBlocked 待遇），但仍轮转。
 //   - ErrPromptTooLong → 11115：请求的问题不是账号的问题。零动作（不冷却/不熔断/
@@ -1488,7 +1494,14 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		}
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
-		h.cfg.Pool.Disable(uid, "12153 session dead")
+		// 连续计数判死（与 scheduler keepalive 同一口径）：12153 会被网络抖动、上游
+		// 闪断、refresh 竞态临时触发，一次即永久杀号会误伤健康账号（且旧版误杀的号
+		// 无自动复活路径）。连续 sessionDeadThreshold 次才禁用；chat 成功 / refresh
+		// 成功 / 手工复活均清计数。
+		if h.cfg.Pool.NoteSessionDead(uid) {
+			log.Printf("WARN: [server] acct %s: 连续 %d 次 12153 session dead — 已禁用（自动续期同样失败，登录态可能已作废，需重新登录/重新导入凭证）",
+				logfmt.Label(uid, ""), pool.SessionDeadThreshold())
+		}
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。
