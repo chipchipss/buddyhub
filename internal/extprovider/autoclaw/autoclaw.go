@@ -239,6 +239,18 @@ func userAPIHeaders(token string) map[string]string {
 	return h
 }
 
+// safeHeaderVal 去掉 HTTP 头值里的控制字符（CR/LF/其它 <0x20 及 0x7f）。
+// 模型名是客户端可控入参且会写进头值，含这些字符会被 Go transport 直接判
+// "invalid header field value" 拒发——净化到只剩合法可见字节。
+func safeHeaderVal(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == 0x09 || (r >= 0x20 && r != 0x7f) {
+			return r
+		}
+		return -1
+	}, s)
+}
+
 // chatHeaders chat 域的请求头（**不带** X-Harness-Type）。
 func chatHeaders(token, model string) map[string]string {
 	token = stripBearer(token)
@@ -254,7 +266,7 @@ func chatHeaders(token, model string) map[string]string {
 		"x_trace_id":      "autoclaw-desktop",
 		"X-Authorization": "Bearer " + token,
 		"X-Request-Id":    newRequestID(),
-		"X-Request-Model": model,
+		"X-Request-Model": safeHeaderVal(model),
 	}
 }
 

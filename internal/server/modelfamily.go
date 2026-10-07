@@ -55,10 +55,14 @@ func dotDigits(m string) string {
 // 只在**结尾**剥（那里不会误伤 `glm-5.3` 里的数字段）。
 var dateSuffixRe = regexp.MustCompile(`-[0-9]{4}$`)
 
-// zaiCatalog Z.AI 的 6 条模型（列表与描述同源）。
+// zaiCatalog Z.AI 的模型（列表与描述同源）。
 //
 // 从 modelList 的内联块里抽出来：候选索引与 /v1/models 必须**同源**，
 // 否则会出现「模型列表里有、降级候选里没有」这种查不出来的问题。
+//
+// 前 6 条是 Coding Plan（订阅）档；后 2 条是 Z.AI 开放平台 API Key 免费档
+// （官方小写名，走 passthrough），实际可用性仍受该 Key 额度约束——由按模型
+// 冷却如实上报，不代表一定能出。
 var zaiCatalog = []struct{ id, desc string }{
 	{"GLM-5.3-Flash", "GLM 5.3 Flash（智谱，最快）"},
 	{"GLM-5.3", "GLM 5.3（智谱旗舰）"},
@@ -66,6 +70,8 @@ var zaiCatalog = []struct{ id, desc string }{
 	{"GLM-5-Turbo", "GLM 5 Turbo"},
 	{"GLM-5.1", "GLM 5.1"},
 	{"GLM-4.7", "GLM 4.7"},
+	{"glm-4-flash", "GLM-4 Flash（开放平台免费档，受 Key 额度）"},
+	{"glm-4-air", "GLM-4 Air（开放平台档，受 Key 额度）"},
 }
 
 // zaiReady 判定 Z.AI 通道是否配置了可用凭据（与 modelList 的门控同口径）。

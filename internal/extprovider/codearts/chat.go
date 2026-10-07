@@ -121,11 +121,24 @@ func (p ChatHeaderProfile) headers(model string, benefit bool) map[string]string
 	}
 	if benefit {
 		// benefit 通道：模型三头进签名 + maas_type 走 body（BuildChatRequest 注入）。
-		h["model-id"] = model
-		h["model-name"] = model
-		h["x-model-id"] = model
+		// 模型名客户端可控且入头值——净化控制字符，否则含 CR/LF 会被 Go transport
+		// 判 "invalid header field value" 拒发。
+		m := safeHeaderVal(model)
+		h["model-id"] = m
+		h["model-name"] = m
+		h["x-model-id"] = m
 	}
 	return h
+}
+
+// safeHeaderVal 去掉 HTTP 头值里的控制字符（CR/LF/其它 <0x20 及 0x7f）。
+func safeHeaderVal(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == 0x09 || (r >= 0x20 && r != 0x7f) {
+			return r
+		}
+		return -1
+	}, s)
 }
 
 // signChat 对话链路的签名（对齐官方测试向量，见模块头）。

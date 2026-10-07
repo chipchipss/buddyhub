@@ -404,6 +404,19 @@ func applyAuthHeaders(req *http.Request, cred *Credential) {
 	req.Header.Set("x-app-version", AppVersion)
 	req.Header.Set("x-client-id", ClientID)
 	req.Header.Set("Authorization", "Bearer "+cred.AccessToken)
+	// 网关按地区门控下发模型/能力；不带 x-package-region，CN 号会拿到空目录
+	// （HTTP 200 但 data 无模型条目），表现为静默 0 模型。
+	if h := cred.Region.gatewayHeader(); h != "" {
+		req.Header.Set("x-package-region", h)
+	}
+}
+
+// gatewayHeader 把内部 Region 映射成上游 x-package-region 头值（两地共用一个网关）。
+func (r Region) gatewayHeader() string {
+	if r == RegionGlobal {
+		return "GLOBAL"
+	}
+	return "CN"
 }
 
 /* ── 模型目录 ────────────────────────────────────────────────── */
@@ -417,9 +430,29 @@ type Model struct {
 // ListModels 拉模型目录。
 //
 // ⚠️ 是 **POST** 不是 GET（实测 GET 返回 405 Method Not Allowed）。
+//
+// 依次探 v2 与 v1 两个 config 端点，取**第一个解析出非空模型**的结果——
+// 某些账号/地区其中一个会回 200 但载荷形状对另一档不适用，单探一路就静默 0 模型。
 func ListModels(ctx context.Context, cred *Credential) ([]Model, error) {
+	var lastErr error
+	for _, path := range []string{ModelConfigPath, "/api/llm/config"} {
+		mods, err := listModelsAt(ctx, cred, path)
+		if err == nil && len(mods) > 0 {
+			return mods, nil
+		}
+		if err != nil {
+			lastErr = err
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, nil
+}
+
+func listModelsAt(ctx context.Context, cred *Credential, path string) ([]Model, error) {
 	body, _ := json.Marshal(map[string]any{})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, GatewayBase+ModelConfigPath, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, GatewayBase+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +466,39 @@ func ListModels(ctx context.Context, cred *Credential) ([]Model, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("模型目录 HTTP %d：%s", resp.StatusCode, truncate(string(raw), 200))
 	}
+	// 网关把鉴权/业务失败塞在 **HTTP 200 的响应体**里（{"success":false,"code":"403",
+	// "message":"auth failed"}）。若直接丢给 parseCatalog，会得到「静默 0 模型」，
+	// 把「凭证失效需重登」误报成「账号没有模型」——排查时极易误判。先分类掉。
+	if reason, bad := inBodyError(raw); bad {
+		return nil, fmt.Errorf("模型目录业务失败（HTTP 200 载荷）：%s", reason)
+	}
 	return parseCatalog(raw), nil
+}
+
+// inBodyError 识别网关「HTTP 200 但体内是错误信封」的响应。
+// 仅在 success 显式为 false 时判失败（避免误伤把 code 当业务码的成功载荷）。
+func inBodyError(raw []byte) (string, bool) {
+	var doc map[string]any
+	if json.Unmarshal(raw, &doc) != nil {
+		return "", false
+	}
+	if ok, isBool := doc["success"].(bool); isBool && !ok {
+		msg, _ := doc["message"].(string)
+		if msg == "" {
+			msg = "上游未给出原因"
+		}
+		code, _ := doc["code"].(string)
+		if code == "" {
+			if cf, isNum := doc["code"].(float64); isNum {
+				code = fmt.Sprintf("%.0f", cf)
+			}
+		}
+		if code != "" {
+			return fmt.Sprintf("code=%s message=%s", code, msg), true
+		}
+		return "message=" + msg, true
+	}
+	return "", false
 }
 
 // parseCatalog 递归找模型 id（形状不固定）。
