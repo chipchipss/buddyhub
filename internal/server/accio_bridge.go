@@ -92,9 +92,26 @@ func (h *Handler) accioChatStream(w http.ResponseWriter, r *http.Request, body [
 			continue
 		}
 
+		if reason := accio.InterceptReason(resp); reason != "" {
+			// 风控/拦截页是 HTTP 200 的 HTML，SSE 侧看不出任何异常——不在写响应头
+			// 之前拦下来，客户端就会收到「200 空正文」，账号被拦的原因永远浮不出来。
+			resp.Body.Close()
+			lastErr = reason
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
+			log.Printf("accio-bridge: %s 上游 200 干扰: %s", a.ID, reason)
+			// 拦截按设备/IP 判定，换下一个账号只会多打一次上游，直接收手。
+			break
+		}
+
 		log.Printf("accio-bridge: acct=%s region=%s model=%s 建流成功",
 			a.ID, accio.ParseRegion(string(cred.Region)).Label(), bareModel)
-		h.translateAccio(w, resp, body, bareModel)
+		// translateAccio 一旦开始写响应就回不去下一个账号了（头已发），
+		// 所以流内错误只记账、不换号重试。
+		if terr := h.translateAccio(w, resp, body, bareModel); terr != nil {
+			h.noteChat(a.Provider, a.ID, terr)
+			h.lastAccioErr = terr.Error()
+			return true
+		}
 		h.noteChat(a.Provider, a.ID, nil)
 		return true
 	}
@@ -115,8 +132,9 @@ func (h *Handler) refreshAccioCred(ctx context.Context, accountID string, cred *
 	return fresh, err
 }
 
-// translateAccio 把 ADK 帧流转成客户端要的形态。
-func (h *Handler) translateAccio(w http.ResponseWriter, resp *http.Response, reqBody []byte, model string) {
+// translateAccio 把 ADK 帧流转成客户端要的形态。返回非 nil = 这一号这单已失败
+// （响应多半已经写出，调用方只记账，不再换号重试）。
+func (h *Handler) translateAccio(w http.ResponseWriter, resp *http.Response, reqBody []byte, model string) error {
 	defer resp.Body.Close()
 
 	if !h.clientWantsStream(reqBody) {
@@ -127,18 +145,18 @@ func (h *Handler) translateAccio(w http.ResponseWriter, resp *http.Response, req
 			// 补上：账号级 lastErr + 退避 + 一行日志。
 			log.Printf("accio-bridge: model=%s 流内错误: %v", model, err)
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
-			return
+			return err
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(raw)
-		return
+		return nil
 	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeOpenAIError(w, http.StatusInternalServerError, "streaming_unsupported", "服务器不支持流式响应 Flush")
-		return
+		return errOf("服务器不支持流式响应 Flush")
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -156,11 +174,23 @@ func (h *Handler) translateAccio(w http.ResponseWriter, resp *http.Response, req
 		}
 		flusher.Flush()
 	}
-	_ = accio.ScanSSE(resp.Body, func(data string) {
+	sawFrame := false
+	_ = accio.ScanSSEAll(resp.Body, func(data string) {
+		sawFrame = true
 		write(tr.Translate(accio.ParseFrame(data)))
-	})
+	}, nil)
+	if !sawFrame {
+		// 头已经发出，退不成 HTTP 错误，但至少要让客户端看见原因而不是等来一段静默。
+		err := errOf("上游 200 但没有收到任何 ADK 帧（响应被拦截或形状不符）")
+		write(accio.SseFrame(map[string]any{"error": map[string]any{
+			"message": err.Error(), "type": "upstream_error",
+		}}))
+		write(tr.Finish())
+		return err
+	}
 	// 上游没发 turnComplete 也要补 [DONE]
 	write(tr.Finish())
+	return nil
 }
 
 /* ── 模型目录（实时拉取 + 10 分钟缓存） ───────────────────────── */

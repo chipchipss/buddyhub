@@ -35,6 +35,53 @@ func Chat(ctx context.Context, cred *Credential, body []byte, requestID string) 
 	return httpClient.Do(req)
 }
 
+// peekedBody 把嗅探用的 bufio.Reader 挂回响应体：Peek 已经把字节读进缓冲区，
+// 不回填就会丢头（风控页前 512 字节正是判据）。
+type peekedBody struct {
+	*bufio.Reader
+	src io.ReadCloser
+}
+
+func (p peekedBody) Close() error { return p.src.Close() }
+
+// InterceptReason 判定「HTTP 200 却根本不是模型流」的上游干扰；正常流返回 ""。
+//
+// 实测上游会把阿里风控校验页（`rgv587_flag:sm` + `punish … action=deny`）以
+// text/html、HTTP 200 回给 /api/adk/llm/generateContent。SSE 扫描看不到 `data:`
+// 行就静默收尾，客户端拿到「200 + 空正文」，日志里一片清白——账号被风控拦死
+// 却查不出原因。这里只嗅不消费（字节会原样回填），让桥接层能在写响应头之前
+// 就把真实原因报出来。
+func InterceptReason(resp *http.Response) string {
+	if resp == nil || resp.Body == nil {
+		return ""
+	}
+	br := bufio.NewReaderSize(resp.Body, 1024)
+	resp.Body = peekedBody{Reader: br, src: resp.Body}
+	peek, err := br.Peek(512)
+	if len(peek) == 0 {
+		if err != nil && err != io.EOF {
+			return "读取上游响应失败：" + err.Error()
+		}
+		return "上游 200 但响应体为空，没有收到任何 ADK 帧"
+	}
+	head := strings.ToLower(strings.TrimSpace(string(peek)))
+	// 真流的开头一定是 `data:`；HTML/JSON 信封不是。
+	if strings.HasPrefix(head, "data:") {
+		return ""
+	}
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.Contains(ct, "text/event-stream") {
+		return ""
+	}
+	if strings.HasPrefix(head, "<") || strings.Contains(ct, "html") {
+		if strings.Contains(head, "rgv587_flag") || strings.Contains(head, "punish") {
+			return "上游风控拦截（阿里安全校验页，非额度/凭据问题）：需在官方客户端人工完成验证后重试"
+		}
+		return "上游返回 HTML 而非模型流（首行证据：" + truncate(string(peek), 160) + "）"
+	}
+	return ""
+}
+
 // Translator ADK 帧 → OpenAI chunk。
 type Translator struct {
 	ID      string
@@ -143,11 +190,20 @@ func appendStr(prev any, add string) string {
 
 // ScanSSE 逐条扫描 `data:` 行，交给回调。
 func ScanSSE(r io.Reader, fn func(data string)) error {
+	return ScanSSEAll(r, fn, nil)
+}
+
+// ScanSSEAll 与 ScanSSE 同，但把**非 data 行**也交给 onOther（可为 nil）——
+// 上游塞回 HTML 风控页 / 错误信封时，那些行就是唯一的现场证据。
+func ScanSSEAll(r io.Reader, fn func(data string), onOther func(line string)) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
 		line := sc.Text()
 		if !strings.HasPrefix(line, "data:") {
+			if onOther != nil {
+				onOther(line)
+			}
 			continue
 		}
 		fn(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
@@ -162,8 +218,11 @@ func Aggregate(r io.Reader, id string, created int64, model string) ([]byte, err
 	var usage json.RawMessage
 	finish := "stop"
 	var upstreamErr string
+	var sawData bool
+	var otherEvidence string
 
-	_ = ScanSSE(r, func(data string) {
+	_ = ScanSSEAll(r, func(data string) {
+		sawData = true
 		f := ParseFrame(data)
 		if f == nil {
 			return
@@ -204,9 +263,23 @@ func Aggregate(r io.Reader, id string, created int64, model string) ([]byte, err
 		if len(calls) > 0 && f.FinishReason == "" {
 			finish = "tool_calls"
 		}
+	}, func(line string) {
+		if otherEvidence == "" {
+			if s := strings.TrimSpace(line); s != "" {
+				otherEvidence = truncate(s, 160)
+			}
+		}
 	})
 	if upstreamErr != "" {
 		return nil, fmt.Errorf("%s", upstreamErr)
+	}
+	// 一帧都没有 = 上游压根没在说模型的话（风控页、错误信封、空响应）。以前这会被
+	// 聚合成「200 + 空正文」的合法 completion，把拦截伪装成模型无话可说；现在报错误差。
+	if !sawData {
+		if otherEvidence == "" {
+			return nil, fmt.Errorf("上游 200 但响应体为空，没有收到任何 ADK 帧")
+		}
+		return nil, fmt.Errorf("上游 200 但不是模型流（首行证据：%s）", otherEvidence)
 	}
 	msg := map[string]any{"role": "assistant", "content": content.String()}
 	if reasoning.Len() > 0 {
