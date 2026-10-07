@@ -82,6 +82,8 @@ func loomyAccounts(h *Handler) []loomyAccount {
 // LoomyChatStream Loomy 模型网关直连：多号轮换 + 401/403 换号。
 // 返回 false = 无可用账号（调用方报错，不回落腾讯池）。
 func (h *Handler) LoomyChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
+	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
+	h.lastLoomyErr = ""
 	accounts := loomyAccounts(h)
 	if len(accounts) == 0 {
 		return false

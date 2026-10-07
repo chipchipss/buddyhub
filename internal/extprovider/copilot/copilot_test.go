@@ -402,6 +402,30 @@ func TestListModelsUpstreamError(t *testing.T) {
 	}
 }
 
+// ModelUnsupported 只认模型级词表：账号级的 402/429/5xx 必须留给账号轮转。
+// 400 model_not_supported 是实测包（池内账号 wjhjq 请求目录外的 claude-sonnet-4）。
+func TestModelUnsupported(t *testing.T) {
+	cases := []struct {
+		status int
+		body   string
+		want   bool
+	}{
+		{400, `{"error":{"message":"The requested model is not supported.","code":"model_not_supported"}}`, true},
+		{400, `{"error":{"code":"model_not_found"}}`, true},
+		{404, `{"error":{"code":"model_not_supported"}}`, true},
+		{403, `{"error":{"message":"Must have a paid plan"}}`, false},
+		{402, `{"error":{"message":"insufficient credits"}}`, false},
+		{429, `{"error":{"message":"rate limited"}}`, false},
+		{500, `Internal Server Error`, false},
+		{400, `{"error":{"message":"invalid request parameters"}}`, false},
+	}
+	for _, c := range cases {
+		if got := ModelUnsupported(c.status, []byte(c.body)); got != c.want {
+			t.Errorf("ModelUnsupported(%d, %s) = %v, 期望 %v", c.status, c.body, got, c.want)
+		}
+	}
+}
+
 func TestFormatExpiry(t *testing.T) {
 	if got := FormatExpiry(0); got != "未知" {
 		t.Errorf("零值: %s", got)

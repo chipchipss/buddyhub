@@ -22,6 +22,8 @@ import (
 // QoderChatStream 直接向客户端透传 Qoder 的 OpenAI 兼容 SSE。
 // 返回 false = 未找到可用账号（调用方报错，不回落腾讯池）。
 func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
+	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
+	h.lastQoderErr = ""
 	if h.cfg.ExtAccounts == nil {
 		return false
 	}

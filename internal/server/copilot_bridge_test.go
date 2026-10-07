@@ -494,6 +494,76 @@ func TestCopilotModelListedInModelsEndpoint(t *testing.T) {
 	}
 }
 
+// 上游这句 400 说的是模型名，不是账号——实测目录外的 claude-sonnet-4 就是这个包。
+// 判成账号故障会造成两件伤害：健康账号被记失败退避，以及界面写出「没有可用的
+// GitHub Copilot 账号」（账号明明在池里、另一个模型同一时刻回 200）。
+func TestCopilotModelUnsupportedNamesModelAndSparesAccount(t *testing.T) {
+	up := &copilotUpstream{respond: func(kind string, _ int) (int, string, string) {
+		if kind == "token" {
+			return 200, "application/json", `{"token":"c","expires_at":` + itoa64(future()) + `}`
+		}
+		return 400, "application/json", `{"error":{"message":"The requested model is not supported.","code":"model_not_supported","param":"model","type":"invalid_request_error"}}`
+	}}
+	h, _, _ := newCopilotHandler(t, up,
+		copilot.Credential{GitHubToken: "g1", CopilotToken: "c1", ExpiresAt: future()},
+		copilot.Credential{GitHubToken: "g2", CopilotToken: "c2", ExpiresAt: future()},
+	)
+	fm := h.extManager.(*fakeExtMgr)
+
+	w := postCopilot(t, h, "copilot:claude-sonnet-4", `{"model":"copilot:claude-sonnet-4","messages":[]}`)
+	body := w.Body.String()
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("状态码 = %d, 期望 404（模型级失败不该是 503）: %s", w.Code, body)
+	}
+	if !strings.Contains(body, "model_not_found") || !strings.Contains(body, "claude-sonnet-4") {
+		t.Fatalf("错误体未点名模型: %s", body)
+	}
+	if strings.Contains(body, "no_copilot_account") {
+		t.Fatalf("不该报成账号问题: %s", body)
+	}
+	if got := up.count("chat"); got != 1 {
+		t.Fatalf("模型级失败不该换号重试，chat 次数 = %d", got)
+	}
+	if n := len(fm.noteRecords()); n != 0 {
+		t.Fatalf("不该给健康账号记失败: %+v", fm.noteRecords())
+	}
+}
+
+// 桥接进入即清 last*Err：本次一条上游都没碰过时，503 里不许出现上一次的原因。
+func TestCopilotStaleReasonClearedPerRequest(t *testing.T) {
+	up := &copilotUpstream{respond: func(string, int) (int, string, string) { return 200, "application/json", "{}" }}
+	h, _, _ := newCopilotHandler(t, up) // 无账号
+	h.lastCopilotErr = "上一次请求留下的原因"
+
+	w := postCopilot(t, h, "copilot:gpt-4o", `{"model":"copilot:gpt-4o","messages":[]}`)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("状态码 = %d, 期望 503", w.Code)
+	}
+	if body := w.Body.String(); strings.Contains(body, "上一次请求留下的原因") {
+		t.Fatalf("陈旧原因泄漏: %s", body)
+	}
+}
+
+// 账号级失败（上游 5xx）：必须说「账号都试过了且都失败」，而不是「没有可用账号」。
+func TestCopilotAccountLevelFailureSaysAccountsWereTried(t *testing.T) {
+	up := &copilotUpstream{respond: func(kind string, _ int) (int, string, string) {
+		if kind == "token" {
+			return 200, "application/json", `{"token":"c","expires_at":` + itoa64(future()) + `}`
+		}
+		return 500, "application/json", `{"error":{"message":"boom"}}`
+	}}
+	h, _, _ := newCopilotHandler(t, up, copilot.Credential{GitHubToken: "g", CopilotToken: "c", ExpiresAt: future()})
+
+	w := postCopilot(t, h, "copilot:gpt-4o", `{"model":"copilot:gpt-4o","messages":[]}`)
+	body := w.Body.String()
+	if !strings.Contains(body, "通道本次不可用（池内账号均已尝试并失败）") {
+		t.Fatalf("池里有账号时不该说「没有可用账号」: %s", body)
+	}
+	if !strings.Contains(body, "boom") {
+		t.Fatalf("未带出上游原因: %s", body)
+	}
+}
+
 func TestPlatformOfCopilot(t *testing.T) {
 	if got := PlatformOf("copilot:gpt-4o"); got != "copilot" {
 		t.Fatalf("PlatformOf = %s, 期望 copilot", got)

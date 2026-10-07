@@ -521,6 +521,27 @@ func Chat(ctx context.Context, cred *Credential, body []byte) (*http.Response, e
 	return httpClient.Do(req)
 }
 
+// ModelUnsupported 判断上游这句失败是「模型名的话」还是「账号的话」。
+//
+// 实测（2026-10-08，池内账号 wjhjq，请求目录外的 claude-sonnet-4）：
+//
+//	HTTP 400 {"error":{"message":"The requested model is not supported.",
+//	                   "code":"model_not_supported", ...}}
+//
+// 这句话与「这个账号还能不能用」无关：目录由上游按订阅等级过滤（ListModels），
+// 目录外的名字换任何账号都是同一句 400。所以它**不该**给账号记失败冷却、
+// **不该**继续轮转下一个账号，更不该让调用方说出「没有可用的 Copilot 账号」
+// ——账号明明在池子里，另一个模型同一时刻回的是 200。
+func ModelUnsupported(status int, raw []byte) bool {
+	if status != http.StatusBadRequest && status != http.StatusNotFound {
+		return false
+	}
+	s := string(raw)
+	return strings.Contains(s, "model_not_supported") ||
+		strings.Contains(s, "model_not_found") ||
+		strings.Contains(s, "The requested model is not supported")
+}
+
 func applyChatHeaders(req *http.Request, cred *Credential) {
 	req.Header.Set("authorization", "Bearer "+cred.CopilotToken)
 	req.Header.Set("content-type", "application/json")

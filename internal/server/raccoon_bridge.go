@@ -26,6 +26,8 @@ import (
 
 // raccoonChatStream 转发到小浣熊。返回 false = 无可用账号。
 func (h *Handler) raccoonChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
+	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
+	h.lastRaccoonErr = ""
 	if h.cfg.ExtAccounts == nil {
 		return false
 	}

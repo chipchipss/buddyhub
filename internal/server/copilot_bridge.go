@@ -26,6 +26,9 @@ import (
 // CopilotChatStream 直接向客户端透传 GitHub Copilot 的 OpenAI 兼容响应。
 // 返回 false = 未找到可用账号（调用方报错，不回落腾讯池）。
 func (h *Handler) copilotChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
+	// 每次进入先清：那是**上一次请求**的事实。上一位用户撞到的失败原因不该
+	// 挂在这一次「账号不存在」的提示里——本次一条上游都没碰过时必须无原因。
+	h.lastCopilotErr = ""
 	if h.cfg.ExtAccounts == nil {
 		return false
 	}
@@ -97,6 +100,15 @@ func (h *Handler) copilotChatStream(w http.ResponseWriter, r *http.Request, body
 		if resp.StatusCode != http.StatusOK {
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 			resp.Body.Close()
+			// 模型级的话（目录外的模型名）与账号无关：不换号、不给健康账号
+			// 记失败，直接把「哪个模型能用」讲清楚。
+			if copilot.ModelUnsupported(resp.StatusCode, raw) {
+				reason := copilotModelMissingReason(bareModel, len(h.copilotCatalog()))
+				h.lastCopilotErr = reason
+				log.Printf("copilot-bridge: model=%s 上游不支持（HTTP %d），不换号: %s", bareModel, resp.StatusCode, shorten(string(raw), 200))
+				writeOpenAIError(w, http.StatusNotFound, "model_not_found", reason)
+				return true
+			}
 			lastErr = "上游 HTTP " + strconv.Itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
 			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			log.Printf("copilot-bridge: %s 上游 %d: %s", a.ID, resp.StatusCode, shorten(string(raw), 200))
@@ -153,6 +165,21 @@ func (h *Handler) passThroughCopilot(w http.ResponseWriter, resp *http.Response,
 // proxyCopilotSSE 逐帧透传 Copilot SSE（复用 Qoder 的纯透传实现）。
 func (h *Handler) proxyCopilotSSE(w http.ResponseWriter, rc io.ReadCloser) {
 	h.proxyQoderSSE(w, rc)
+}
+
+// copilotModelMissingReason 目录外模型名的用户可读原因。
+//
+// 关键是把「模型名的事」和「账号的事」分开：这句如果说成「没有可用账号」，
+// 用户就会去重登一个本来就登录成功的账号——实测就是这么绕了一圈的。
+func copilotModelMissingReason(model string, catalogCount int) string {
+	if catalogCount > 0 {
+		return "模型 " + model + " 不在该 GitHub Copilot 账号的可用目录内" +
+			"（上游 400 model_not_supported，与账号是否登录无关，换号也没用）；" +
+			"实时目录共 " + strconv.Itoa(catalogCount) + " 个模型，见 GET /v1/models 的 copilot: 前缀"
+	}
+	return "模型 " + model + " 不在该 GitHub Copilot 账号的可用目录内" +
+		"（上游 400 model_not_supported，与账号是否登录无关，换号也没用）；" +
+		"可用名单见 GET /v1/models 的 copilot: 前缀"
 }
 
 /* ── 模型目录（实时拉取 + 10 分钟缓存） ───────────────────────────── */

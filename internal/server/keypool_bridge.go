@@ -83,6 +83,8 @@ var codexCooldown sync.Map
 // CodexChatStream ChatGPT 订阅池直连。返回 false = 无可用账号。
 // 上游为 Responses 事件流；客户端要流式时转译为 chat SSE，非流式时聚合转 chat.completion。
 func (h *Handler) codexChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
+	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
+	h.lastCodexErr = ""
 	accounts := keypool.ListCodexAccounts()
 	if len(accounts) == 0 {
 		h.lastCodexErr = "本机未发现有效 Codex 登录（~/.codex*/auth.json 均缺失或已过期）"

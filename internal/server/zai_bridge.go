@@ -25,6 +25,8 @@ import (
 
 // ZaiChatStream Z.AI 通道：翻译 → 池化转发 → 反译。返回 false = 无可用账号。
 func (h *Handler) ZaiChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
+	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
+	h.lastZaiErr = ""
 	if h.cfg.Zai == nil {
 		h.lastZaiErr = "未配置 Z.AI 账号（面板「自动化 → Z.AI」添加，或 config 的 schedule.zai.zai_keys）"
 		return false

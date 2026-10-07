@@ -21,6 +21,8 @@ import (
 
 // qclawChatStream 转发到 QClaw。返回 false = 无可用账号。
 func (h *Handler) qclawChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
+	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
+	h.lastQClawErr = ""
 	if h.cfg.ExtAccounts == nil {
 		return false
 	}

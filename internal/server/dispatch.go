@@ -40,10 +40,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.qoderChatStream(w, r, bodyQM, qm) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "没有可用的 Qoder 账号（面板-外部积分账号中添加 qoder 凭据后重试）"
-		if h.lastQoderErr != "" {
-			detail += "；最近失败原因: " + h.lastQoderErr
-		}
+		detail := bridgeDetail("没有可用的 Qoder 账号（面板-外部积分账号中添加 qoder 凭据后重试）", "Qoder", h.lastQoderErr)
 		return bridgeOutcome{matched: true, code: "no_qoder_account", detail: detail, lastErr: h.lastQoderErr}
 	}
 
@@ -59,10 +56,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.copilotChatStream(w, r, bodyCM, cm) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "没有可用的 GitHub Copilot 账号（面板-自动化-外部平台中添加后重试）"
-		if h.lastCopilotErr != "" {
-			detail += "；最近失败原因: " + h.lastCopilotErr
-		}
+		detail := bridgeDetail("没有可用的 GitHub Copilot 账号（面板-自动化-外部平台中添加后重试）", "GitHub Copilot", h.lastCopilotErr)
 		return bridgeOutcome{matched: true, code: "no_copilot_account", detail: detail, lastErr: h.lastCopilotErr}
 	}
 
@@ -78,10 +72,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.clineChatStream(w, r, bodyCM, cm) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "没有可用的 Cline 账号（面板-添加账号-外部平台-Cline 授权后重试）"
-		if h.lastClineErr != "" {
-			detail += "；最近失败原因: " + h.lastClineErr
-		}
+		detail := bridgeDetail("没有可用的 Cline 账号（面板-添加账号-外部平台-Cline 授权后重试）", "Cline", h.lastClineErr)
 		return bridgeOutcome{matched: true, code: "no_cline_account", detail: detail, lastErr: h.lastClineErr}
 	}
 
@@ -96,10 +87,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.autoclawChatStream(w, r, bodyAM, am) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "没有可用的 AutoClaw 账号（面板-添加账号-外部平台-AutoClaw 手机号登录后重试）"
-		if h.lastAutoClawErr != "" {
-			detail += "；最近失败原因: " + h.lastAutoClawErr
-		}
+		detail := bridgeDetail("没有可用的 AutoClaw 账号（面板-添加账号-外部平台-AutoClaw 手机号登录后重试）", "AutoClaw", h.lastAutoClawErr)
 		return bridgeOutcome{matched: true, code: "no_autoclaw_account", detail: detail, lastErr: h.lastAutoClawErr}
 	}
 
@@ -114,10 +102,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.qclawChatStream(w, r, bodyQM, qm) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "没有可用的 QClaw 账号（面板-添加账号-外部平台-QClaw 微信扫码后重试）"
-		if h.lastQClawErr != "" {
-			detail += "；最近失败原因: " + h.lastQClawErr
-		}
+		detail := bridgeDetail("没有可用的 QClaw 账号（面板-添加账号-外部平台-QClaw 微信扫码后重试）", "QClaw", h.lastQClawErr)
 		return bridgeOutcome{matched: true, code: "no_qclaw_account", detail: detail, lastErr: h.lastQClawErr}
 	}
 
@@ -132,10 +117,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.traeChatStream(w, r, bodyTM, tm) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "没有可用的 Trae 账号（面板-添加账号-外部平台-Trae 浏览器授权后重试）"
-		if h.lastTraeErr != "" {
-			detail += "；最近失败原因: " + h.lastTraeErr
-		}
+		detail := bridgeDetail("没有可用的 Trae 账号（面板-添加账号-外部平台-Trae 浏览器授权后重试）", "Trae", h.lastTraeErr)
 		return bridgeOutcome{matched: true, code: "no_trae_account", detail: detail, lastErr: h.lastTraeErr}
 	}
 
@@ -150,10 +132,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.raccoonChatStream(w, r, bodyRM, rm) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "没有可用的小浣熊账号（面板-添加账号-外部平台-小浣熊 微信扫码后重试）"
-		if h.lastRaccoonErr != "" {
-			detail += "；最近失败原因: " + h.lastRaccoonErr
-		}
+		detail := bridgeDetail("没有可用的小浣熊账号（面板-添加账号-外部平台-小浣熊 微信扫码后重试）", "小浣熊", h.lastRaccoonErr)
 		return bridgeOutcome{matched: true, code: "no_raccoon_account", detail: detail, lastErr: h.lastRaccoonErr}
 	}
 
@@ -168,10 +147,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.codeartsChatStream(w, r, bodyCM, cm) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "没有可用的 CodeArts 账号（面板-添加账号-外部平台-CodeArts 填 AK/SK 后重试）"
-		if h.lastCodeArtsErr != "" {
-			detail += "；最近失败原因: " + h.lastCodeArtsErr
-		}
+		detail := bridgeDetail("没有可用的 CodeArts 账号（面板-添加账号-外部平台-CodeArts 填 AK/SK 后重试）", "CodeArts", h.lastCodeArtsErr)
 		return bridgeOutcome{matched: true, code: "no_codearts_account", detail: detail, lastErr: h.lastCodeArtsErr}
 	}
 
@@ -186,10 +162,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.accioChatStream(w, r, bodyAM, am) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "没有可用的 Accio 账号（面板-添加账号-外部平台-Accio 浏览器授权后重试）"
-		if h.lastAccioErr != "" {
-			detail += "；最近失败原因: " + h.lastAccioErr
-		}
+		detail := bridgeDetail("没有可用的 Accio 账号（面板-添加账号-外部平台-Accio 浏览器授权后重试）", "Accio", h.lastAccioErr)
 		return bridgeOutcome{matched: true, code: "no_accio_account", detail: detail, lastErr: h.lastAccioErr}
 	}
 
@@ -204,10 +177,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.traeworkChatStream(w, r, bodyTW, twm) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "没有可用的 TraeWork 账号（面板-添加账号-外部平台-TraeWork 粘贴客户端凭据）"
-		if h.lastTraeWorkErr != "" {
-			detail += "；最近失败原因: " + h.lastTraeWorkErr
-		}
+		detail := bridgeDetail("没有可用的 TraeWork 账号（面板-添加账号-外部平台-TraeWork 粘贴客户端凭据）", "TraeWork", h.lastTraeWorkErr)
 		return bridgeOutcome{matched: true, code: "no_traework_account", detail: detail, lastErr: h.lastTraeWorkErr}
 	}
 
@@ -222,10 +192,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.marvisChatStream(w, r, bodyMM, mm) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "没有可用的 Marvis 账号（需从已登录的 Marvis 客户端抓包获取凭据后，在面板手工添加）"
-		if h.lastMarvisErr != "" {
-			detail += "；最近失败原因: " + h.lastMarvisErr
-		}
+		detail := bridgeDetail("没有可用的 Marvis 账号（需从已登录的 Marvis 客户端抓包获取凭据后，在面板手工添加）", "Marvis", h.lastMarvisErr)
 		return bridgeOutcome{matched: true, code: "no_marvis_account", detail: detail, lastErr: h.lastMarvisErr}
 	}
 
@@ -236,10 +203,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.imaBridgeChatStream(w, r, body, bareModel) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "没有可用的 ima 账号（面板-添加账号-外部平台-ima 粘贴 Cookie 后重试）"
-		if h.lastIMAErr != "" {
-			detail += "；最近失败原因: " + h.lastIMAErr
-		}
+		detail := bridgeDetail("没有可用的 ima 账号（面板-添加账号-外部平台-ima 粘贴 Cookie 后重试）", "ima", h.lastIMAErr)
 		return bridgeOutcome{matched: true, code: "no_ima_account", detail: detail, lastErr: h.lastIMAErr}
 	}
 
@@ -253,10 +217,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.codexChatStream(w, r, bodyCM, cm) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "本机未发现可用 Codex 登录（codex login 后重试）"
-		if h.lastCodexErr != "" {
-			detail += "；最近失败: " + h.lastCodexErr
-		}
+		detail := bridgeDetail("本机未发现可用 Codex 登录（codex login 后重试）", "Codex", h.lastCodexErr)
 		return bridgeOutcome{matched: true, code: "no_codex_account", detail: detail, lastErr: h.lastCodexErr}
 	}
 
@@ -274,10 +235,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.LoomyChatStream(w, r, body, bareModel) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "没有可用的 Loomy 账号（面板-添加账号-Loomy 登录后重试）"
-		if h.lastLoomyErr != "" {
-			detail += "；最近失败原因: " + h.lastLoomyErr
-		}
+		detail := bridgeDetail("没有可用的 Loomy 账号（面板-添加账号-Loomy 登录后重试）", "Loomy", h.lastLoomyErr)
 		return bridgeOutcome{matched: true, code: "no_loomy_account", detail: detail, lastErr: h.lastLoomyErr}
 	}
 
@@ -298,4 +256,18 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 
 	// 没有任何桥接认这个前缀 → 交给调用方（腾讯池路径）。
 	return bridgeOutcome{}
+}
+
+// bridgeDetail 把「这条桥接认了这个前缀、但没服务成」写成一句符合事实的话。
+//
+// 每条桥接进入时都会清自己的 last*Err，所以这个字段能分辨两件事：
+//   - 空 = 一次上游都没碰过，池里确实没有可用账号 → 这时才说「没有可用账号」
+//   - 非空 = 账号全试过了且全失败 → 「没有可用账号」是句假话。实测就是这么误事的：
+//     copilot 账号在池里、另一个模型同一分钟回 200，界面却写着「没有可用的
+//     GitHub Copilot 账号」，用户于是去反复重登一个本来登录成功的账号。
+func bridgeDetail(noAccountMsg, label, lastErr string) string {
+	if lastErr == "" {
+		return noAccountMsg
+	}
+	return label + " 通道本次不可用（池内账号均已尝试并失败）：" + lastErr
 }

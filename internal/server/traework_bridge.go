@@ -20,6 +20,8 @@ import (
 
 // traeworkChatStream 转发到 TraeWork。返回 false = 无可用账号。
 func (h *Handler) traeworkChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
+	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
+	h.lastTraeWorkErr = ""
 	if h.cfg.ExtAccounts == nil {
 		return false
 	}
