@@ -251,7 +251,14 @@ ACTIVE ──额度用完(402/quota)──▶ EXHAUSTED（定期再探，恢复�
 
 ### 添加账号
 
-面板「添加账号 → 外部平台 → GitHub Copilot」→ 点「开始授权」→ 把设备码（形如 `ABCD-1234`）输入 `github.com/login/device` → 页面自动轮询完成入池。也可在「账号 → 外部平台」里添加。
+面板「添加账号 → 外部平台 → GitHub Copilot」→ 点「开始授权」→ 把设备码（形如 `ABCD-1234`）输入 `github.com/login/device` → **服务端自己轮询到授权完成并直接入池**（Cline 同一条路径）。也可在「账号 → 外部平台」里添加。
+
+> 轮询不再依赖面板页面：以前只有浏览器开着那个抽屉才会去问上游，切走标签页、关掉抽屉
+> （`stopExtAddTimers()`）就没人问了——GitHub 那边显示 "Congratulations, you're all set!"，
+> 池子里却没有账号。现在前端轮询与后台自驱**共用一份判据**，同会话串行、令牌换取不撞车；
+> 谁先拿到令牌谁落库（幂等认领，不会写成两份），另一条路拿到的是同一份回执。晚到的
+> 前端 poll 拿到的也是「已入池」或「用户拒绝授权 / 设备码过期」这句**原因**，而不是
+> 「会话不存在，请重新发起」。
 
 授权成功后凭据落进 `data/ext-accounts.json`（provider `copilot`），账号卡片显示订阅类型与 token 剩余有效期。
 
@@ -341,7 +348,7 @@ Cline 的 `refresh_token` 是**一次性轮换**语义：并发请求同时发�
 | 项目 | 值得看的地方 | 我们做了什么 |
 |---|---|---|
 | **[aimod-cc/agent2api](https://github.com/aimod-cc/agent2api)** | 支持的通道最多（WorkBuddy / 小浣熊 / CatPaw / AutoClaw / Qoder / Cline / Accio / CodeArts / Trae）；每家一个 adapter，协议事实写得极细（含「踩空后表现很像没权限」这类口径） | 按它的公开协议**核对并实测**后接入了 **Cline**（免费池）· **AutoClaw**（智谱，手机号登录）· **Trae**（字节 SOLO）· **Accio**（阿里 ADK 信封）；续期单飞的做法也来自它的 `refresh_flight` |
-| **[Johnsheng1/codearts2api](https://github.com/Johnsheng1/codearts2api)** | CodeArts 的 **agent / benefit 两条模型通道**口径：benefit 免费模型需 `maas_type:benefit` + 三个模型头参与签名，老套餐模型带上反而 `unsupported model` | 据此把我们的对话签名拆成双通道（`ChatOptions.Benefit`），并用兜底名单替代拉不到的云端模型目录（`/v1/model/builtin` 对永久 AK/SK 回 401/403） |
+| **[Johnsheng1/codearts2api](https://github.com/Johnsheng1/codearts2api)** | CodeArts 的 **agent / benefit 两条模型通道**口径：benefit 免费模型需 `maas_type:benefit` + 三个模型头参与签名 | 据此把我们的对话签名拆成双通道（`ChatOptions.Benefit`），并用兜底名单替代拉不到的云端模型目录（`/v1/model/builtin` 对永久 AK/SK 回 401/403）。该项目的「老套餐模型带三头反而 `unsupported model`」我们**没能复现**：个人版实测两个已注册模型名在两条通道都回 200，所以那条说法只当参考项目的观察记录，不作为本仓库的判据 |
 | **[B00H0O/Aliyun-Solver](https://github.com/B00H0O/Aliyun-Solver)**（MIT） | 阿里云无痕验证的**真 Chromium**（Playwright）求解器——真 Chromium 有真实 canvas/WebGL 行为信号，jsdom 沙箱会被后端确定性拒绝。输出契约 `VERIFY_PARAM=<param>` 恰好就是我们 `schedule.zai.captcha_solver` 约定的形态，零改动接入 | 作为 Z.AI Plan 通道验证码求解器接入（可用 `PW_CHROME` 指向系统已有的 Chrome/Edge，省下数百 MB 的 Playwright Chromium 下载） |
 | **[re-skylar/qoder-check-in](https://github.com/re-skylar/qoder-check-in)**（MIT） | Qoder CN 每日签到的两条端点与幂等判据：`GET /sash/api/v1/me/campaigns` → `POST …/{campaignId}/claim`，只有 `status:"CLAIMED"` 才算成功 | 与我们 qoder 的实现一致（`replayed:true` 幂等、活动 ID 自动跟随），无需改动；其"账号符合资格但服务端不下发"的已知现象见排障表 |
 | **[wicm84266964/Buddy2api](https://github.com/wicm84266964/Buddy2api)** | 按它的公开协议接入 **QClaw**（腾讯，微信扫码）与 **TraeWork**（字节，会话式协议）|
@@ -1094,7 +1101,13 @@ web/
 | `codex:` | Codex 订阅池 | 本机 `~/.codex*` 凭据 | — |
 | `free:` | 免费 key 池（`free:<provider>/<model>`） | 配置的免费 Key | — |
 
-找不到可用账号时**直接回 503 并说明原因**（含最近一次失败原因），不静默回落腾讯池——前缀就是路由协议，回落会把语义搞乱。
+找不到可用账号时**直接回 503 并说明原因**，不静默回落腾讯池——前缀就是路由协议，回落会把语义搞乱。
+503 里两句话现在分得很清（2026-10 实测：账号在池里却被写成「没有可用账号」，是「登录器坏了」这个误判的唯一来源）：
+
+- 一次上游都没碰过（池里确实没账号）→ 「没有可用的 X 账号（面板…添加后重试）」
+- 账号都试过了且都失败 → 「X 通道本次不可用（池内账号均已尝试并失败）：<上游原文原因>」
+- 模型名不在该账号目录里 → **404 `model_not_found` 并点名模型**（copilot / codearts 已实现）：
+  这是模型名的话，换号也没用，所以**不**给健康账号记失败冷却
 
 ### 外部通道排障速查
 
@@ -1103,7 +1116,8 @@ web/
 
 | 平台 | 可用模型名形态 | 报错 → 真因 |
 |---|---|---|
-| **codearts** | `codearts:openpangu-2.0-pro`（agent）、`codearts:deepseek-v4-flash-0731`（benefit） | 模型分 **agent / benefit 两条签名通道**：benefit 需 `maas_type:benefit` + 三个模型头进签名，agent 反之（带了就报 `unsupported model`）。403 `TM.00001005` = **账号未开通免费席位**，需管理员授权 |
+| **codearts** | 个人版实测**只有这 5 个**（大小写敏感）：`codearts:openpangu-2.0-pro`、`codearts:openpangu-2.0-flash`、`codearts:GLM-5.2`、`codearts:deepseek-v4-flash`、`codearts:glm-5.3`（逐个发过对话，全 200） | 带日期的老名字（`deepseek-v4-flash-0731` 等）上游已下架 → 404 `InferHub.002002009.404 Route missed` / `ModelArts.81009`，**与账号无关**。agent / benefit 两条签名通道对**已注册**的模型名都回 200，通道选择不影响成败（早前"老套餐带三头就报 unsupported model"的说法是推测，已被实测否掉）。403 `TM.00001005` 是**账号级**的未开通提示（实测来自池内另一个 AK/SK 账号 `codearts-main`；个人版没有席位概念，别按企业版口径找管理员授权） |
+| **copilot** | 可用名单就是 `GET /v1/models` 里 `copilot:` 前缀的那一串（上游按订阅等级过滤的**实时目录**，实测 56 条），例 `copilot:gpt-4.1` | 400 `model_not_supported` = **目录外的模型名**，与登录无关 → 网关现在回 404 `model_not_found` 并点名模型；以前它会被写成「没有可用的 GitHub Copilot 账号」，于是出现「GitHub 那边显示 Congratulations, you're all set、回到平台却说账号不存在」 |
 | **ima** | `ima:glm-5.2` / `ima:hy3-preview`（**不带** `glm-5.3-flash` 这类名字） | `init_session 未返回 session_id` = **解包错**（`session_id` 在响应顶层不在 `data` 信封），与 cookie 无关；`code=600001` = token 过期，**网关会自动续期**（cookie 里的 `IMA-REFRESH-TOKEN`，约 2h 一换） |
 | **autoclaw** | `autoclaw:zai_glm-5.3-flash`（**必须带 `zai_` 路由前缀**） | 406 空 body = 路由 ID 写错，或账号 `power=0` 无对话权限 |
 | **raccoon** | `raccoon:raccoon-8c4485`、`raccoon:raccoon-chat-ml-5-5` | **没有 `glm-5.3-flash` 这类名字**（那是 zai 的）。用错名字报的错误格式与 zai 高度相似，极易误判成平台故障 |
