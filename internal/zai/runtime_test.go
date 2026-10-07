@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -151,7 +152,7 @@ func TestDoFallsBackWithoutSolver(t *testing.T) {
 	}
 }
 
-func TestDoSwitchesAccountOnExhausted(t *testing.T) {
+func TestDoAppliesPerModelPenaltyOnExhausted(t *testing.T) {
 	up := newMockUpstream(t,
 		mockStep{status: 402, body: `{"error":"quota exhausted"}`},
 		mockStep{status: 200, body: `{"ok":true}`},
@@ -167,14 +168,112 @@ func TestDoSwitchesAccountOnExhausted(t *testing.T) {
 		t.Fatalf("第二个账号应成功: %v", err)
 	}
 	defer res.Resp.Body.Close()
-
-	// 402 的账号应被标记额度用完，且不再可选
-	exhausted := st.Get(a.ID)
-	if exhausted.Status != StatusExhausted {
-		t.Fatalf("402 应标记 exhausted，got %s", exhausted.Status)
+	if res.Account.ID != b.ID {
+		t.Fatalf("额度用完的模型应换号服务，got %s", res.Account.Name)
 	}
-	if exhausted.Selectable(time.Now()) {
-		t.Fatal("额度用完的账号不应可选中")
+
+	// B 计划：402 只给「该账号 + 该模型」记惩罚，账号级状态仍是 active。
+	got := st.Get(a.ID)
+	if got.Status == StatusExhausted {
+		t.Fatal("402 不应再把整号标成 exhausted（应按模型冷却）")
+	}
+	if !got.ModelPenalized("glm-5.3", time.Now()) {
+		t.Fatal("glm-5.3 应在该号上进入逐模型惩罚")
+	}
+	if got.SelectableFor("glm-5.3", time.Now()) {
+		t.Fatal("被惩罚的模型不应再选中该号")
+	}
+	if !got.SelectableFor("glm-4-flash", time.Now()) {
+		t.Fatal("同号的其他模型不应受影响，仍应可选")
+	}
+}
+
+// TestDoTransient5xxRetriesThenPerModelPenalty 复现免费端点抖动：同一账号同一模型
+// 连打 5xx 应先在请求内原地重试，仍失败才给「该模型」短冷却——**绝不把整号冷却**。
+// 冷却的只是该(账号,模型)，账号级状态仍 active，别的模型不受牵连。
+func TestDoTransient5xxRetriesThenPerModelPenalty(t *testing.T) {
+	up := newMockUpstream(t,
+		mockStep{status: 500, body: `{"type":"error","error":{"type":"api_error","message":"Internal Network Failure"}}`},
+		mockStep{status: 500, body: `{"type":"error","error":{"type":"api_error","message":"Internal Network Failure"}}`},
+		mockStep{status: 500, body: `{"type":"error","error":{"type":"api_error","message":"Internal Network Failure"}}`},
+	)
+	SetEndpoints(up.server.URL+"/plan", up.server.URL+"/fallback", "", "")
+
+	a := NewAccount("抖号", "sk-flaky-key-123")
+	client, st := newTestClient(t, a)
+	client.TransientRetryGap = time.Millisecond // 测试里别真睡
+
+	_, err := client.Do(context.Background(), []byte(`{"model":"glm-4-flash","messages":[]}`))
+	if err == nil {
+		t.Fatal("连打 5xx 应最终报错")
+	}
+	if !strings.Contains(err.Error(), "暂时不可用") {
+		t.Fatalf("应给出模型暂时不可用（会自愈）的提示，got: %v", err)
+	}
+	if up.count() != 3 {
+		t.Fatalf("应在请求内原地重试 3 次，实际 %d 次", up.count())
+	}
+	got := st.Get(a.ID)
+	if got.Status == StatusCooling {
+		t.Fatal("5xx 不应把整号冷却为 cooling")
+	}
+	if !got.ModelPenalized("glm-4-flash", time.Now()) {
+		t.Fatal("glm-4-flash 应进入逐模型短冷却")
+	}
+	if !got.SelectableFor("glm-4.7", time.Now()) {
+		t.Fatal("同号其他模型不应受牵连，仍应可选")
+	}
+}
+
+// TestDoModelPenaltyIsolatedAcrossModels 证明按模型隔离：模型 A 抖到冷却后，
+// 模型 B 仍能命中同一账号成功（A 的惩罚不清、也不挡住 B）。
+func TestDoModelPenaltyIsolatedAcrossModels(t *testing.T) {
+	up := newMockUpstream(t,
+		mockStep{status: 500, body: `{}`}, mockStep{status: 500, body: `{}`}, mockStep{status: 500, body: `{}`},
+		mockStep{status: 200, body: `{"content":[{"type":"text","text":"ok"}]}`},
+	)
+	SetEndpoints(up.server.URL+"/plan", up.server.URL+"/fallback", "", "")
+
+	a := NewAccount("号一", "sk-key-aaaa-1111")
+	client, st := newTestClient(t, a)
+	client.TransientRetryGap = time.Millisecond
+
+	// 模型 A：抖到冷却（报错）
+	if _, err := client.Do(context.Background(), []byte(`{"model":"glm-4-flash","messages":[]}`)); err == nil {
+		t.Fatal("模型 A 抖尽应报错")
+	}
+	// 模型 B：同一账号，未冷却，应成功
+	res, err := client.Do(context.Background(), []byte(`{"model":"glm-4.7","messages":[]}`))
+	if err != nil {
+		t.Fatalf("模型 B 应仍能在同号成功: %v", err)
+	}
+	res.Resp.Body.Close()
+	if res.Account.ID != a.ID {
+		t.Fatalf("模型 B 应命中同一账号，got %s", res.Account.Name)
+	}
+	got := st.Get(a.ID)
+	if !got.ModelPenalized("glm-4-flash", time.Now()) {
+		t.Fatal("模型 A 的惩罚应仍在")
+	}
+	if got.ModelPenalized("glm-4.7", time.Now()) {
+		t.Fatal("模型 B 不应被惩罚")
+	}
+}
+
+func TestModelPenaltyGapLadder(t *testing.T) {
+	c := &Client{ModelCoolBase: 30 * time.Second, ModelCoolMax: 5 * time.Minute}
+	cases := []struct{ fails int; want time.Duration }{
+		{1, 30 * time.Second},
+		{2, 60 * time.Second},
+		{3, 120 * time.Second},
+		{4, 240 * time.Second},
+		{5, 300 * time.Second}, // 封顶 5 分钟
+		{9, 300 * time.Second},
+	}
+	for _, tc := range cases {
+		if got := c.modelPenaltyGap(tc.fails); got != tc.want {
+			t.Fatalf("fails=%d gap=%v, want %v", tc.fails, got, tc.want)
+		}
 	}
 }
 

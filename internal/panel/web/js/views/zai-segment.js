@@ -121,9 +121,27 @@ function statusChip(a) {
   return statusOf(a);
 }
 
+// 逐模型健康 chip：模型上游抖动/限流/额度用完时，只冷却该模型（账号级状态不动）。
+const PENALTY_LABEL = { server: '上游抖动', rate: '限流', exhausted: '额度用完' };
+function modelHealthChip(mh) {
+  if (!mh) return null;
+  const left = mh.until ? Math.max(0, Math.round((new Date(mh.until).getTime() - Date.now()) / 1000)) : 0;
+  const label = PENALTY_LABEL[mh.kind] || '冷却';
+  const text = left > 0 ? `${label} 冷却 ${left}s` : label;
+  return h('span', {
+    class: 'chip',
+    title: (mh.last_err || '') + (mh.fails ? `（连续 ${mh.fails} 次）` : ''),
+    style: { fontSize: '10.5px', color: 'var(--fg)', opacity: '0.9' },
+    text,
+  });
+}
+
 function accountCard(a) {
   const fp = a.fingerprint || {};
-  const quota = Object.entries(a.quota || {});
+  const quota = a.quota || {};
+  const health = a.model_health || {};
+  // 模型行取「额度 ∪ 健康」并集：API Key 号没有额度窗口，但抖动时的逐模型冷却仍要显示。
+  const models = Array.from(new Set([...Object.keys(quota), ...Object.keys(health)]));
   return h('article', { class: 'acct' + (a.enabled ? '' : ' off') },
     h('div', { class: 'top' },
       h('div', { class: 'who' },
@@ -145,24 +163,33 @@ function accountCard(a) {
         h('div', { class: 'v', text: String(a.in_flight || 0) }), h('div', { class: 'k', text: '在途' })),
     ),
 
-    quota.length
-      ? h('div', { class: 'stack', style: { gap: '6px', marginTop: '10px' } },
-        ...quota.map(([model, q]) => {
-          const total = Number(q.total || 0), remain = Number(q.remaining || 0);
-          const pct = total > 0 ? Math.min(100, Math.round(remain / total * 100)) : 0;
-          const exp = q.expires_at ? new Date(q.expires_at) : null;
-          const expSoon = exp && exp.getTime() - Date.now() < 3 * 86400000;
-          return h('div', null,
-            h('div', { class: 'row', style: { justifyContent: 'space-between', fontSize: '11.5px' } },
-              h('span', { text: model }),
-              h('span', { class: 'muted' },
+    models.length
+      ? h('div', { class: 'stack', style: { gap: '8px', marginTop: '10px' } },
+        ...models.map((model) => {
+          const q = quota[model];
+          const mh = health[model];
+          const kids = [];
+          kids.push(h('div', { class: 'row', style: { justifyContent: 'space-between', fontSize: '11.5px' } },
+            h('span', null,
+              model,
+              mh ? h('span', { style: { marginLeft: '6px' } }, modelHealthChip(mh)) : null),
+            q ? (() => {
+              const total = Number(q.total || 0), remain = Number(q.remaining || 0);
+              const exp = q.expires_at ? new Date(q.expires_at) : null;
+              const expSoon = exp && exp.getTime() - Date.now() < 3 * 86400000;
+              return h('span', { class: 'muted' },
                 `${fmtNum(remain)} / ${fmtNum(total)}`,
                 exp ? h('span', { style: { marginLeft: '6px', color: expSoon ? 'var(--fg)' : 'var(--fg-3)' },
-                  text: expSoon ? '即将到期' : String(q.expires_at).slice(0, 10) }) : null),
-            ),
-            h('div', { class: 'meter thin', style: { marginTop: '3px' } },
-              h('i', { style: { width: pct + '%' } })),
-          );
+                  text: expSoon ? '即将到期' : String(q.expires_at).slice(0, 10) }) : null);
+            })() : null,
+          ));
+          if (q) {
+            const total = Number(q.total || 0), remain = Number(q.remaining || 0);
+            const pct = total > 0 ? Math.min(100, Math.round(remain / total * 100)) : 0;
+            kids.push(h('div', { class: 'meter thin', style: { marginTop: '3px' } },
+              h('i', { style: { width: pct + '%' } })));
+          }
+          return h('div', null, ...kids);
         }))
       : h('div', { class: 'muted', style: { fontSize: '11.5px', marginTop: '10px' },
         text: a.mode === 'jwt' ? '尚未查询额度' : 'API Key 通道无额度窗口' }),

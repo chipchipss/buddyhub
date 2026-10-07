@@ -72,6 +72,11 @@ type Account struct {
 	PlanName   string                `json:"plan_name,omitempty"`
 	PlanExpire time.Time             `json:"plan_expire,omitempty"`
 
+	// ModelHealth 逐模型健康（runtime 对话失败写入）：模型代码 → 惩罚。
+	// 目的：某模型上游 5xx/限流/额度抖动只冷却该(账号+模型)，不牵连同账号其他模型，
+	// 更不把整号打成 5 分钟黑洞。凭证失效(401/403)与风控(3012)仍按账号级 Status 处理。
+	ModelHealth map[string]ModelPenalty `json:"model_health,omitempty"`
+
 	UseCount    int64     `json:"use_count"`
 	FailCount   int64     `json:"fail_count"`
 	RiskStrikes int       `json:"risk_strikes"` // 累计风控封禁次数；成功即清零
@@ -93,6 +98,22 @@ type QuotaEntry struct {
 	Used      int64     `json:"used"`
 	Remaining int64     `json:"remaining"`
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
+}
+
+// PenaltyKind 逐模型惩罚的成因（供面板与健康判定展示）。
+const (
+	PenaltyServer    = "server"    // 上游 5xx 抖动（含 "Internal Network Failure"）
+	PenaltyRate      = "rate"      // 上游限流 429
+	PenaltyExhausted = "exhausted" // 该模型额度用完（对话 402）
+)
+
+// ModelPenalty 单(账号,模型)的临时惩罚记录。
+type ModelPenalty struct {
+	Kind    string    `json:"kind"`
+	Until   time.Time `json:"until"`
+	Fails   int       `json:"fails,omitempty"` // 连续失败计数（驱动退避阶梯）
+	LastErr string    `json:"last_err,omitempty"`
+	LastAt  time.Time `json:"last_at,omitempty"`
 }
 
 // NewAccount 由凭证串建账号：三段点分判为 JWT，其余判为 API Key。
@@ -241,6 +262,65 @@ func (a *Account) MarkFail(reason string) {
 	a.FailCount++
 	a.LastError = reason
 	a.LastErrAt = time.Now()
+}
+
+// ModelPenalized 该模型此刻是否处于惩罚（冷却）中。过期条目视为不再惩罚。
+func (a *Account) ModelPenalized(model string, now time.Time) bool {
+	p, ok := a.ModelHealth[model]
+	if !ok {
+		return false
+	}
+	return now.Before(p.Until)
+}
+
+// PenalizeModel 给该(账号,模型)记一次失败并按阶梯冷却 d。d<=0 表示仅记失败不冷却。
+// 连续失败会让阶梯更久（由调用方按 Fails 计算 d 传入）。
+func (a *Account) PenalizeModel(model string, d time.Duration, kind, reason string) {
+	if model == "" {
+		return
+	}
+	if a.ModelHealth == nil {
+		a.ModelHealth = map[string]ModelPenalty{}
+	}
+	prev := a.ModelHealth[model]
+	fails := prev.Fails + 1
+	if prev.Kind != kind {
+		fails = 1 // 成因切换，阶梯重新计
+	}
+	pen := ModelPenalty{Kind: kind, Fails: fails, LastErr: reason, LastAt: time.Now()}
+	if d > 0 {
+		pen.Until = time.Now().Add(d)
+	} else {
+		pen.Until = time.Time{}
+	}
+	a.ModelHealth[model] = pen
+}
+
+// ClearModelPenalty 成功后清掉该模型的惩罚记录。
+func (a *Account) ClearModelPenalty(model string) {
+	if model == "" {
+		return
+	}
+	if _, ok := a.ModelHealth[model]; ok {
+		delete(a.ModelHealth, model)
+	}
+}
+
+// ReapModelHealth 删除已过期的模型惩罚，返回是否有变化。
+func (a *Account) ReapModelHealth(now time.Time) bool {
+	changed := false
+	for m, p := range a.ModelHealth {
+		if !p.Until.IsZero() && now.After(p.Until) {
+			delete(a.ModelHealth, m)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// SelectableFor 模型感知的可选判定：账号级可选 **且** 该模型未在惩罚中。
+func (a *Account) SelectableFor(model string, now time.Time) bool {
+	return a.Selectable(now) && !a.ModelPenalized(model, now)
 }
 
 // Secret 主凭证（展示/掩码用）。

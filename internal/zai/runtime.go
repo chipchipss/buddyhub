@@ -3,6 +3,7 @@ package zai
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,18 +35,26 @@ type Client struct {
 	RateLimitWait   time.Duration // 429 原地等待上限（超过就换号）
 	CoolDuration    time.Duration // 5xx 耗尽后的冷却时长
 	ExhaustProbeGap time.Duration // 额度用完后的再探间隔
+
+	// 逐模型惩罚（B 计划）：某模型上游抖动只冷却该(账号,模型)，不动整号。
+	ModelCoolBase     time.Duration // 阶梯基值（第 1 次惩罚时长）
+	ModelCoolMax      time.Duration // 阶梯上限（封顶，防雪崩）
+	TransientRetryGap time.Duration // 5xx 瞬时重试的原地小睡基值
 }
 
 // NewClient 建默认编排器。
 func NewClient(pool *Pool, captcha *CaptchaManager, blocks []SystemBlock) *Client {
 	return &Client{
 		Pool: pool, Captcha: captcha, SystemBlocks: blocks,
-		MaxAttempts:     6,
-		CaptchaRetries:  3,
-		ServerRetries:   3,
-		RateLimitWait:   20 * time.Second,
-		CoolDuration:    300 * time.Second,
-		ExhaustProbeGap: 10 * time.Minute,
+		MaxAttempts:       6,
+		CaptchaRetries:    3,
+		ServerRetries:     3,
+		RateLimitWait:     20 * time.Second,
+		CoolDuration:      300 * time.Second,
+		ExhaustProbeGap:   10 * time.Minute,
+		ModelCoolBase:     30 * time.Second,
+		ModelCoolMax:      5 * time.Minute,
+		TransientRetryGap: 500 * time.Millisecond,
 	}
 }
 
@@ -66,6 +75,9 @@ func (c *Client) Do(ctx context.Context, body []byte) (*Result, error) {
 	if attempts <= 0 {
 		attempts = 6
 	}
+	// 惩罚按「模型代码」记（Anthropic 体里的 model，即真正发给上游的那个），一次上游
+	// 抖动只影响该模型，不牵连同账号其他模型。
+	model := modelFromBody(body)
 
 	var lastErr error
 	// 同一账号的验证码重试计数（换号即清零）
@@ -87,16 +99,27 @@ func (c *Client) Do(ctx context.Context, body []byte) (*Result, error) {
 		planUsable := c.Captcha != nil && c.Captcha.Enabled() && len(c.SystemBlocks) > 0
 		wantPlan := planUsable
 		// usable：本请求此刻能真正建流的账号。纯 API Key 号恒可用；带回退 Key 的 JWT
-		// 号可用（走回退）；只能走 Plan 的 JWT 号仅在 Plan 结构性可用时才算数。把用不了
-		// 的号在选号阶段就排除，避免它们吃掉有限的尝试预算、把可用号挤到选不到。
+		// 号可用（走回退）；只能走 Plan 的 JWT 号仅在 Plan 结构性可用时才算数。再叠加
+		// 逐模型惩罚过滤——该模型正在冷却的号跳过，但同号其他模型不受牵连。
 		usable := func(a *Account) bool {
+			var chanOK bool
 			if a.Mode == ModeAPIKey || a.HasKeyFallback() {
-				return true
+				chanOK = true
+			} else {
+				chanOK = planUsable && a.HasJWTPath()
 			}
-			return planUsable && a.HasJWTPath()
+			return chanOK && !a.ModelPenalized(model, time.Now())
 		}
 		acc, err := c.Pool.Pick(wantPlan, usable)
 		if err != nil {
+			// 区分「本模型在可用号上都冷却了」与「根本没有能用该通道的号」——前者是
+			// 上游抖动的临时态（会自愈），给可操作的稍后重试提示；后者才谈配置/凭证。
+			if c.modelCooledOut(model, planUsable, time.Now()) {
+				if lastErr != nil {
+					return nil, fmt.Errorf("模型 %s 暂时不可用（上游抖动，各可用号已在短冷却中，稍后自动恢复）；最近失败：%v", model, lastErr)
+				}
+				return nil, fmt.Errorf("模型 %s 暂时不可用（上游抖动，各可用号已在短冷却中，稍后自动恢复）", model)
+			}
 			if lastErr != nil {
 				return nil, fmt.Errorf("%w（最后一次失败：%v）", err, lastErr)
 			}
@@ -154,7 +177,10 @@ func (c *Client) Do(ctx context.Context, body []byte) (*Result, error) {
 
 		if resp.StatusCode == http.StatusOK {
 			c.Pool.Release(acc.ID)
-			_ = c.Pool.Store().Update(acc.ID, func(a *Account) { a.MarkOK() })
+			_ = c.Pool.Store().Update(acc.ID, func(a *Account) {
+				a.MarkOK()
+				a.ClearModelPenalty(model)
+			})
 			return &Result{Resp: resp, Account: acc, UsedPlan: usedPlan}, nil
 		}
 
@@ -183,8 +209,16 @@ func (c *Client) Do(ctx context.Context, body []byte) (*Result, error) {
 		case FailRateLimited:
 			rateWaits++
 			if rateWaits > 2 || time.Duration(retryAfter)*time.Second > c.RateLimitWait {
-				// 反复限流或等待过久：换号，账号保持可用（不冷却）
-				lastErr = fmt.Errorf("上游限流（%s）", acc.Name)
+				// 反复限流或等待过久：只给该(账号,模型)一个短惩罚（尊重 Retry-After，
+				// 缺省用阶梯基值），账号保持可选——其他模型仍可服务。
+				gap := c.modelPenaltyGap(rateWaits)
+				if retryAfter > 0 && time.Duration(retryAfter)*time.Second < c.ModelCoolMax {
+					gap = time.Duration(retryAfter) * time.Second
+				}
+				_ = c.Pool.Store().Update(acc.ID, func(a *Account) {
+					a.PenalizeModel(model, gap, PenaltyRate, "上游限流 429")
+				})
+				lastErr = fmt.Errorf("上游限流（%s，模型 %s 短冷却 %s）", acc.Name, model, gap)
 				continue
 			}
 			wait := time.Duration(retryAfter) * time.Second
@@ -198,11 +232,13 @@ func (c *Client) Do(ctx context.Context, body []byte) (*Result, error) {
 			continue
 
 		case FailExhausted:
+			// 对话实测该模型额度用完：按(账号,模型)记惩罚，不动账号级 Status——
+			// 同号其他（更便宜/免费）模型仍可服务。账号级 EXHAUSTED 由额度轮询器管。
 			_ = c.Pool.Store().Update(acc.ID, func(a *Account) {
-				a.Exhaust(c.ExhaustProbeGap)
-				a.MarkFail("额度用完")
+				a.PenalizeModel(model, c.ExhaustProbeGap, PenaltyExhausted, "该模型额度用完")
+				a.MarkFail("额度用完（模型 " + model + "）")
 			})
-			lastErr = fmt.Errorf("账号 %s 额度用完", acc.Name)
+			lastErr = fmt.Errorf("账号 %s 的模型 %s 额度用完", acc.Name, model)
 			continue
 
 		case FailRiskControl:
@@ -223,12 +259,27 @@ func (c *Client) Do(ctx context.Context, body []byte) (*Result, error) {
 		case FailServerError:
 			serverTries++
 			if serverTries >= c.ServerRetries {
+				// 原地重试仍未成功：只给该(账号,模型)一个按阶梯的短冷却，绝不冷却整号。
+				gap := c.modelPenaltyGap(serverTries)
 				_ = c.Pool.Store().Update(acc.ID, func(a *Account) {
-					a.Cool(c.CoolDuration)
-					a.MarkFail(fmt.Sprintf("上游 %d 连续 %d 次", resp.StatusCode, serverTries))
+					a.PenalizeModel(model, gap, PenaltyServer,
+						fmt.Sprintf("上游 HTTP %d 连续 %d 次", resp.StatusCode, serverTries))
+					a.MarkFail(fmt.Sprintf("上游 %d 连续 %d 次（模型 %s）", resp.StatusCode, serverTries, model))
 				})
+				lastErr = fmt.Errorf("上游错误 HTTP %d（模型 %s，短冷却 %s）", resp.StatusCode, model, gap)
+			} else {
+				// 瞬时抖动（免费端点常见 500 "Internal Network Failure"）：先原地小睡后
+				// 重试同一账号同一模型，多数情况下一次即成，不打惩罚。
+				lastErr = fmt.Errorf("上游错误 HTTP %d", resp.StatusCode)
+				if bo := c.serverRetryBackoff(serverTries); bo > 0 {
+					select {
+					case <-time.After(bo):
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
+				attempt-- // 瞬时重试不占总次数预算
 			}
-			lastErr = fmt.Errorf("上游错误 HTTP %d", resp.StatusCode)
 			continue
 
 		default:
@@ -243,6 +294,80 @@ func (c *Client) Do(ctx context.Context, body []byte) (*Result, error) {
 		lastErr = ErrNoAccount
 	}
 	return nil, lastErr
+}
+
+// modelFromBody 从 Anthropic 请求体取模型代码（即真正发给上游的那个）。失败返回空串。
+func modelFromBody(body []byte) string {
+	var m struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(body, &m) != nil {
+		return ""
+	}
+	return m.Model
+}
+
+// channelUsable：不考虑逐模型惩罚时，该账号能否为本请求通道服务。与 Do 里 usable 的
+// 通道判定一致（纯 API Key / 带回退 Key 的 JWT 恒可；纯 Plan 的 JWT 仅 Plan 就绪时可）。
+func channelUsable(a *Account, planUsable bool) bool {
+	if a.Mode == ModeAPIKey || a.HasKeyFallback() {
+		return true
+	}
+	return planUsable && a.HasJWTPath()
+}
+
+// modelCooledOut：是否存在「本可服务该通道、但该模型正冷却」的账号——用于把「上游抖动
+// 导致该模型暂全线短冷却」与「根本没有能走该通道的号」两种 ErrNoAccount 区分开。
+func (c *Client) modelCooledOut(model string, planUsable bool, now time.Time) bool {
+	if c.Pool == nil {
+		return false
+	}
+	anyChannelUsable := false
+	for _, a := range c.Pool.Store().List() {
+		if !a.Selectable(now) || !channelUsable(a, planUsable) {
+			continue
+		}
+		anyChannelUsable = true
+		if !a.ModelPenalized(model, now) {
+			return false // 还有一个没冷却——那不是「全线冷却」
+		}
+	}
+	return anyChannelUsable && model != ""
+}
+
+// modelPenaltyGap 逐模型惩罚阶梯：base * 2^(fails-1)，封顶 ModelCoolMax。
+func (c *Client) modelPenaltyGap(fails int) time.Duration {
+	base := c.ModelCoolBase
+	if base <= 0 {
+		base = 30 * time.Second
+	}
+	max := c.ModelCoolMax
+	if max <= 0 {
+		max = 5 * time.Minute
+	}
+	if fails < 1 {
+		fails = 1
+	}
+	gap := base
+	for i := 1; i < fails && gap < max; i++ {
+		gap *= 2
+	}
+	if gap > max {
+		gap = max
+	}
+	return gap
+}
+
+// serverRetryBackoff 瞬时 5xx 原地重试的小睡（有上限，别把请求拖死）。
+func (c *Client) serverRetryBackoff(fails int) time.Duration {
+	if c.TransientRetryGap <= 0 {
+		return 0
+	}
+	gap := c.TransientRetryGap * time.Duration(fails)
+	if gap > 2*time.Second {
+		gap = 2 * time.Second
+	}
+	return gap
 }
 
 // Store 账号池存储（面板增删改走它）。

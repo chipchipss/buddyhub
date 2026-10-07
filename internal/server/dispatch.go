@@ -287,9 +287,11 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if h.ZaiChatStream(w, r, body, bareModel) {
 			return bridgeOutcome{matched: true, served: true}
 		}
-		detail := "没有可用的 Z.AI / 智谱 API Key（配置 schedule.zai 后重试）"
+		// 有具体失败原因时以它为主（可能是某模型上游抖动/额度用完的按模型短冷却，
+		// 并非真的没有 Key）；只有确无凭据线索时才回落「未配置」提示。
+		detail := "没有可用的 Z.AI / 智谱 通道（配置 schedule.zai 或面板添加账号后重试）"
 		if h.lastZaiErr != "" {
-			detail += "；最近失败原因: " + h.lastZaiErr
+			detail = "Z.AI 通道暂不可用：" + h.lastZaiErr
 		}
 		return bridgeOutcome{matched: true, code: "no_zai_key", detail: detail, lastErr: h.lastZaiErr}
 	}

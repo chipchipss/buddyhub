@@ -120,23 +120,24 @@ func (p *Pool) InFlight(id string) int {
 
 // Snapshot 池内各账号的即时视图（面板用）。
 type Snapshot struct {
-	ID        string                `json:"id"`
-	Name      string                `json:"name"`
-	Mode      string                `json:"mode"`
-	Status    Status                `json:"status"`
-	Enabled   bool                  `json:"enabled"`
-	InFlight  int                   `json:"in_flight"`
-	UseCount  int64                 `json:"use_count"`
-	FailCount int64                 `json:"fail_count"`
-	Risk      int                   `json:"risk_strikes"`
-	CoolLeft  int64                 `json:"cool_remaining_sec,omitempty"`
-	Quota     map[string]QuotaEntry `json:"quota,omitempty"`
-	PlanName  string                `json:"plan_name,omitempty"`
-	LastErr   string                `json:"last_error,omitempty"`
-	LastOK    time.Time             `json:"last_ok,omitempty"`
-	Masked    string                `json:"masked"`
-	HasKey    bool                  `json:"has_key_fallback"`
-	Profile   *Profile              `json:"fingerprint,omitempty"`
+	ID          string                  `json:"id"`
+	Name        string                  `json:"name"`
+	Mode        string                  `json:"mode"`
+	Status      Status                  `json:"status"`
+	Enabled     bool                    `json:"enabled"`
+	InFlight    int                     `json:"in_flight"`
+	UseCount    int64                   `json:"use_count"`
+	FailCount   int64                   `json:"fail_count"`
+	Risk        int                     `json:"risk_strikes"`
+	CoolLeft    int64                   `json:"cool_remaining_sec,omitempty"`
+	Quota       map[string]QuotaEntry   `json:"quota,omitempty"`
+	PlanName    string                  `json:"plan_name,omitempty"`
+	ModelHealth map[string]ModelPenalty `json:"model_health,omitempty"`
+	LastErr     string                  `json:"last_error,omitempty"`
+	LastOK      time.Time               `json:"last_ok,omitempty"`
+	Masked      string                  `json:"masked"`
+	HasKey      bool                    `json:"has_key_fallback"`
+	Profile     *Profile                `json:"fingerprint,omitempty"`
 }
 
 // Snapshots 返回全部账号的即时视图（按插入顺序）。
@@ -156,7 +157,8 @@ func (p *Pool) Snapshots() []Snapshot {
 			ID: a.ID, Name: a.Name, Mode: a.Mode, Status: a.Status, Enabled: a.Enabled,
 			InFlight: inflight[a.ID], UseCount: a.UseCount, FailCount: a.FailCount,
 			Risk: a.RiskStrikes, Quota: a.Quota, PlanName: a.PlanName,
-			LastErr: a.LastError, LastOK: a.LastOKAt,
+			ModelHealth: a.ModelHealth,
+			LastErr:     a.LastError, LastOK: a.LastOKAt,
 			Masked: Mask(a.Secret()), HasKey: a.HasKeyFallback(), Profile: a.Fingerprint,
 		}
 		if !a.CoolingUntil.IsZero() && a.CoolingUntil.After(now) {

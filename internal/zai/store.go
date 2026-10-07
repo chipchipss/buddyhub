@@ -180,6 +180,9 @@ func (s *Store) Reap(now time.Time) int {
 			a.CoolingUntil = time.Time{}
 			n++
 		}
+		if a.ReapModelHealth(now) {
+			n++
+		}
 	}
 	if n > 0 {
 		_ = s.saveLocked()
@@ -219,6 +222,12 @@ func cloneAccount(a *Account) *Account {
 		c.Quota = make(map[string]QuotaEntry, len(a.Quota))
 		for k, v := range a.Quota {
 			c.Quota[k] = v
+		}
+	}
+	if a.ModelHealth != nil {
+		c.ModelHealth = make(map[string]ModelPenalty, len(a.ModelHealth))
+		for k, v := range a.ModelHealth {
+			c.ModelHealth[k] = v
 		}
 	}
 	if a.Fingerprint != nil {
