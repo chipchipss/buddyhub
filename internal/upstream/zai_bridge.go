@@ -163,10 +163,18 @@ func ZaiTranslateIn(openaiBody []byte) ([]byte, string, error) {
 		}
 	}
 
+	// Anthropic messages 必填 max_tokens；客户端没给（OpenAI 侧 omitempty→0）时不能
+	// 钳到下限 1，否则上游只出 1 token 即 length、正文空。缺省按"不限"语义给到上限，
+	// 让模型自然停在 end_turn；显式给了则夹进合法区间。
+	maxTokens := ZaiMaxTokensLimit
+	if req.MaxTokens > 0 {
+		maxTokens = clampInt(req.MaxTokens, 1, ZaiMaxTokensLimit)
+	}
+
 	body := map[string]any{
 		"model":      model,
 		"messages":   out,
-		"max_tokens": clampInt(req.MaxTokens, 1, ZaiMaxTokensLimit),
+		"max_tokens": maxTokens,
 	}
 	if len(systemParts) > 0 {
 		body["system"] = strings.Join(systemParts, "\n\n")

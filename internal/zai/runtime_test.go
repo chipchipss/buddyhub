@@ -103,6 +103,7 @@ func TestDoSuccessOnPlanChannel(t *testing.T) {
 	client, st := newTestClient(t, jwt)
 	client.Captcha = NewCaptchaManager(SolverConfig{Command: node, Script: solver, Timeout: 10 * time.Second},
 		func() bool { return true })
+	client.SystemBlocks = []SystemBlock{{Type: "text", Text: "identity"}} // Plan 通道需身份块
 
 	res, err := client.Do(context.Background(), []byte(`{"model":"glm-5.3","messages":[]}`))
 	if err != nil {
@@ -275,6 +276,7 @@ func TestDoCaptchaChallengeRetriesSameAccount(t *testing.T) {
 	captcha := NewCaptchaManager(SolverConfig{Command: node, Script: solver, Timeout: 10 * time.Second},
 		func() bool { return true })
 	client.Captcha = captcha
+	client.SystemBlocks = []SystemBlock{{Type: "text", Text: "identity"}} // Plan 通道需身份块
 
 	res, err := client.Do(context.Background(), []byte(`{"model":"glm-5.3","messages":[]}`))
 	if err != nil {

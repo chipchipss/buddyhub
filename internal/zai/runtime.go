@@ -79,12 +79,29 @@ func (c *Client) Do(ctx context.Context, body []byte) (*Result, error) {
 			return nil, ctx.Err()
 		}
 
-		// 选号：有验证码能力时优先 Plan 通道（消耗订阅额度）
-		wantPlan := c.Captcha != nil && c.Captcha.Enabled()
-		acc, err := c.Pool.Pick(wantPlan)
+		// Plan 通道可用 = 有验证码求解器 **且** 已配置身份块（system_file）。缺任一者时，
+		// JWT 走 Plan 不是被上游判 3012（缺身份块）就是根本无法建流（缺求解器）——这是
+		// 本地配置的结构性缺失，不是账号故障。故此时让「只能走 Plan」的号（无回退 Key）
+		// 让位，把请求交给真正可用的通道（自带回退 Key 的 JWT、或独立的 API Key 号），
+		// 而不是空转、或触发团灭守卫把整池挡在门外。
+		planUsable := c.Captcha != nil && c.Captcha.Enabled() && len(c.SystemBlocks) > 0
+		wantPlan := planUsable
+		// usable：本请求此刻能真正建流的账号。纯 API Key 号恒可用；带回退 Key 的 JWT
+		// 号可用（走回退）；只能走 Plan 的 JWT 号仅在 Plan 结构性可用时才算数。把用不了
+		// 的号在选号阶段就排除，避免它们吃掉有限的尝试预算、把可用号挤到选不到。
+		usable := func(a *Account) bool {
+			if a.Mode == ModeAPIKey || a.HasKeyFallback() {
+				return true
+			}
+			return planUsable && a.HasJWTPath()
+		}
+		acc, err := c.Pool.Pick(wantPlan, usable)
 		if err != nil {
 			if lastErr != nil {
 				return nil, fmt.Errorf("%w（最后一次失败：%v）", err, lastErr)
+			}
+			if !planUsable {
+				return nil, fmt.Errorf("没有可用的 Z.AI 账号：池内账号只能走 Plan 通道，但 Plan 未就绪（缺验证码求解器或 system_file 身份块）；配好其一，或添加 API Key 账号")
 			}
 			return nil, err
 		}
@@ -96,13 +113,13 @@ func (c *Client) Do(ctx context.Context, body []byte) (*Result, error) {
 		forceFallback := false
 		verifyParam, verifyRegion := "", ""
 		if acc.HasJWTPath() {
-			if c.Captcha == nil || !c.Captcha.Enabled() {
-				// 无求解器：JWT 通道不可用，退回该账号自带的 API Key
+			if !planUsable {
+				// Plan 结构性不可用：能回退就回退，纯 Plan 号直接跳过（绝不改账号状态）
 				if acc.HasKeyFallback() {
 					forceFallback = true
 				} else {
 					c.Pool.Release(acc.ID)
-					lastErr = fmt.Errorf("账号 %s 是 JWT 且未配置验证码求解器，也无回退 Key", acc.Name)
+					lastErr = fmt.Errorf("账号 %s 只能走 Plan 通道，但 Plan 不可用（缺验证码求解器或 system_file 身份块）", acc.Name)
 					continue
 				}
 			} else {
@@ -189,16 +206,6 @@ func (c *Client) Do(ctx context.Context, body []byte) (*Result, error) {
 			continue
 
 		case FailRiskControl:
-			if usedPlan && len(c.SystemBlocks) == 0 {
-				// Plan 通道缺身份块（system_file）时上游几乎必判 3012 —— 这是本地
-				// 配置缺失而非账号真被风控。若照常 BanForRisk，首个请求就会团灭整池
-				// 且需人工逐个恢复；也不能继续换号重试（重复打上游只会加剧风控）。
-				// 故：记一次普通失败、立即返回可操作的配置提示、不动账号可用性。
-				_ = c.Pool.Store().Update(acc.ID, func(a *Account) {
-					a.MarkFail("3012：Plan 通道疑似缺 system_file 身份块")
-				})
-				return nil, fmt.Errorf("Plan 通道被上游判 3012 风控，且未配置身份块（schedule.zai.system_file）——已停止重试、账号未禁用，请补齐身份块后重试")
-			}
 			_ = c.Pool.Store().Update(acc.ID, func(a *Account) {
 				a.BanForRisk("上游风控（3012/405 unusual activity）")
 			})

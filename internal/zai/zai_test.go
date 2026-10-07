@@ -206,7 +206,7 @@ func TestPoolSelection(t *testing.T) {
 	// 轮转：连续取应依次覆盖不同账号
 	seen := map[string]bool{}
 	for i := 0; i < 3; i++ {
-		a, err := p.Pick(false)
+		a, err := p.Pick(false, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -218,11 +218,11 @@ func TestPoolSelection(t *testing.T) {
 	}
 
 	// 单账号并发上限 1：占住后不得再选到同一个
-	a1, err := p.Pick(false)
+	a1, err := p.Pick(false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	a2, err := p.Pick(false)
+	a2, err := p.Pick(false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestPoolSelection(t *testing.T) {
 	for _, acc := range st.List() {
 		_ = st.Update(acc.ID, func(x *Account) { x.Enabled = false })
 	}
-	if _, err := p.Pick(false); err != ErrNoAccount {
+	if _, err := p.Pick(false, nil); err != ErrNoAccount {
 		t.Fatalf("全禁用应返回 ErrNoAccount，got %v", err)
 	}
 }
@@ -253,12 +253,53 @@ func TestPoolPrefersPlanChannel(t *testing.T) {
 	_ = st.Add(jwtAcc)
 
 	p := NewPool(st, 2)
-	a, err := p.Pick(true)
+	a, err := p.Pick(true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if a.ID != jwtAcc.ID {
 		t.Fatalf("wantPlan=true 应优先 JWT 账号，got %s", a.Name)
+	}
+}
+
+// TestPickUsablePredicateExcludesPlanOnly 锁定「按可用性过滤选号」：Plan 结构性不可用
+// 时，usable 过滤器必须把「只能走 Plan」的 JWT 号挡在候选之外，只留下真正能建流的
+// API Key 号——否则多个纯 Plan 号会吃掉尝试预算，把可用号挤到选不到（线上间歇
+// 「无可用账号」的根因）。
+func TestPickUsablePredicateExcludesPlanOnly(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := NewStore(filepath.Join(dir, "a.json"))
+	// 三个纯 Plan 号排在前面（无回退 Key）
+	for _, n := range []string{"p1", "p2", "p3"} {
+		_ = st.Add(NewAccount(n, "header."+b64(`{"sub":"`+n+`"}`)+".sig"))
+	}
+	// 唯一一个此刻可用的 API Key 号排在最后
+	key := NewAccount("freekey", "sk-open.abcdefgh")
+	_ = st.Add(key)
+
+	p := NewPool(st, 2)
+	planUsable := false
+	usable := func(a *Account) bool {
+		if a.Mode == ModeAPIKey || a.HasKeyFallback() {
+			return true
+		}
+		return planUsable && a.HasJWTPath()
+	}
+	// 反复选号（覆盖游标旋转），每次都必须拿到 API Key 号，绝不能拿到纯 Plan 号
+	for i := 0; i < 8; i++ {
+		a, err := p.Pick(false, usable)
+		if err != nil {
+			t.Fatalf("第 %d 次应能选到可用号，got err=%v", i, err)
+		}
+		if a.ID != key.ID {
+			t.Fatalf("第 %d 次应选到 API Key 号，got %s(mode=%s)", i, a.Name, a.Mode)
+		}
+		p.Release(a.ID)
+	}
+
+	// 对照组：不带过滤器时，纯 Plan 号仍会被选中（证明过滤器确实在起作用）
+	if a, err := p.Pick(false, nil); err != nil || a.Mode == ModeAPIKey {
+		t.Fatalf("无过滤器应可能选到非 API Key 号，got id=%v err=%v", a, err)
 	}
 }
 

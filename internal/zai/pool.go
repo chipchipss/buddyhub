@@ -54,7 +54,12 @@ func (p *Pool) MaxPerAccount() int {
 //
 // wantPlan=true 时优先返回能走 Plan（JWT）通道的账号（例如已有验证码 token
 // 在手、想优先消耗订阅额度）；这类账号不可用时退回任意可用账号。
-func (p *Pool) Pick(wantPlan bool) (*Account, error) {
+//
+// usable 是调用方给的「本请求此刻能否真正服务」过滤器（nil=不加过滤）。典型
+// 用法：Plan 通道结构性不可用（缺求解器/system_file）时，把「只能走 Plan」的 JWT
+// 号排除掉——否则它们会被选中却建不了流，白白吃掉有限的尝试预算，让真正可用的
+// API Key 号排在后面选不到（表现为间歇「无可用账号」）。
+func (p *Pool) Pick(wantPlan bool, usable func(*Account) bool) (*Account, error) {
 	p.store.Reap(time.Now())
 
 	list := p.store.List()
@@ -73,6 +78,9 @@ func (p *Pool) Pick(wantPlan bool) (*Account, error) {
 		a := list[(start+i)%n]
 		if !a.Selectable(time.Now()) {
 			continue
+		}
+		if usable != nil && !usable(a) {
+			continue // 本请求结构性用不了：跳过，不占尝试预算
 		}
 		if p.maxPer > 0 && p.inflight[a.ID] >= p.maxPer {
 			continue // 满并发：跳过，不排队

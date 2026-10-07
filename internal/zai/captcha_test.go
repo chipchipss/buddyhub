@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 )
@@ -64,39 +63,85 @@ else { console.log('VERIFY_PARAM=' + 'p'.repeat(280)); }`
 	}
 }
 
-// TestRiskControlWithoutSystemBlocksDoesNotBan 复现团灭场景：Plan 通道未配身份块
-// （system_file）时上游判 3012。此时应给出可操作的配置错误、立即停止（不重复打
-// 上游加剧风控）、且**不禁用账号**——否则首个请求就把整池永久踢出。
-func TestRiskControlWithoutSystemBlocksDoesNotBan(t *testing.T) {
-	node, err := exec.LookPath("node")
+// TestRoutesToAPIKeyWhenPlanUnavailable 复现线上诉求：Plan 通道结构性不可用
+// （此例 system_file 身份块未配）时，请求必须让位给可用的 API Key 号，而不是被
+// 「只能走 Plan」的号触发的风控/团灭挡在门外；且被跳过的纯 Plan 号状态不动、
+// 不应向 Plan 端打上游。
+func TestRoutesToAPIKeyWhenPlanUnavailable(t *testing.T) {
+	up := newMockUpstream(t, mockStep{status: 200, body: `{"type":"message","content":[{"type":"text","text":"hi"}]}`})
+	SetEndpoints(up.server.URL+"/plan", up.server.URL+"/fallback", "", "")
+
+	st, err := NewStore(filepath.Join(t.TempDir(), "acc.json"))
 	if err != nil {
-		t.Skip("无 node，跳过风控守卫测试")
+		t.Fatal(err)
 	}
-	dir := t.TempDir()
-	solver := filepath.Join(dir, "solver.js")
-	if err := os.WriteFile(solver, []byte("console.log('VERIFY_PARAM='+'p'.repeat(260));"), 0o644); err != nil {
+	// 纯 Plan 号（JWT、无回退 Key）：缺 system_file 时它唯一的路就是坏的
+	jwt := NewAccount("plan号", "header."+b64(`{"sub":"u1"}`)+".sig")
+	// 免费 API Key 号（单点分隔 → ModeAPIKey）：应被路由过去
+	freekey := NewAccount("freekey", "sk-open.abcdefgh")
+	if err := st.Add(jwt); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Add(freekey); err != nil {
 		t.Fatal(err)
 	}
 
-	up := newMockUpstream(t, mockStep{status: 405, body: `{"code":3012,"message":"unusual activity"}`})
-	SetEndpoints(up.server.URL+"/plan", up.server.URL+"/fallback", "", "")
+	// 求解器「已启用」但 SystemBlocks 为空 → planUsable=false（我们不会真的调它）
+	cap := NewCaptchaManager(SolverConfig{Script: "x.js"}, func() bool { return true })
+	client := NewClient(NewPool(st, 2), cap, nil)
 
-	jwt := NewAccount("主号", "header."+b64("{\"sub\":\"u1\"}")+".sig")
-	client, st := newTestClient(t, jwt) // SystemBlocks = nil（未配 system_file）
-	client.Captcha = NewCaptchaManager(SolverConfig{Command: node, Script: solver, Timeout: 10 * time.Second},
-		func() bool { return true })
-
-	_, err = client.Do(context.Background(), []byte(`{"model":"glm-5.3","messages":[]}`))
-	if err == nil {
-		t.Fatal("3012 应返回错误")
+	res, err := client.Do(context.Background(), []byte(`{"model":"glm-4-flash","messages":[]}`))
+	if err != nil {
+		t.Fatalf("应经 API Key 通道成功，got err=%v", err)
 	}
-	if !strings.Contains(err.Error(), "system_file") {
-		t.Fatalf("错误应指向 system_file 缺失，got: %v", err)
+	if res.UsedPlan {
+		t.Fatal("缺 system_file 时不应走 Plan 通道")
 	}
-	if got := st.Get(jwt.ID).Status; got == StatusDisabled {
-		t.Fatalf("缺 system_file 导致的 3012 不应禁用账号，got status=%s", got)
+	if res.Account.ID != freekey.ID {
+		t.Fatalf("应由 API Key 号服务，got %s", res.Account.Name)
 	}
 	if up.count() != 1 {
-		t.Fatalf("应立即停止重试，上游调用数=%d, want 1", up.count())
+		t.Fatalf("只应向可用通道打一次，上游调用=%d", up.count())
+	}
+	if got := st.Get(jwt.ID).Status; got == StatusDisabled || got == StatusInvalid {
+		t.Fatalf("被跳过的纯 Plan 号不应被改状态，got %s", got)
+	}
+}
+
+// TestDoNeverStarvesAPIKeyBehindPlanOnlyPool 是线上间歇「无可用账号」的回归锁：
+// 池里有多个「只能走 Plan」的 JWT 号排在真正的 API Key 号前面。Plan 结构性不可用
+// 时，每次 Do 都必须稳定落到 API Key 号成功——不能因为纯 Plan 号吃掉有限的尝试
+// 预算而间歇失败。反复调用以覆盖选号游标的旋转。
+func TestDoNeverStarvesAPIKeyBehindPlanOnlyPool(t *testing.T) {
+	up := newMockUpstream(t, mockStep{status: 200, body: `{"content":[{"type":"text","text":"hi"}]}`})
+	SetEndpoints(up.server.URL+"/plan", up.server.URL+"/fallback", "", "")
+
+	// 三个纯 Plan 号（无回退 Key）先入池，API Key 号最后
+	accounts := []*Account{
+		NewAccount("plan1", "header."+b64(`{"sub":"p1"}`)+".sig"),
+		NewAccount("plan2", "header."+b64(`{"sub":"p2"}`)+".sig"),
+		NewAccount("plan3", "header."+b64(`{"sub":"p3"}`)+".sig"),
+		NewAccount("freekey", "sk-open.abcdefgh"),
+	}
+	client, st := newTestClient(t, accounts...)
+	keyID := accounts[3].ID
+
+	for i := 0; i < 12; i++ {
+		res, err := client.Do(context.Background(), []byte(`{"model":"glm-4-flash","messages":[]}`))
+		if err != nil {
+			t.Fatalf("第 %d 次应稳定经 API Key 号成功，got err=%v", i, err)
+		}
+		if res.Account.ID != keyID {
+			t.Fatalf("第 %d 次应由 API Key 号服务，got %s", i, res.Account.Name)
+		}
+		res.Resp.Body.Close()
+	}
+	// 纯 Plan 号状态不应被动过（没被拿去打 Plan，也没被冷却/失效）
+	for _, name := range []string{"plan1", "plan2", "plan3"} {
+		for _, a := range st.List() {
+			if a.Name == name && (a.Status == StatusDisabled || a.Status == StatusInvalid) {
+				t.Fatalf("纯 Plan 号 %s 不应被改状态，got %s", name, a.Status)
+			}
+		}
 	}
 }

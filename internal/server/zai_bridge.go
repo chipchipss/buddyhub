@@ -30,6 +30,13 @@ func (h *Handler) ZaiChatStream(w http.ResponseWriter, r *http.Request, body []b
 		return false
 	}
 
+	// bareModel 仍带路由前缀「zai:」（它是网关侧协议，上游只认裸模型名）。其余桥接
+	// 都在翻译前剥前缀并重写 body，zai 此前漏了这步——导致把字面量 "zai:glm-4-flash"
+	// 发给上游，被判 1211 Unknown Model。剥前缀后小写别名映射才有机会命中。
+	if m := strings.TrimPrefix(bareModel, zaiModelPrefix); m != bareModel {
+		body = rewriteModel(body, m)
+	}
+
 	anthBody, model, err := upstream.ZaiTranslateIn(body)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
