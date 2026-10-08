@@ -5,9 +5,11 @@
 package scheduler
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,15 +70,18 @@ func TestRetryTargetsOnlyWhenDue(t *testing.T) {
 	now := time.Now()
 	l.scheduleRetry(taskActivity, "u1", now)
 
-	if kinds, _ := l.retryTargets(now.Add(30 * time.Second)); len(kinds) != 0 {
+	if kinds, _, _ := l.retryTargets(now.Add(30 * time.Second)); len(kinds) != 0 {
 		t.Fatal("未到退避时刻就派发——退避等于没做")
 	}
-	kinds, targets := l.retryTargets(now.Add(2 * time.Minute))
+	kinds, targets, earliest := l.retryTargets(now.Add(2 * time.Minute))
 	if len(kinds) != 1 || kinds[0] != taskActivity {
 		t.Fatalf("到点后应派发 activity，实得 %v", kinds)
 	}
 	if strings.Join(targets[taskActivity], ",") != "u1" {
 		t.Fatalf("补跑范围应只含失败账号，实得 %v", targets[taskActivity])
+	}
+	if !earliest.Equal(l.chainAt(taskActivity)) {
+		t.Fatalf("最早计划时刻=%v，应等于链上时刻 %v（迟到宽限据此判定）", earliest, l.chainAt(taskActivity))
 	}
 }
 
@@ -89,13 +94,148 @@ func TestRetryBackoffIsPerAccount(t *testing.T) {
 	l.scheduleRetry(taskCheckin, "a", now)                    // a: +1m
 	l.scheduleRetry(taskCheckin, "b", now.Add(1*time.Minute)) // b: +2m → 09:03
 
-	_, at1m := l.retryTargets(now.Add(90 * time.Second))
+	_, at1m, _ := l.retryTargets(now.Add(90 * time.Second))
 	if len(at1m[taskCheckin]) != 1 || at1m[taskCheckin][0] != "a" {
 		t.Fatalf("a 到点后应只补跑 a，实得 %v", at1m[taskCheckin])
 	}
-	_, at3m := l.retryTargets(now.Add(3 * time.Minute))
+	_, at3m, _ := l.retryTargets(now.Add(3 * time.Minute))
 	if got := strings.Join(at3m[taskCheckin], ","); got != "a,b" {
 		t.Fatalf("两个账号都到点后应一并补跑，实得 %v", got)
+	}
+}
+
+// 补跑批次一取就走：链里不能留下过期计划。留下的话主循环每轮都判它到点，
+// 「终态跳过 / 账号已不在池」这两类结论永远消费不掉——10-08 21:00 实测
+// 14 分钟空转 156 轮，日志里全是同一行「当日派出已达上限」。
+func TestTakeRetriesDrainsDispatchedBatch(t *testing.T) {
+	withFastRetries(t)
+	l := newTaskLog()
+	now := time.Now()
+	l.scheduleRetry(taskCheckin, "u1", now)
+	l.scheduleRetry(taskCheckin, "u2", now)
+	l.scheduleRetry(taskTravel, "u3", now)
+	l.scheduleRetry(taskCheckin, "u4", now.Add(2*time.Minute)) // +2m → now+3m，未到点
+
+	kinds, targets, earliest := l.takeRetries(now.Add(90 * time.Second))
+	if len(kinds) != 2 {
+		t.Fatalf("两族都到点，实得 %v", kinds)
+	}
+	if got := strings.Join(targets[taskCheckin], ","); got != "u1,u2" {
+		t.Fatalf("checkin 补跑范围=%q，期望 u1,u2", got)
+	}
+	if got := strings.Join(targets[taskTravel], ","); got != "u3" {
+		t.Fatalf("travel 补跑范围=%q，期望 u3", got)
+	}
+	if want := now.Add(time.Minute); !earliest.Equal(want) {
+		t.Fatalf("最早计划时刻=%v，期望 %v（迟到宽限据此判定）", earliest, want)
+	}
+
+	// 主循环下一轮立刻又问一次：已派发的那批不能再次到点（没有任何结论落地也一样，
+	// 账号可能已被移出池子而根本遍历不到）。
+	if k2, t2, _ := l.takeRetries(now.Add(91 * time.Second)); len(k2) != 0 {
+		t.Fatalf("第二次取还有到点批次 %v %v ——主循环会无上限空转", k2, t2)
+	}
+	// 未到点的那条不受影响：drain 只吃掉这一批。
+	if got := l.nextRetryAt(); !got.Equal(now.Add(3 * time.Minute)) {
+		t.Fatalf("未到点的补跑被一起摘了：nextRetryAt=%v，期望 %v", got, now.Add(3*time.Minute))
+	}
+	if got := strings.Join(l.snapshotChains()[taskCheckin], ","); got != "u4" {
+		t.Fatalf("待补跑快照=%q，期望只剩 u4", got)
+	}
+	if got := len(l.snapshotChains()[taskTravel]); got != 0 {
+		t.Fatalf("travel 已全部派发，汇总行却还报 %d 条待补跑", got)
+	}
+}
+
+// 摘的是计划时刻，不是重试计数：补跑那一轮再失败要接着退避表往下走
+// （2→10→30 分钟），从第一档重来等于把「最多 3 次」变成「每次都还有 3 次」。
+func TestTakeRetriesKeepsTryCountForBackoff(t *testing.T) {
+	withFastRetries(t)
+	l := newTaskLog()
+	now := time.Now()
+	l.scheduleRetry(taskCheckin, "u1", now) // 第 1 次失败 → +1m
+	l.takeRetries(now.Add(2 * time.Minute))
+	if !l.scheduleRetry(taskCheckin, "u1", now.Add(2*time.Minute)) {
+		t.Fatal("第 2 次失败应还排得下")
+	}
+	if got := l.chainAt(taskCheckin).Sub(now.Add(2 * time.Minute)); got != 2*time.Minute {
+		t.Fatalf("第 2 次失败后延迟=%v，期望 2m（计数被 drain 清掉就会退回 1m）", got)
+	}
+}
+
+// 终态跳过必须消费掉待补跑：旅行 21 点撞上「当日派出已达上限」就是这一类。
+func TestFinishSkipDropsPendingRetry(t *testing.T) {
+	withFastRetries(t)
+	s := &Scheduler{}
+	s.ensureState()
+	now := time.Now()
+	s.tlog.scheduleRetry(taskTravel, "u1", now) // 领奖 500 → 排定补跑
+	s.tlog.beginRound("retry 21:02")
+	s.finish(taskTravel, "u1", resSkip, "当日派出已达上限")
+	s.tlog.endRound()
+
+	if !s.tlog.nextRetryAt().IsZero() {
+		t.Fatalf("终态跳过后仍留着待补跑时刻 %v ——主循环会 5s 一轮空转", s.tlog.nextRetryAt())
+	}
+	if got := s.tlog.snapshotChains()[taskTravel]; len(got) != 0 {
+		t.Fatalf("链里仍留着 %v", got)
+	}
+}
+
+// 端到端复现 10-08 21:00 那次空转：领奖 500 排定补跑，补跑时上游已翻成
+// idle + 当日上限（终态跳过），主循环必须只补一趟就安静下来。
+func TestRunDoesNotSpinOnTerminalSkipRetry(t *testing.T) {
+	fastTravel(t)
+	withFastRetries(t)
+	taskRetryDelays = []time.Duration{10 * time.Millisecond}
+	oldGrace, oldSlice := wakeupGraceDelay, slotWaitSlice
+	wakeupGraceDelay, slotWaitSlice = 0, 20*time.Millisecond
+	t.Cleanup(func() { wakeupGraceDelay, slotWaitSlice = oldGrace, oldSlice })
+
+	var statusCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/activity/growth/buddy/info":
+			w.Write([]byte(`{"code":0,"data":{"buddy":{"id":1}}}`))
+		case "/activity/growth/buddy/travel/status":
+			statusCalls.Add(1)
+			if statusCalls.Load() == 1 {
+				// 第一趟：到站可领奖（随后 claim 500 → 排定补跑）。
+				w.Write([]byte(`{"code":0,"data":{"state":"arrived","record_id":42}}`))
+				return
+			}
+			// 补跑那一趟：上游已翻回 idle 且当日到顶——终态跳过。
+			w.Write([]byte(`{"code":0,"data":{"state":"idle","daily_limit_reached":true}}`))
+		case "/activity/growth/buddy/travel/claim":
+			w.WriteHeader(500)
+			w.Write([]byte(`{"code":500,"msg":"grant credits failed"}`))
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer srv.Close()
+
+	// 补跑时刻（+10ms）远早于任何整点槽位，所以这 300ms 里 Run 只可能被重试链唤醒。
+	s, _ := newTravelScheduler(t, srv, "u1")
+
+	s.RunTravelNow() // 领奖 500 → 排定补跑
+	if s.tlog.nextRetryAt().IsZero() {
+		t.Fatal("领奖 500 后没排定补跑，用例前提不成立")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Run(ctx); close(done) }()
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	<-done
+
+	// 修复前这里会是几十次（每轮 5s 宽限被置 0，300ms 内狂刷）；修复后 = 首趟 + 补跑一趟。
+	if n := statusCalls.Load(); n > 3 {
+		t.Fatalf("travel/status 被打了 %d 次，期望 ≤3（终态跳过后主循环仍在空转补跑）", n)
+	}
+	if !s.tlog.nextRetryAt().IsZero() {
+		t.Fatalf("补跑后仍留着待补跑时刻 %v", s.tlog.nextRetryAt())
 	}
 }
 

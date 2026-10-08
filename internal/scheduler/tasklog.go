@@ -74,6 +74,10 @@ type round struct {
 //
 // 时刻按账号存，不按任务族存：同族里 A 在 09:00 失败、B 在 09:01 失败，若共用
 // 一个「最早到点」，B 会被拖去 09:02 补跑——它的 10 分钟退避等于没执行。
+//
+// tries 与 at 的存续期不同，别合并成一个 map：at 是「还欠一趟补跑」，被
+// takeRetries 取走就该清；tries 是「这个退避窗口内已试几次」，必须活到退避表
+// 走完，否则补跑那一轮再失败会从第一档 2 分钟重新退避——上限 3 次成了无限次。
 type retryChain struct {
 	tries map[string]int
 	at    map[string]time.Time
@@ -168,19 +172,34 @@ func earliestLocked(ch *retryChain) time.Time {
 	return earliest
 }
 
-// snapshotChains 当前所有待补跑链（汇总行统计条数用）。
+// snapshotChains 当前仍欠一趟补跑的链（汇总行统计条数用）。
+// 只数还留着计划时刻的：已被取走正在补跑的账号不算「待补跑」，否则汇总行和
+// 面板会把「这一轮正在跑」报成「还欠着一条」，正好掩盖空转。
 func (l *taskLog) snapshotChains() map[taskKind][]string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	out := make(map[taskKind][]string, len(l.chains))
 	for k, ch := range l.chains {
-		uids := make([]string, 0, len(ch.tries))
-		for uid := range ch.tries {
-			uids = append(uids, uid)
+		uids := pendingUIDs(ch)
+		if len(uids) == 0 {
+			continue
 		}
 		out[k] = uids
 	}
 	return out
+}
+
+// pendingUIDs 链里仍有计划时刻的账号（升序）。
+func pendingUIDs(ch *retryChain) []string {
+	uids := make([]string, 0, len(ch.at))
+	for uid, at := range ch.at {
+		if at.IsZero() {
+			continue
+		}
+		uids = append(uids, uid)
+	}
+	sort.Strings(uids)
+	return uids
 }
 
 // resetChain 新一轮槽位开跑：该类任务的重试链清零（次数按轮计，不按日累积，
@@ -220,11 +239,14 @@ func (l *taskLog) scheduleRetry(k taskKind, uid string, now time.Time) bool {
 	return true
 }
 
-// retryTargets 到点的重试任务 + 各自待试账号；未到点的账号留在链里等下一次。
-func (l *taskLog) retryTargets(now time.Time) ([]taskKind, map[taskKind][]string) {
+// retryTargets 到点的重试任务 + 各自待试账号 + 这批里最早的计划时刻（只读，不摘链）。
+// 最早时刻是给 awaitWakeupGrace 判「这轮补跑迟到了多久」用的：睡过点醒来时
+// 网络栈还没起来，零宽限派发等于把唯一一次补跑打在注定失败的窗口里。
+func (l *taskLog) retryTargets(now time.Time) ([]taskKind, map[taskKind][]string, time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var kinds []taskKind
+	var earliest time.Time
 	out := map[taskKind][]string{}
 	for k, ch := range l.chains {
 		var uids []string
@@ -233,6 +255,9 @@ func (l *taskLog) retryTargets(now time.Time) ([]taskKind, map[taskKind][]string
 				continue
 			}
 			uids = append(uids, uid)
+			if earliest.IsZero() || at.Before(earliest) {
+				earliest = at
+			}
 		}
 		if len(uids) == 0 {
 			continue
@@ -242,7 +267,34 @@ func (l *taskLog) retryTargets(now time.Time) ([]taskKind, map[taskKind][]string
 		kinds = append(kinds, k)
 	}
 	sort.Slice(kinds, func(i, j int) bool { return kinds[i] < kinds[j] })
-	return kinds, out
+	return kinds, out, earliest
+}
+
+// takeRetries 取出到点的补跑批次，并**当场摘掉这批的计划时刻**（drain 语义）。
+//
+// 为什么取的时候就得摘：补跑那一轮的结论可能是「今天到此为止」——旅行 21 点的
+// 「当日派出已达上限」是终态跳过；账号也可能已不在池里，压根遍历不到。这些路径
+// 既不会 scheduleRetry 也不会 dropUID，计划时刻就永远留在过去，主循环每轮都判它
+// 到点：宽限 + 派发 + 一条跳过日志，无上限地刷（10-08 21:00 实测 14 分钟 156 轮、
+// 日志涨到 53 KB，而上游一次也没多打成）。摘掉后本轮若再次瞬时失败，
+// finish(resFail) 按 tries 里留着的次数排下一档退避，退避语义不变。
+//
+// 代价：派发途中优雅停机会丢掉没跑到的那几个账号的补跑机会——它们交给下一个
+// 排程槽位。空转轰炸与「停机时少补一趟」之间，前者才是真损失。
+func (l *taskLog) takeRetries(now time.Time) ([]taskKind, map[taskKind][]string, time.Time) {
+	kinds, targets, earliest := l.retryTargets(now)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for k, uids := range targets {
+		ch := l.chains[k]
+		if ch == nil {
+			continue
+		}
+		for _, uid := range uids {
+			delete(ch.at, uid) // 只摘时刻，tries 留着给退避表续档
+		}
+	}
+	return kinds, targets, earliest
 }
 
 // nextRetryAt 链里最早的待补跑时刻（零值表示无待试）。
@@ -305,15 +357,16 @@ func (l *taskLog) view() ReportView {
 	out := ReportView{Rounds: make([]round, 0, len(l.rounds))}
 	out.Rounds = append(out.Rounds, l.rounds...)
 	for k, ch := range l.chains {
-		uids := make([]string, 0, len(ch.tries))
+		uids := pendingUIDs(ch)
+		if len(uids) == 0 {
+			continue
+		}
 		tries := 0
-		for uid, n := range ch.tries {
-			uids = append(uids, uid)
-			if n > tries {
+		for _, uid := range uids {
+			if n := ch.tries[uid]; n > tries {
 				tries = n
 			}
 		}
-		sort.Strings(uids)
 		out.Pending = append(out.Pending, PendingRetry{
 			Task: taskName(k), UIDs: uids, Tries: tries,
 			NextAt: earliestLocked(ch).Format("2006-01-02 15:04:05"),

@@ -408,7 +408,10 @@ func waitSlot(ctx context.Context, next time.Time, rearm <-chan struct{}) bool {
 func (s *Scheduler) Run(ctx context.Context) {
 	s.ensureState()
 	for {
-		if kinds, targets, dueAt := s.dueRetries(time.Now()); len(kinds) > 0 {
+		// 取补跑批次的同时就把计划摘掉（takeRetries 的 drain 语义）：这一轮无论
+		// 给出什么结论——包括「今天到此为止」的终态跳过、或账号已不在池里根本
+		// 遍历不到——都不会留下一个永远在过去的计划时刻让主循环空转。
+		if kinds, targets, dueAt := s.tlog.takeRetries(time.Now()); len(kinds) > 0 {
 			// 补跑也可能是「睡过槽位后刚醒」，同一套网络宽限（准点 due 不额外等）。
 			if !awaitWakeupGrace(ctx, dueAt) {
 				return
@@ -418,7 +421,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 		}
 		next, kinds := s.nextWake(time.Now())
 		if rAt := s.tlog.nextRetryAt(); !rAt.IsZero() && (next.IsZero() || rAt.Before(next)) {
-			// 下一次待补跑比任何槽位都早：睡到它，回循环顶由 dueRetries 分支派发。
+			// 下一次待补跑比任何槽位都早：睡到它，回循环顶由 takeRetries 分支派发。
 			if !waitSlot(ctx, rAt, s.rearmSchedule) {
 				if ctx.Err() != nil {
 					return
@@ -452,21 +455,6 @@ func (s *Scheduler) Run(ctx context.Context) {
 		}
 		s.dispatchBatch(ctx, kinds, nil, "slot "+next.Format("15:04"), true)
 	}
-}
-
-// dueRetries 取出已到点的重试链（kind → 待试账号），并返回这批里最早的计划时刻。
-func (s *Scheduler) dueRetries(now time.Time) ([]taskKind, map[taskKind][]string, time.Time) {
-	kinds, targets := s.tlog.retryTargets(now)
-	if len(kinds) == 0 {
-		return nil, nil, time.Time{}
-	}
-	earliest := now
-	for _, k := range kinds {
-		if at := s.tlog.chainAt(k); !at.IsZero() && at.Before(earliest) {
-			earliest = at
-		}
-	}
-	return kinds, targets, earliest
 }
 
 // dispatchBatch 派发一批任务（同一时刻的多类，或一轮重试补跑），等全部完成返回。
@@ -626,10 +614,11 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 
 // finish 单账号单任务的结论落地：记台账、按需记「今日已成」、按需排重试。
 //
-// 三条规矩都来自失败语义，不是装饰：
+// 四条规矩都来自失败语义，不是装饰：
 //   - 只有 resDone 才写日状态——失败写了就等于把失败当成功吞掉（同 extstore.markCheckedIn）；
 //   - resDead 不进重试链：登录态已死，重试只是对废凭据轰炸，该由重登（自动/人工）处理；
-//   - resSkip 既不记也不重试（停用 / global realm / 无凭据属正常态，不进台账免得淹没有效行）。
+//   - resSkip 既不记也不重试（停用 / global realm / 无凭据属正常态，不进台账免得淹没有效行）；
+//   - 四种结论都要把该账号从链里摘干净：链里留着一条过期计划 = 主循环立刻再派一趟。
 func (s *Scheduler) finish(k taskKind, uid string, res accountResult, msg string) {
 	s.ensureState()
 	switch res {
@@ -651,6 +640,11 @@ func (s *Scheduler) finish(k taskKind, uid string, res accountResult, msg string
 			log.Printf("task %s/%s 失败(%s)，重试次数用尽，留给下一个排程槽位", taskName(k), uid, msg)
 		}
 	case resSkip:
+		// 跳过也是终态结论（当日已达上限 / 在途 / 停用 / 无凭据 / 窗口外）：
+		// 再补跑一趟只会得到同一个跳过。之前这里直接 return，链里那条计划没人摘
+		// ——10-08 21:00 旅行领奖 500 排了补跑，补跑撞上「当日派出已达上限」，
+		// 于是 5s 一轮空转 156 次，日志里全是同一行跳过。
+		s.tlog.dropUID(k, uid)
 		if msg != "" {
 			log.Printf("task %s/%s 跳过：%s", taskName(k), uid, msg)
 		}
