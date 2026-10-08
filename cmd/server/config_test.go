@@ -719,3 +719,209 @@ func TestLoadConfigPathIsDirectory(t *testing.T) {
 		t.Errorf("error should suggest the fix (cp config.example.json): %v", err)
 	}
 }
+
+// 示例占位密钥必须换掉：仓库和镜像都公开，"test_key" 等于一把人人可用的网关口令。
+// 三个分支都要钉住——是占位符才换（真密钥一个字都不许动）、换后要写回文件、
+// 写不回去要报错（因为此刻对外服务的仍是公开密钥）。
+func TestRotateExampleKeyReplacesPlaceholder(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	// 含一个结构体没有的自定义键：写回不能把它洗掉（与面板保存同一条规矩）。
+	raw := `{"listen":":7863","api_key":"test_key","my_unknown_key":42}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := rotateExampleKey(c, path)
+	if err != nil {
+		t.Fatalf("更换失败: %v", err)
+	}
+	if msg == "" {
+		t.Fatal("换了密钥却不告诉用户，密钥就找不到第二遍")
+	}
+	if !strings.HasPrefix(c.APIKey, "sk-") || c.APIKey == exampleAPIKey {
+		t.Fatalf("api_key = %q，期望随机 sk- 密钥", c.APIKey)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if json.Unmarshal(after, &doc) != nil {
+		t.Fatalf("写回的配置不是合法 JSON: %s", after)
+	}
+	if got := doc["api_key"]; got != c.APIKey {
+		t.Fatalf("文件里的 api_key=%v，与内存中的 %q 不一致（重启即退回公开密钥）", got, c.APIKey)
+	}
+	if doc["my_unknown_key"] != float64(42) {
+		t.Fatalf("用户手写键被洗掉了: %s", after)
+	}
+	// 第二次调用必须彻底不动（幂等：只有占位符才触发）。
+	msg2, err := rotateExampleKey(c, path)
+	if err != nil || msg2 != "" {
+		t.Fatalf("非占位符却动了: msg=%q err=%v", msg2, err)
+	}
+}
+
+// 设过真密钥的部署绝不能被这段逻辑碰到。
+func TestRotateExampleKeyLeavesRealKeyAlone(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	raw := `{"listen":":7863","api_key":"sk-user-chosen"}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg, err := rotateExampleKey(c, path); err != nil || msg != "" {
+		t.Fatalf("不该触发: msg=%q err=%v", msg, err)
+	}
+	if c.APIKey != "sk-user-chosen" {
+		t.Fatalf("api_key 被动了: %q", c.APIKey)
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Fatal("配置文件被改写了")
+	}
+}
+
+// 写了 api_keys（多 Key 体系）时，主 api_key 位置留着 test_key 是残缺配置，
+// 不是「用示例值裸奔」——此时改文件会把用户的多 Key 布局搅乱，只报错不动手。
+func TestRotateExampleKeySkippedWithMultiKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := `{"api_key":"test_key","api_keys":[{"key":"sk-real","platforms":["zai"]}]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.APIKeys) == 0 {
+		t.Skip("该配置形态下多 Key 没解析出来，断言前提不成立")
+	}
+	if msg, err := rotateExampleKey(c, path); err != nil || msg != "" {
+		t.Fatalf("配了多 Key 就不该自动改主密钥: msg=%q err=%v", msg, err)
+	}
+}
+
+func TestListenIsPublic(t *testing.T) {
+	cases := []struct {
+		listen string
+		want   bool
+	}{
+		{":7863", true},
+		{"0.0.0.0:7863", true},
+		{"[::]:7863", true},
+		{"192.168.1.20:7863", true},
+		{"127.0.0.1:7863", false},
+		{"[::1]:7863", false},
+		{"localhost:7863", false},
+		{"127.0.0.53:53", false},
+	}
+	for _, tc := range cases {
+		if got := listenIsPublic(tc.listen); got != tc.want {
+			t.Errorf("listenIsPublic(%q)=%v want %v", tc.listen, got, tc.want)
+		}
+	}
+}
+
+// 空 api_key 是有意支持的用法（本机/私网），只有「不鉴权 + 监听对外」才值得
+// 开机就喊；设了多 Key 也算有鉴权。
+func TestAuthStartupWarning(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{"空密钥+对外", Config{Listen: ":7863"}, true},
+		{"空密钥+本机", Config{Listen: "127.0.0.1:7863"}, false},
+		{"有密钥+对外", Config{Listen: ":7863", APIKey: "sk-x"}, false},
+		{"空主密钥但有多 Key", Config{Listen: ":7863", APIKeys: []APIKeyEntry{{Key: "sk-x"}}}, false},
+	}
+	for _, tc := range cases {
+		got := authStartupWarning(&tc.cfg)
+		if (got != "") != tc.want {
+			t.Errorf("%s: warning=%q want=%v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// 时区换算必须能反推：主机本地钟点 + 漂移 == 配置的北京时间。
+// 负偏移（美东）会跨到前一天，取模折回 0–23 不能写错符号。
+func TestHostHourForBeijing(t *testing.T) {
+	cases := []struct {
+		zone   string
+		offset int
+		want   int
+	}{
+		{"UTC", 0, 1},
+		{"CST", 8 * 3600, 9},
+		{"JST", 9 * 3600, 10},
+		{"EST", -5 * 3600, 20},
+		{"UTC-11", -11 * 3600, 14},
+	}
+	for _, tc := range cases {
+		if got := hostHourForBeijing(9, tc.offset); got != tc.want {
+			t.Errorf("%s: hostHour=%d want %d", tc.zone, got, tc.want)
+		}
+	}
+}
+
+// 只有「小时槽排程开着」且主机不在 UTC+8 时才出话：北京时间下两条时间线重合，
+// 排程全关时警告没有受众，余额刷新是间隔语义、跟时区无关。
+func TestTimezoneWarningFor(t *testing.T) {
+	allHourSlotsOff := func(c *Config) {
+		t.Helper()
+		c.Schedule.CheckinEnabled = false
+		c.Schedule.TravelEnabled = false
+		c.Schedule.ActivityEnabled = false
+		c.Schedule.KeepaliveEnabled = false
+		c.Schedule.BlackcatEnabled = false
+		c.Schedule.GrowthEnabled = false
+		c.Schedule.ExtCheckinEnabled = false
+	}
+
+	c := Default() // Default() 各排程缺省 true
+	if w := timezoneWarningFor(c, "CST", 8*3600); w != "" {
+		t.Errorf("主机就是北京时间，不该出话: %q", w)
+	}
+	w := timezoneWarningFor(c, "UTC", 0)
+	if w == "" {
+		t.Fatal("UTC 宿主 + 签到开着，该出话")
+	}
+	for _, want := range []string{"TZ=Asia/Shanghai", "配 1 点", "晚 +8 小时"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("警告缺 %q: %s", want, w)
+		}
+	}
+
+	off := Default()
+	allHourSlotsOff(off)
+	if w := timezoneWarningFor(off, "UTC", 0); w != "" {
+		t.Errorf("排程全关还警告，用户会以为关不掉: %q", w)
+	}
+
+	// 只开余额刷新（间隔语义）不该被算进小时槽排程。
+	interval := Default()
+	allHourSlotsOff(interval)
+	interval.Schedule.BalanceRefreshEnabled = true
+	if w := timezoneWarningFor(interval, "UTC", 0); w != "" {
+		t.Errorf("余额刷新与时区无关，不该出话: %q", w)
+	}
+}
+
+// 开机那条必须真的读主机钟面，而不是只测内核函数。
+func TestTimezoneStartupWarningFollowsHostZone(t *testing.T) {
+	zone, offset := time.Now().Zone()
+	c := Default()
+	if got, want := timezoneStartupWarning(c), timezoneWarningFor(c, zone, offset); got != want {
+		t.Errorf("startup=%q kernel=%q", got, want)
+	}
+}

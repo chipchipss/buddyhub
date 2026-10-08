@@ -415,11 +415,10 @@ func ParseConfig(raw []byte) (*Config, error) {
 // 安全默认优于示例占位符（listen 绑定 0.0.0.0，空 key 会把网关裸暴露给局域网）。
 // 返回生成的 key 供启动日志透出。已存在时经 O_EXCL 原子拒绝，绝不改写用户配置。
 func WriteDefault(path string) (string, error) {
-	raw := make([]byte, 18)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("gen api_key: %w", err)
+	key, err := newAPIKey()
+	if err != nil {
+		return "", err
 	}
-	key := "sk-" + base64.RawURLEncoding.EncodeToString(raw)
 	c := Default()
 	c.APIKey = key
 	_ = c.normalize() // Default() 全合法，normalize 仅补齐 header/idle 超时的展示值
@@ -442,6 +441,127 @@ func WriteDefault(path string) (string, error) {
 		return "", fmt.Errorf("write config: %w", err)
 	}
 	return key, nil
+}
+
+// exampleAPIKey 是 config.example.json（以及镜像内置的那份默认配置）里的占位符
+// 字面值。仓库和镜像都是公开的，凡是读到它们的人都知道这把密钥——等于没鉴权。
+const exampleAPIKey = "test_key"
+
+// newAPIKey 生成一把 sk- 随机密钥（首启自动生成与示例占位符替换共用同一形状）。
+func newAPIKey() (string, error) {
+	raw := make([]byte, 18)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("gen api_key: %w", err)
+	}
+	return "sk-" + base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// rotateExampleKey 首启时把仍是示例占位符的 api_key 就地换成随机密钥并写回配置
+// 文件。返回要打进启动日志的一句话；非占位符时原样不动、返回空串。
+//
+// 触发条件收得很死（字面值相等 + 没配多 Key），真正设过密钥的部署一次都不会
+// 走到这里。为什么要改文件而不是只在内存里换：容器里换了、重启又回到 example，
+// 那把公开密钥就一直有效；写回配置文件（配置在卷上则跨重启稳定）才算数。
+// 写回失败不致命——照旧启动，但吼出来，因为此刻对外服务的仍是一把公开可预测
+// 的密钥。未知键按 saveConfig 的同一条规矩保留（map 往返，不洗用户手写键）。
+func rotateExampleKey(c *Config, path string) (string, error) {
+	if c.APIKey != exampleAPIKey || len(c.APIKeys) > 0 {
+		return "", nil
+	}
+	key, err := newAPIKey()
+	if err != nil {
+		return "", err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("api_key 仍是公开仓库里的示例占位符 %q，而读配置失败（%v）：对外服务前请手工设置密钥", exampleAPIKey, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return "", fmt.Errorf("api_key 仍是公开仓库里的示例占位符 %q，而配置不是 JSON 对象（%v）：请手工设置密钥", exampleAPIKey, err)
+	}
+	doc["api_key"] = key
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := writeConfigAtomic(path, out); err != nil {
+		return "", fmt.Errorf("api_key 仍是公开仓库里的示例占位符 %q，就地更换失败（%v）：对外服务前请手工设置密钥", exampleAPIKey, err)
+	}
+	c.APIKey = key
+	return fmt.Sprintf("api_key 原是示例占位符 %q（公开仓库里看得到），已换成随机密钥 %s 并写回 %s", exampleAPIKey, key, path), nil
+}
+
+// listenIsPublic 判断监听地址会不会收到本机以外的连接。":7863"、
+// "0.0.0.0:7863"、"[::]:7863" 是；"127.0.0.1:7863"、"[::1]:7863"、
+// "localhost:7863" 不是。绑定具体网卡地址（如 192.168.x.x）也算对外。
+func listenIsPublic(listen string) bool {
+	host := listen
+	if i := strings.LastIndexByte(listen, ':'); i >= 0 {
+		host = listen[:i]
+	}
+	host = strings.Trim(host, "[]")
+	switch {
+	case host == "" || host == "0.0.0.0" || host == "::":
+		return true
+	case host == "127.0.0.1" || host == "::1" || strings.EqualFold(host, "localhost"):
+		return false
+	}
+	return !strings.HasPrefix(host, "127.")
+}
+
+// authStartupWarning 鉴权体检：只在真的危险时出话，正常配置返回空串。
+// 空 api_key 本身是有意支持的用法（config.go:25「空 = 不鉴权」，本机/私网），
+// 所以只有「不鉴权 + 监听对外」这一种组合值得开机就喊。
+func authStartupWarning(c *Config) string {
+	if c.APIKey == "" && len(c.APIKeys) == 0 && listenIsPublic(c.Listen) {
+		return fmt.Sprintf("api_key 为空且监听 %s：任何能连到该端口的人都能用池里全部账号。请设置 api_key，或改监听 127.0.0.1:7863", c.Listen)
+	}
+	return ""
+}
+
+// cstOffsetSeconds 是排程「日界」使用的固定时区偏移（scheduler/travel.go 的
+// time.FixedZone("CST", 8*3600)，server/degrade.go、upstream/client.go 同源）。
+const cstOffsetSeconds = 8 * 60 * 60
+
+// hourSlotSchedulesEnabled 报告是否有「按整点小时槽」触发的排程开着。
+// 余额刷新不算——它是间隔（every N）语义，跟主机时区无关。
+func hourSlotSchedulesEnabled(c *Config) bool {
+	s := c.Schedule
+	return s.CheckinEnabled || s.TravelEnabled || s.ActivityEnabled ||
+		s.KeepaliveEnabled || s.BlackcatEnabled || s.GrowthEnabled || s.ExtCheckinEnabled
+}
+
+// hostHourForBeijing 换算「想在北京时间 beijingHour 点触发，主机本地该配几点」。
+// 主机偏移 offset 秒 → 本地 h 点对应北京时间 h + (8 - offset/3600)，反解并折回 0–23。
+func hostHourForBeijing(beijingHour, offset int) int {
+	drift := (cstOffsetSeconds - offset) / 3600
+	return ((beijingHour-drift)%24 + 24) % 24
+}
+
+// timezoneStartupWarning 主机时区与排程日界不一致时出话，一致时返回空串。
+//
+// 为什么值得开机就喊：小时槽用 now.Location()（主机本地时区）算（scheduler.nextFire），
+// 而「今天是否已跑过」的日界用固定 UTC+8。两条时间线只在主机时区为北京时间时重合。
+// Windows 开发机恰好是 +8，本地永远看不出来；换到 UTC 的 Linux 宿主上，配置里的「9 点」
+// 会在北京 17:00 触发，用户只看到「签到不按我设的时间跑」，想不到是时区。
+func timezoneStartupWarning(c *Config) string {
+	zone, offset := time.Now().Zone()
+	return timezoneWarningFor(c, zone, offset)
+}
+
+// timezoneWarningFor 是上面那条的可测内核：主机钟面属于外部输入，被测的是换算与出话条件。
+func timezoneWarningFor(c *Config, zone string, offset int) string {
+	if offset == cstOffsetSeconds || !hourSlotSchedulesEnabled(c) {
+		return ""
+	}
+	drift := (cstOffsetSeconds - offset) / 3600
+	return fmt.Sprintf(
+		"主机时区是 %s（UTC%+d）而排程的「天」按北京时间（UTC+8）算：schedule.*_hours 的整点会按主机本地钟点触发，"+
+			"比配置字面的北京时间晚 %+d 小时（想在北京 09:00 跑，本机要配 %d 点）。二选一——"+
+			"① 设环境变量 TZ=Asia/Shanghai 后重启（容器 -e TZ=…，systemd Environment=TZ=…，需系统装 tzdata）；"+
+			"② 保持主机时区、按上式平移各 _hours。排程全部关闭时本条不适用。",
+		zone, offset/3600, drift, hostHourForBeijing(9, offset))
 }
 
 func applyEnv(c *Config) {

@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -118,6 +119,17 @@ func main() {
 		}
 	}
 
+	// 鉴权体检放在装配之前：下面 livecfg 快照、各 handler 都从这里取 api_key，
+	// 示例占位符必须在这之前就被换掉，否则公开密钥会在内存里活一整轮。
+	if msg, err := rotateExampleKey(cfg, *cfgPath); err != nil {
+		log.Printf("警告：%v", err)
+	} else if msg != "" {
+		log.Printf("%s", msg)
+	}
+	if w := authStartupWarning(cfg); w != "" {
+		log.Printf("警告：%s", w)
+	}
+
 	auths, err := auth.LoadDir(cfg.AuthDir)
 	if err != nil {
 		log.Fatalf("load auths: %v", err)
@@ -206,6 +218,9 @@ func main() {
 	// 数据目录与 state.json 同风格（Docker volume 持久化路径）。首次缺失/损坏自动
 	// 回落仓库内嵌种子；models.dev 按需拉取成功后原子写回。
 	upstream.SetModelCatalogPath(stateSibling(cfg.StateFile, "model.json"))
+	// Loomy 单号凭据（loomy-session.json）同一条规则：面板 Loomy 页和 loomy 桥
+	// 都读这个文件，写死 ./data 时换 WorkingDirectory 就会读到空目录。
+	upstream.SetLoomySessionDir(filepath.Dir(cfg.StateFile))
 
 	sch := scheduler.New(scheduler.Config{
 		Pool:           p,
@@ -263,6 +278,9 @@ func main() {
 		log.Printf("余额后台刷新已禁用（schedule.balance_refresh_enabled=false）")
 	case cfg.BalanceRefreshInterval > 0:
 		log.Printf("余额后台刷新：每 %s（签到时点照常额外刷新）", cfg.BalanceRefreshInterval)
+	}
+	if w := timezoneStartupWarning(cfg); w != "" {
+		log.Printf("警告：%s", w)
 	}
 
 	// 管理面板日志镜像：标准 log（stderr）与 chat 表格日志（stdout）双路复制进
@@ -420,6 +438,15 @@ func main() {
 		balOut: pn.ExtManagerCachedBalance,
 	})
 
+	// 端口先 bind 再生效任何后台任务：旧顺序是「打印 listening」→ ListenAndServe，
+	// 端口被占时日志里两行紧挨着自相矛盾（「正在监听 :7863」下一行就是 bind 失败），
+	// 而新人第一次跑最常见的失败正是本机已有实例。提前 bind 还能让调度器根本不启动，
+	// 避免半个进程在后台签到 / 刷余额。
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		log.Fatalf("监听 %s 失败：%v（端口被占：改 config.json 的 listen，或 WB2A_LISTEN，或先停掉占用该端口的进程）", cfg.Listen, err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
@@ -447,7 +474,7 @@ func main() {
 	}()
 
 	log.Printf("buddyhub listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}
 	log.Printf("bye")
@@ -494,6 +521,42 @@ func panelListenPath(listen string) string {
 	return listen
 }
 
+// writeConfigAtomic 把整份配置写回 path。面板保存与首启替换示例密钥共用这一条
+// 路径，所以两种写法都得支持：
+//   - 常规文件：tmp + rename 原子替换；
+//   - 单文件 Docker bind mount：Linux 不允许 rename 覆盖挂载目标（EBUSY），
+//     改为原地截断写。此时若写失败会**保留 tmp**（挂载文件已被 O_TRUNC 破坏，
+//     tmp 里是完整新内容，可手工恢复），成功才清理。
+func writeConfigAtomic(path string, out []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		if !errors.Is(err, syscall.EBUSY) {
+			return fmt.Errorf("replace config: %w", err)
+		}
+		f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+		if openErr != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("replace config (bind mount fallback): %w", openErr)
+		}
+		_, writeErr := f.Write(out)
+		if writeErr == nil {
+			writeErr = f.Sync()
+		}
+		closeErr := f.Close()
+		if writeErr != nil {
+			return fmt.Errorf("replace config (bind mount fallback, 完整新内容保留在 %s): %w", tmp, writeErr)
+		}
+		_ = os.Remove(tmp)
+		if closeErr != nil {
+			return fmt.Errorf("replace config (bind mount fallback): %w", closeErr)
+		}
+	}
+	return nil
+}
+
 // saveConfig 面板保存配置：校验 → 落盘 → 热应用 → 返回需重启的字段列表。
 //
 // 热生效范围（设计取舍）：
@@ -533,37 +596,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil {
-		return nil, fmt.Errorf("write config: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		// A single-file Docker bind mount cannot be renamed over its mount
-		// target (Linux returns EBUSY / "device or resource busy"). Keep the
-		// atomic path for regular files, but update the mounted file in place
-		// for this specific deployment shape.
-		if !errors.Is(err, syscall.EBUSY) {
-			return nil, fmt.Errorf("replace config: %w", err)
-		}
-		f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
-		if openErr != nil {
-			_ = os.Remove(tmp)
-			return nil, fmt.Errorf("replace config (bind mount fallback): %w", openErr)
-		}
-		_, writeErr := f.Write(out)
-		if writeErr == nil {
-			writeErr = f.Sync()
-		}
-		closeErr := f.Close()
-		// 写失败时保留 tmp（挂载文件已被 O_TRUNC 破坏，tmp 里是完整新内容，
-		// 可手工恢复）；写成功才清理。
-		if writeErr != nil {
-			return nil, fmt.Errorf("replace config (bind mount fallback, 完整新内容保留在 %s): %w", tmp, writeErr)
-		}
-		_ = os.Remove(tmp)
-		if closeErr != nil {
-			return nil, fmt.Errorf("replace config (bind mount fallback): %w", closeErr)
-		}
+	if err := writeConfigAtomic(path, out); err != nil {
+		return nil, err
 	}
 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
