@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -306,36 +305,9 @@ type CheckinResult struct {
 	Provider string  `json:"provider"`
 	ID       string  `json:"id"`
 	Label    string  `json:"label"`
-	Kind     string  `json:"kind"` // claimed | already-claimed | inactive | failed
+	Kind     string  `json:"kind"` // claimed | already-claimed | inactive | relogin | failed
 	Credit   float64 `json:"credit"`
 	Message  string  `json:"message"`
-}
-
-// refreshIfNeeded 到期平台自动续期并回写凭据（当前仅 raccoon；qoder/lobsterai
-// 续期协议变数大，失败时结果里带提示让用户重新登录）。
-func (m *Manager) refreshIfNeeded(ctx context.Context, a *ExtAccount) {
-	if a.Provider != PRaccoon {
-		return
-	}
-	var cred raccoon.Credential
-	if json.Unmarshal(a.Cred, &cred) != nil {
-		return
-	}
-	if !cred.IsExpired() {
-		return
-	}
-	cli := raccoon.New()
-	fresh, err := cli.Refresh(ctx, &cred)
-	if err != nil {
-		log.Printf("extstore: raccoon %s 续期失败: %v", a.ID, err)
-		return
-	}
-	raw, err := json.Marshal(fresh)
-	if err != nil {
-		return
-	}
-	m.replaceCred(a.Provider, a.ID, raw)
-	a.Cred = raw
 }
 
 // CheckinOne 对单个账号执行平台签到/领取。
@@ -346,7 +318,14 @@ func (m *Manager) CheckinOne(ctx context.Context, a *ExtAccount) *CheckinResult 
 		res.Message = "已停用"
 		return res
 	}
-	m.refreshIfNeeded(ctx, a)
+	// 动手前先续期（能力表见 renew.go）。判死标准是「救不回来」而不是「这一次没成」：
+	// renewManual 直接返回 relogin，上游一次都不打——重试链收到 ResultDead 也不会
+	// 补跑，账号在台账里明写「需人工重新授权」。
+	if st, reason := m.renew(ctx, a); st == renewManual {
+		res.Kind = "relogin"
+		res.Message = "需人工重新授权：" + reason
+		return res
+	}
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 
@@ -459,6 +438,14 @@ func (m *Manager) CheckinOne(ctx context.Context, a *ExtAccount) *CheckinResult 
 		r := traework.CheckinDaily(ctx, &cred)
 		res.Kind, res.Credit, res.Message = r.Kind, r.Credit, r.Message
 	default:
+		// 走到这里说明这个平台没有签到分支。它若本来就没签到体系（ima 就是
+		// 这一类），那是「无需签到」不是「签到失败」——报 failed 会把它推进
+		// 重试链，每轮对同一个根本没签到的平台白打三次上游。
+		if !checkinCapable[a.Provider] {
+			res.Kind, res.Message = "inactive", a.Provider+" 无签到体系（网关直连通道）"
+			return res
+		}
+		// 有签到能力却没有分支 = 代码漏配对，这才是真失败。
 		res.Kind, res.Message = "failed", "未知平台: "+a.Provider
 	}
 	// 只有真跑过（成功 / 今天已领）才记日期——失败留着待办才有重试机会。

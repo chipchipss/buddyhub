@@ -226,6 +226,8 @@ func main() {
 		GrowthDisabled:     !cfg.Schedule.GrowthEnabled,
 		ExtCheckinDisabled: !cfg.Schedule.ExtCheckinEnabled,
 		ExtCheckinHours:    cfg.Schedule.ExtCheckinHours,
+		// 日级任务状态落盘（state.json 兄弟文件）：重启不再把当天任务整批重跑。
+		TaskStateFile: stateSibling(cfg.StateFile, "task-state.json"),
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -370,9 +372,8 @@ func main() {
 	// 即执行，串行遍历有界耗时）。
 	// 外部平台余额：与腾讯池共用同一个 5 分钟 ticker（见 RunBalanceRefreshNow）
 	sch.SetBalanceExtHook(pn.RunExtBalanceRefresh)
-	sch.SetExtHook(func() {
-		go pn.RunExtCheckinAll()
-		go pn.RunLoomyDailyCheckin()
+	sch.SetExtHook(func(targets []string) []scheduler.Outcome {
+		return append(pn.RunExtCheckinAll(targets), pn.RunLoomyDailyCheckin()...)
 	})
 	// Loomy 无人值守续期（每 6h；剩余 <3 天且有存密密码时静默重登并双写
 	// 外部池 + loomy-session.json；无密码账号跳过等手动重登）。

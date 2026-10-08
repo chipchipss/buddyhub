@@ -12,11 +12,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/extprovider/loomy"
 	"github.com/chipchipss/buddyhub/internal/extstore"
+	"github.com/chipchipss/buddyhub/internal/scheduler"
 	"github.com/chipchipss/buddyhub/internal/upstream"
 )
 
@@ -113,10 +115,20 @@ func (p *Panel) extAccountToggle(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "disabled": body.Disabled})
 }
 
-// RunExtCheckinAll 调度器 ExtHook 入口：遍历全部外部账号签到（同步执行，
+// RunExtCheckinAll 调度器 ExtHook 入口：遍历外部账号签到（同步执行，
 // 账号数有界 + 串行 45s 超时/个，最坏情况分钟级；调度器在独立 goroutine 调用）。
-func (p *Panel) RunExtCheckinAll() {
-	results := p.extManager().CheckinAll(context.Background())
+//
+// targets 非 nil 时只跑列出的 "provider/id"——重试补跑靠它，否则补跑会把
+// 今天已经签成的号再打一遍上游。返回值进本轮台账，失败项由调度器排退避重试。
+func (p *Panel) RunExtCheckinAll(targets []string) []scheduler.Outcome {
+	var results []*extstore.CheckinResult
+	for _, a := range p.extManager().List() {
+		key := a.Provider + "/" + a.ID
+		if len(targets) > 0 && !slices.Contains(targets, key) {
+			continue
+		}
+		results = append(results, p.extManager().CheckinOne(context.Background(), a))
+	}
 	claimed, failed := 0, 0
 	for _, res := range results {
 		log.Printf("ext-checkin %s/%s → %s %s", res.Provider, res.ID, res.Kind, res.Message)
@@ -128,28 +140,34 @@ func (p *Panel) RunExtCheckinAll() {
 		}
 	}
 	log.Printf("ext-checkin 完成: 成功 %d · 失败 %d · 共 %d 账号", claimed, failed, len(results))
+	return extOutcomes(results)
 }
 
 // RunLoomyDailyCheckin 调度器 ExtHook 入口：触发 Loomy 每日赠送额度（幂等）。
 // 与面板 loomyCheckin 同管线：FindLoomySession → CheckinDailyQuota；无本地
 // 登录态/已处理/失败均只记日志，不影响同 hook 的外部账号签到。
-func (p *Panel) RunLoomyDailyCheckin() {
+// 返回值同样进台账：无登录态算 skip（不是失败，重试也变不出 session）。
+func (p *Panel) RunLoomyDailyCheckin() []scheduler.Outcome {
+	one := func(res scheduler.TaskResult, msg string) []scheduler.Outcome {
+		return []scheduler.Outcome{{Task: "ext-checkin", Account: "loomy/local-session", Result: res.String(), Message: msg}}
+	}
 	client := getLoomyClient()
 	session, err := upstream.FindLoomySession()
 	if err != nil || session == nil {
 		log.Printf("loomy-checkin 跳过: 未检测到本地 Loomy 客户端登录态 (auth-session.json): %v", err)
-		return
+		return one(scheduler.ResultSkip, "无本地 Loomy 登录态")
 	}
-	res, err := client.CheckinDailyQuota(session.Session)
+	r, err := client.CheckinDailyQuota(session.Session)
 	if err != nil {
 		log.Printf("loomy-checkin 失败: %v", err)
-		return
+		return one(scheduler.ResultFailed, err.Error())
 	}
-	if res.AlreadyProcessed {
-		log.Printf("loomy-checkin 已处理: %s", res.Message)
-	} else {
-		log.Printf("loomy-checkin 成功: %s", res.Message)
+	if r.AlreadyProcessed {
+		log.Printf("loomy-checkin 已处理: %s", r.Message)
+		return one(scheduler.ResultDone, r.Message)
 	}
+	log.Printf("loomy-checkin 成功: %s", r.Message)
+	return one(scheduler.ResultDone, r.Message)
 }
 
 // extCheckinOne POST /panel/api/ext/accounts/{provider}/{id}/checkin —— 单账号签到
@@ -171,6 +189,11 @@ func (p *Panel) extCheckinAll(w http.ResponseWriter, r *http.Request) {
 	results := p.extManager().CheckinAll(r.Context())
 	for _, res := range results {
 		log.Printf("panel: 外部签到 %s/%s → %s %s", res.Provider, res.ID, res.Kind, res.Message)
+	}
+	// 结论进调度器台账（重试链同一口径）。没有这一步时按钮的结果只活在
+	// 这次 HTTP 响应里，面板的「排程台账」永远看不到外部签到这一轮。
+	if p.cfg.Scheduler != nil {
+		p.cfg.Scheduler.RecordExternalCheckin(extOutcomes(results))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "results": results})
 }

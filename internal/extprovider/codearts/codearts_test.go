@@ -61,3 +61,23 @@ func TestSignRequestKeepsRequiredHeaders(t *testing.T) {
 		t.Error("GET 请求不该带 content-type")
 	}
 }
+
+// 「这个账号没有积分活动权益」是永久结论，不是瞬时故障：个人版 AK/SK 实测就撞在
+// 这句上（HTTP 403 / TM.00001005 / 请联系企业管理员为您开启席位）。把它报成 failed
+// 会让它每天进重试链，对同一个不会变的答案白打三轮上游。
+func TestNoEntitlementIsNotTransient(t *testing.T) {
+	live := `HTTP 403: {"error_code":"TM.00001005","error_msg":"您好，您尚未获得此功能的权限，请联系企业管理员为您开启席位。`
+	if !noEntitlement(live) {
+		t.Fatalf("实测的无权限响应没被识别: %s", live)
+	}
+	// 瞬时错仍然要重试：网络抖动 / 5xx / 签名 401 都不是「没有权益」。
+	for _, msg := range []string{
+		"HTTP 500: Internal Server Error",
+		"HTTP 401: verify ak sk signature fail",
+		"dial tcp: i/o timeout",
+	} {
+		if noEntitlement(msg) {
+			t.Errorf("%q 不该判为无权益（它该重试）", msg)
+		}
+	}
+}

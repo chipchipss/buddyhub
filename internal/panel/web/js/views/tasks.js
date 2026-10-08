@@ -11,7 +11,7 @@ import { refreshOverview } from '../store.js';
 import { openVouchers } from '../drawers.js';
 import { platName } from '../platforms.js';
 
-const SEGS = ['tencent', 'loomy'];
+const SEGS = ['tencent', 'loomy', 'sched'];
 const seg = signal('tencent');
 
 // hash 子状态：#tasks?seg=loomy —— 深链/刷新/后退都落在同一段
@@ -23,6 +23,7 @@ function setSeg(v) {
   seg.set(v);
   setHashSeg('tasks', v);
   if (v === 'loomy') { loadLoomy(); loadCredits(); }
+  if (v === 'sched') loadReport();
 }
 const queue = signal(null);
 const queueSeq = signal(0);
@@ -31,6 +32,7 @@ const loomy = signal(null);
 const loomyMsg = signal('');
 const credits = signal(null);
 const ext = signal(null);
+const report = signal(null);
 
 let queueTimer = null;
 const GROWTH_TITLES = {};
@@ -285,20 +287,88 @@ function loomySeg() {
   );
 }
 
+/* ── 排程：任务运行台账（每轮成/败/待补跑）───────────────────── */
+async function loadReport(quiet = true) {
+  try { report.set(await api('task_report')); }
+  catch (e) { report.set(null); if (!quiet) toast(e.message, 'fail'); }
+}
+
+const RES_WORD = { done: '成功', skip: '跳过', failed: '失败', needs_relogin: '需重新登录' };
+const RES_DOT = { done: 'dot', failed: 'dot off', needs_relogin: 'dot off', skip: 'dot ring' };
+
+function hm(v) {
+  const d = new Date(v);
+  return isNaN(d) ? String(v || '') : d.toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+function outcomeRow(o) {
+  return h('div', { class: 'qrow', title: o.message || '' },
+    h('span', { class: 'code', text: o.task }),
+    h('span', { class: 'name' }, h('span', { class: 't', text: o.account })),
+    h('span', { class: 'st' }, h('i', { class: RES_DOT[o.result] || 'dot ring' }), RES_WORD[o.result] || o.result),
+    h('span', { class: 'msg', text: o.message || '' }),
+    h('span', { class: 'prog', text: hm(o.at) }),
+  );
+}
+
+function roundBlock(rd, isLast) {
+  const counts = {};
+  for (const o of rd.outcomes || []) counts[o.result] = (counts[o.result] || 0) + 1;
+  const ok = counts.done || 0, bad = (counts.failed || 0) + (counts.needs_relogin || 0);
+  return h('div', { class: 'qgroup' },
+    h('div', { class: 'head' },
+      h('span', { class: 'nm', text: rd.trigger }),
+      h('span', { class: 'cnt', text: `${hm(rd.started)} · 成 ${ok} / 败 ${bad} / 跳 ${counts.skip || 0}` }),
+      isLast ? h('span', { class: 'chip strong', text: '最近一轮' }) : null),
+    ...(rd.outcomes || []).map(outcomeRow),
+  );
+}
+
+function schedSeg() {
+  const r = report();
+  const head = h('header', null,
+    h('h2', { text: '任务运行台账' }),
+    h('span', { class: 'hint', text: '每一轮排程的真实结论：成功 / 瞬时失败（会自动退避重试）/ 需重新登录（不重试，等重登）' }),
+    h('span', { class: 'grow' }),
+    r && r.next_fire ? h('span', { class: 'chip faint', text: `下一次 ${hm(r.next_fire)}：${(r.next_kinds || []).join('、')}` }) : null,
+    r ? h('span', { class: 'chip', text: `今日已成 ${r.day_done} 项` }) : null,
+    h('button', { class: 'btn sm', onclick: () => loadReport(false) }, icon('refresh'), '刷新'));
+
+  if (!r) return h('section', { class: 'card' }, head, h('div', { class: 'body' },
+    h('div', { class: 'empty' }, icon('automation'), h('div', { class: 't', text: '暂无台账' }),
+      h('div', { class: 'd', text: '调度器还没有派发过任务；也可以在上面点「一键签到 / 旅行 / 活跃」先跑一轮。' }))));
+
+  const pend = r.pending || [];
+  const rounds = (r.rounds || []).slice().reverse();
+  const body = h('div', { class: 'body stack' },
+    pend.length
+      ? h('div', { class: 'row wrap', style: { gap: '8px' } },
+        ...pend.map(p => h('span', {
+          class: 'chip', style: { whiteSpace: 'normal' },
+          text: `${p.task} 待补跑 ${(p.uids || []).length} 个（第 ${p.tries} 次）· ${p.next_at}` })))
+      : null,
+    rounds.length
+      ? h('div', null, ...rounds.map((rd, i) => roundBlock(rd, i === 0)))
+      : h('div', { class: 'empty' }, icon('automation'), h('div', { class: 't', text: '本轮还没有结论' })));
+  return h('section', { class: 'card' }, head, body);
+}
+
 export default defineView({
   id: 'tasks',
   title: '任务',
   icon: 'automation',
   group: '自动化',
-  keywords: '任务 签到 loomy 队列 自动化',
+  keywords: '任务 签到 loomy 队列 自动化 排程 台账',
   sub() {
     const q = queue();
     if (seg.peek() === 'tencent' && q && q.running) return '任务队列执行中…';
+    if (seg.peek() === 'sched') return '腾讯成长任务 · Loomy 新手之旅 · 排程台账';
     return '腾讯成长任务 · Loomy 新手之旅';
   },
   tick() {
     if (seg.peek() === 'loomy') loadLoomy();
     if (seg.peek() === 'tencent' && queueTimer) pollQueue();
+    if (seg.peek() === 'sched') loadReport();
   },
   render() {
     syncSegFromHash();
@@ -308,9 +378,10 @@ export default defineView({
         h('div', { class: 'seg' },
           h('button', { class: s === 'tencent' ? 'on' : '', text: '腾讯任务', onclick: () => setSeg('tencent') }),
           h('button', { class: s === 'loomy' ? 'on' : '', text: 'Loomy', onclick: () => setSeg('loomy') }),
+          h('button', { class: s === 'sched' ? 'on' : '', text: '排程台账', onclick: () => setSeg('sched') }),
         ),
       ),
-      s === 'tencent' ? tencentSeg() : loomySeg(),
+      s === 'tencent' ? tencentSeg() : s === 'loomy' ? loomySeg() : schedSeg(),
     );
   },
 });

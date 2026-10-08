@@ -39,6 +39,18 @@ const (
 	GroupPoints = "points"
 )
 
+// 凭据续期方式：决定「登录一次能活多久、到期谁来管」。这是用户最常问的一类
+// 问题的答案（"我明明登陆了，为什么不能用"）——能不能自动续，界面上必须可见。
+const (
+	// RenewAuto 有 refresh_token / 存量密码，网关自己续（对话撞到期即续，
+	// 任务/签到路径动手前也先续，见 extstore/renew.go）。
+	RenewAuto = "auto"
+	// RenewManual 只能人工重新授权（扫码 / 设备码 / 重抓 cookie / 重贴凭据）。
+	RenewManual = "manual"
+	// RenewStatic 凭据本身长期有效（永久 AK/SK、API Key），没有续期这件事。
+	RenewStatic = "static"
+)
+
 // Platform 一个平台的元数据。
 type Platform struct {
 	ID   string `json:"id"`   // provider id（也是落盘契约，不要改）
@@ -51,6 +63,8 @@ type Platform struct {
 	Login string `json:"login,omitempty"`
 	// Checkin 是否有每日签到（决定外部平台页签不签到的按钮）。
 	Checkin bool `json:"checkin"`
+	// Renew 凭据续期方式（见上面常量；"" 视为 manual）。
+	Renew string `json:"renew,omitempty"`
 	// Note 一句说明（界面上作为提示）。
 	Note string `json:"note,omitempty"`
 }
@@ -59,49 +73,49 @@ type Platform struct {
 var platforms = []Platform{
 	// ── 对话通道 ──
 	{ID: "workbuddy", Name: "腾讯 WorkBuddy", Group: GroupGateway, Prefix: "cn:", Login: LoginOAuth,
-		Checkin: true, Note: "成长任务全自动"},
+		Checkin: true, Renew: RenewAuto, Note: "成长任务全自动"},
 	{ID: "loomy", Name: "Loomy（讯飞）", Group: GroupGateway, Prefix: "loomy:", Login: LoginDetect,
-		Checkin: true, Note: "客户端检测 / 手机号 / 短信"},
+		Checkin: true, Renew: RenewAuto, Note: "客户端检测 / 手机号 / 短信"},
 	{ID: "zai", Name: "Z.AI / 智谱", Group: GroupGateway, Prefix: "zai:", Login: LoginOAuth,
-		Checkin: true, Note: "Coding Plan JWT + API Key 双通道"},
+		Checkin: true, Renew: RenewAuto, Note: "Coding Plan JWT + API Key 双通道"},
 	{ID: "copilot", Name: "GitHub Copilot", Group: GroupGateway, Prefix: "copilot:", Login: LoginCode,
-		Note: "设备码授权"},
+		Renew: RenewAuto, Note: "设备码授权"},
 	{ID: "cline", Name: "Cline", Group: GroupGateway, Prefix: "cline:", Login: LoginCode,
-		Note: "含免费池，无需订阅"},
+		Renew: RenewAuto, Note: "含免费池，无需订阅"},
 	{ID: "autoclaw", Name: "AutoClaw（智谱）", Group: GroupGateway, Prefix: "autoclaw:", Login: LoginSMS,
-		Checkin: true, Note: "手机号登录（国内版）"},
+		Checkin: true, Renew: RenewAuto, Note: "手机号登录（国内版）"},
 	{ID: "qoder", Name: "Qoder（阿里）", Group: GroupGateway, Prefix: "qoder:", Login: LoginDevice,
-		Checkin: true, Note: "设备授权登录"},
+		Checkin: true, Renew: RenewAuto, Note: "设备授权登录"},
 	{ID: "qclaw", Name: "QClaw（腾讯）", Group: GroupGateway, Prefix: "qclaw:", Login: LoginQR,
-		Note: "微信扫码登录（上游已宣布停运）"},
+		Renew: RenewManual, Note: "微信扫码登录（上游已宣布停运）"},
 	{ID: "trae", Name: "Trae（字节）", Group: GroupGateway, Prefix: "trae:", Login: LoginCallback,
-		Note: "浏览器授权（本机回调）"},
+		Renew: RenewAuto, Note: "浏览器授权（本机回调）"},
 	{ID: "accio", Name: "Accio（阿里）", Group: GroupGateway, Prefix: "accio:", Login: LoginCallback,
-		Note: "浏览器授权（本机回调）"},
+		Renew: RenewAuto, Note: "浏览器授权（本机回调）"},
 	{ID: "traework", Name: "TraeWork（字节）", Group: GroupGateway, Prefix: "traework:", Login: LoginManual,
-		Checkin: true, Note: "粘贴客户端凭据（含每日签到）"},
+		Checkin: true, Renew: RenewManual, Note: "粘贴客户端凭据（含每日签到）"},
 	{ID: "raccoon", Name: "小浣熊（商汤）", Group: GroupGateway, Prefix: "raccoon:", Login: LoginQR,
-		Checkin: true, Note: "微信扫码登录（OpenAI 兼容直连）"},
+		Checkin: true, Renew: RenewAuto, Note: "微信扫码登录（OpenAI 兼容直连）"},
 
 	{ID: "codearts", Name: "CodeArts（华为云）", Group: GroupGateway, Prefix: "codearts:", Login: LoginManual,
-		Checkin: true, Note: "永久 AK/SK（建议）"},
+		Checkin: true, Renew: RenewStatic, Note: "永久 AK/SK（建议）"},
 	{ID: "ima", Name: "ima（腾讯知识管家）", Group: GroupGateway, Prefix: "ima:", Login: LoginManual,
-		Note: "浏览器 F12 复制 x-ima-cookie"},
+		Renew: RenewAuto, Note: "浏览器 F12 复制 x-ima-cookie"},
 	{ID: "marvis", Name: "Marvis（马维斯）", Group: GroupGateway, Prefix: "marvis:", Login: LoginManual,
-		Note: "从已登录客户端抓包：mv_ token / openid / device_guid"},
+		Renew: RenewManual, Note: "从已登录客户端抓包：mv_ token / openid / device_guid"},
 
 	// ── 积分 / 签到平台（无对话 API）──
 	{ID: "loomy-cli", Name: "Loomy（讯飞，密钥/短信）", Group: GroupPoints, Login: LoginManual,
-		Checkin: true, Note: "区别于上面的 loomy：密码/短信登录的账号落 extstore"},
+		Checkin: true, Renew: RenewAuto, Note: "区别于上面的 loomy：密码/短信登录的账号落 extstore"},
 	{ID: "lobsterai", Name: "LobsterAI（有道）", Group: GroupPoints, Login: LoginManual,
-		Checkin: true, Note: "从客户端凭据文件复制"},
+		Checkin: true, Renew: RenewManual, Note: "从客户端凭据文件复制"},
 
 	// 本机凭据 / 配置页填写的通道：同样是可调用的对话通道，只是不从
 	// 「添加账号」入池（Login 字段说明了这一点）。
 	{ID: "codex", Name: "Codex（ChatGPT 订阅）", Group: GroupGateway, Prefix: "codex:", Login: LoginNone,
-		Note: "本机 ~/.codex 凭据"},
+		Renew: RenewAuto, Note: "本机 ~/.codex 凭据"},
 	{ID: "free", Name: "免费 Key 池", Group: GroupGateway, Prefix: "free:", Login: LoginConfig,
-		Note: "groq / 智谱 / llm7 / openrouter"},
+		Renew: RenewStatic, Note: "groq / 智谱 / llm7 / openrouter"},
 }
 
 // platformByID 按 id 取平台（不存在返回零值 + false）。

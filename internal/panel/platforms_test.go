@@ -216,3 +216,37 @@ func TestRegistryMarksEveryExtstoreCheckinPlatform(t *testing.T) {
 		}
 	}
 }
+
+// poolSideRenew 这些平台的续期不在 extstore 能力表里，而是各自的池侧回路：
+// 腾讯池 / zai / codex 走 upstream 的 token 刷新，loomy 与 loomy-cli 走存量
+// 密码重登（panel/loomy_renew.go）。它们同样是「自动续」，只是不由 extstore 执行。
+var poolSideRenew = map[string]bool{
+	"workbuddy": true, "zai": true, "codex": true, "loomy": true, "loomy-cli": true,
+}
+
+// TestRegistryRenewMatchesRenewTable 断言注册表的 Renew 字段与实际续期能力同源。
+//
+// 这一条是给用户看的承诺：界面上写「自动续期」的平台，凭据到期就该由网关自己
+// 换回来；写「需人工重登」的，网关一次上游都不会替它试。承诺与实际能力漂移的
+// 症状很具体——用户守着面板等账号自己活过来，而它其实只能重新扫码。
+func TestRegistryRenewMatchesRenewTable(t *testing.T) {
+	auto := map[string]bool{}
+	for _, id := range extstore.RenewableProviders() {
+		auto[id] = true
+	}
+	for id := range poolSideRenew {
+		auto[id] = true
+	}
+	for _, p := range platforms {
+		switch p.Renew {
+		case RenewAuto, RenewManual, RenewStatic:
+		default:
+			t.Errorf("%s: Renew=%q 不在 auto/manual/static 三个口径之内", p.ID, p.Renew)
+			continue
+		}
+		if auto[p.ID] != (p.Renew == RenewAuto) {
+			t.Errorf("%s: 注册表 Renew=%q，实际续期能力=%v —— 界面承诺与网关行为不一致",
+				p.ID, p.Renew, auto[p.ID])
+		}
+	}
+}

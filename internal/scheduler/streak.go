@@ -7,7 +7,9 @@
 package scheduler
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -15,26 +17,30 @@ import (
 	"github.com/chipchipss/buddyhub/internal/logfmt"
 )
 
-// RunStreakBonusNow 对所有可用账号执行连登兑换 + 抽奖（幂等：locked/无次数自动跳过）。
-// 由签到排程（RunCheckinNow）末尾调用；也可面板手动触发。
+// RunStreakBonusNow 对所有可用账号执行连登兑换 + 抽奖（手动入口：不看日状态）。
+// 幂等：locked/无次数自动跳过。
 func (s *Scheduler) RunStreakBonusNow() {
-	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled {
+	s.manualRound("manual streak-bonus", func(ctx context.Context) { s.runStreak(ctx, nil, true) })
+}
+
+// runStreak 连登管家遍历。由签到槽位顺带派发（见 dispatchBatch）。
+func (s *Scheduler) runStreak(ctx context.Context, uids []string, bypassDay bool) {
+	for _, st := range s.eligibleAccounts(taskStreak, uids, bypassDay) {
+		a, res, msg := s.poolAccount(st, false, true)
+		if a == nil {
+			s.finish(taskStreak, st.UID, res, msg)
 			continue
 		}
-		a := s.cfg.Pool.AuthByUID(st.UID)
-		if a == nil || a.AccessTokenValue() == "" {
-			continue
-		}
-		if a.IsGlobal() {
-			continue // D4 门控：global 无 CN 任务体系，不发起任何上游调用
-		}
-		s.streakBonusAccount(a)
+		r, m := s.streakBonusAccount(a)
+		s.finish(taskStreak, st.UID, r, m)
 	}
 }
 
 // streakBonusAccount 单账号：补签保连登 → 礼包/补偿 → 兑换所有已解锁档位 → 抽完所有 chances。
-func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
+//
+// 返回值只在「连登概览读不到」时算失败（后面几步全依赖它，读不到就是这趟没做成）；
+// 未解锁档位的 403 与单抽出错属预期业务响应，不判失败，只把原因带回台账。
+func (s *Scheduler) streakBonusAccount(a *auth.Auth) (accountResult, string) {
 	// 0. 补签保连登：昨日漏签且有补签卡则补上（连续天数一断就要重攒 7 天）。
 	s.makeupYesterday(a)
 	// 0.5 礼包/补偿（每号一次，无则业务错误静默跳过）。
@@ -48,7 +54,7 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 	full, err := s.cfg.Upstream.GrowthStreakFull(a)
 	if err != nil {
 		log.Printf("streak-bonus %s: %v", logfmt.Label(a.UID, a.Nickname), err)
-		return
+		return classifyUpstream(err), err.Error()
 	}
 	statuses := map[string]string{
 		"7d":  full.RedemptionStatus.Tier7dStatus,
@@ -72,19 +78,22 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 	chances, err := s.cfg.Upstream.LotteryChances(a)
 	if err != nil {
 		log.Printf("streak-bonus %s: lottery summary: %v", logfmt.Label(a.UID, a.Nickname), err)
-		return
+		return classifyUpstream(err), "抽奖次数读取: " + err.Error()
 	}
 	for i := 0; i < chances; i++ {
 		raw, err := s.cfg.Upstream.LotteryDraw(a)
 		if err != nil {
+			// 单抽出错**不判失败也不重试**：请求可能已在服务端生效，
+			// 补跑等于把同一批次数再抽一遍。剩下的次数下一个签到槽位自然会抽。
 			log.Printf("streak-bonus %s: draw: %v", logfmt.Label(a.UID, a.Nickname), err)
-			return
+			return resDone, fmt.Sprintf("抽奖中断于第 %d 次: %s", i+1, err)
 		}
 		log.Printf("streak-bonus %s: 🎲 第%d抽 %s", logfmt.Label(a.UID, a.Nickname), i+1, compactJSON(raw))
 	}
 	if chances > 0 {
 		log.Printf("streak-bonus %s: 抽奖完成 %d 次", logfmt.Label(a.UID, a.Nickname), chances)
 	}
+	return resDone, fmt.Sprintf("档位 %d 已试，抽奖 %d 次", len(full.RedemptionStatus.Tiers), chances)
 }
 
 // compactJSON 裁剪奖品载荷（日志单行可读）。

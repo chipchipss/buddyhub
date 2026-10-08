@@ -334,6 +334,17 @@ func idToString(v any) string {
 	return ""
 }
 
+// noEntitlement 上游「这个账号没有这个功能权益」的话术（个人版走不到积分活动）。
+// 与瞬时 5xx 分别是两件事：重试不会让权益长出来，只会白打上游。
+func noEntitlement(msg string) bool {
+	for _, s := range []string{"TM.00001005", "未获得此功能的权限", "开启席位"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckinResult 签到结果。
 type CheckinResult struct {
 	Kind    string // "claimed" | "already-claimed" | "inactive" | "failed"
@@ -357,6 +368,12 @@ func (c *Client) CheckinDaily(ctx context.Context, cred *Credential) *CheckinRes
 
 	activities, err := c.FetchActivities(ctx, cred)
 	if err != nil {
+		// 「未获得此功能的权限 / 请企业管理员开启席位」(TM.00001005) 不是瞬时故障：
+		// 这个 AK/SK 所在账号本就没有积分活动权益（个人版走的就是这条路）。报 failed
+		// 会让它每天进重试链、对同一个不会变的结论白打三轮，所以如实归到「不在活动范围」。
+		if noEntitlement(err.Error()) {
+			return &CheckinResult{Kind: "inactive", Message: "账号无积分活动权益（个人版 / 未开通席位）: " + err.Error()}
+		}
 		return &CheckinResult{Kind: "failed", Message: "活动列表查询失败: " + err.Error()}
 	}
 	var activity *OpsActivity

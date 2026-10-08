@@ -6,12 +6,21 @@
    ══════════════════════════════════════════════════════════════════ */
 
 import { h, icon, signal, api, toast, confirmDialog } from '../kernel.js';
-import { platforms, loadPlatforms, platName, platHasCheckin } from '../platforms.js';
+import { platforms, loadPlatforms, plat, platName, platHasCheckin } from '../platforms.js';
 import { statusOf, statusChip } from '../status.js';
 import { extAddPanel } from './ext-add.js';
 
 const ext = signal(null);
 const extMsg = signal('');
+
+// 凭据续期方式（注册表 renew 字段）：回答「我登陆了，为什么后来不能用」——
+// 自动续的到期网关自己换，需人工的到期只能再授权一次，界面上必须先说清是哪一类。
+const RENEW_WORD = { auto: '凭据到期自动续期', manual: '凭据到期需人工重新授权', static: '凭据长期有效' };
+function renewLine(provider) {
+  const p = plat(provider);
+  const w = p && RENEW_WORD[p.renew];
+  return w ? h('div', { class: 'id faint', text: w }) : null;
+}
 
 export async function loadExt(quiet = true) {
   try {
@@ -29,7 +38,9 @@ async function extAct(provider, id, action, body) {
     });
     if (action === 'checkin') {
       const res = r.result || {};
-      toast(`[${platName(provider)}] ${res.message || res.kind || '完成'}`, res.kind === 'failed' ? 'fail' : undefined);
+      // relogin = 续期能力表判死（renew.go）：不是失败，是「这条路只能你走」。
+      const bad = res.kind === 'failed' || res.kind === 'relogin';
+      toast(`[${platName(provider)}] ${res.message || res.kind || '完成'}`, bad ? 'fail' : undefined);
     } else if (action === 'remove') toast('已删除');
     await loadExt();
   } catch (e) { toast(e.message, 'fail'); }
@@ -59,7 +70,9 @@ export function extSegment(focusProvider = '') {
             const ok = rs.filter(x => x.kind === 'claimed').length;
             const already = rs.filter(x => x.kind === 'already-claimed').length;
             const failed = rs.filter(x => x.kind === 'failed').length;
-            toast(`签到完成：成功 ${ok} · 已领过 ${already} · 失败 ${failed}`, failed ? 'fail' : undefined);
+            const relogin = rs.filter(x => x.kind === 'relogin').length;
+            toast(`签到完成：成功 ${ok} · 已领过 ${already} · 失败 ${failed}${relogin ? ` · 需重登 ${relogin}` : ''}`,
+              (failed || relogin) ? 'fail' : undefined);
             await loadExt();
           } catch (e) { toast(e.message, 'fail'); }
           finally { if (__b) __b.disabled = false; }
@@ -74,6 +87,7 @@ export function extSegment(focusProvider = '') {
               h('div', { class: 'who' },
                 h('div', { class: 'nm', text: focusProvider ? (a.label || a.id) : `${platName(a.provider)} · ${a.label || a.id}` }),
                 h('div', { class: 'id', text: a.id }),
+                renewLine(a.provider),
               ),
               statusChip(statusOf(a)),
             ),
