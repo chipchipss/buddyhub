@@ -14,9 +14,10 @@ import (
 	"encoding/json"
 	"log"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/chipchipss/buddyhub/internal/atomicfile"
 )
 
 // dayStateFileName 由 Config.StateFile 的兄弟路径推导（与 model.json 同风格）。
@@ -37,8 +38,10 @@ type dayState struct {
 	mu   sync.Mutex
 	day  string
 	done map[string]int64
-	// dirty 落盘失败过：下次变更时重试（不因一次写失败就丢掉整表语义）。
-	dirty bool
+	// wmu 把「取快照 → 写盘」排成一条队。atomicfile 内部已按路径串行，这层管的
+	// 是顺序：没有它，A 可能先取到旧快照却最后写盘，把 B 刚记的成覆盖掉——文件
+	// 合法但少记录，下次重启照样多签一次。mu 只圈住取快照那一下，写盘不挡判定读。
+	wmu sync.Mutex
 }
 
 func newDayKey(task, uid string) string { return task + "|" + uid }
@@ -103,8 +106,14 @@ func (d *dayState) MarkDone(task, uid string) {
 	d.save()
 }
 
-// saveLocked 之外独立加锁写盘：调用方不得持 mu（写盘耗时不该挡住判定读）。
+// save 快照整表并原子落盘。顺序保证见 dayState.wmu。
 func (d *dayState) save() {
+	if d.path == "" {
+		return
+	}
+	d.wmu.Lock()
+	defer d.wmu.Unlock()
+
 	d.mu.Lock()
 	rec := dayRecord{Day: d.day, Done: make(map[string]int64, len(d.done))}
 	for k, v := range d.done {
@@ -112,18 +121,12 @@ func (d *dayState) save() {
 	}
 	d.mu.Unlock()
 
-	if d.path == "" {
-		return
-	}
 	raw, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return
 	}
-	if err := atomicWrite(d.path, raw); err != nil {
+	if err := atomicfile.Write(d.path, raw); err != nil {
 		log.Printf("scheduler: 任务日状态写盘失败 %s: %v", d.path, err)
-		d.mu.Lock()
-		d.dirty = true
-		d.mu.Unlock()
 	}
 }
 
@@ -136,26 +139,4 @@ func (d *dayState) PendingCount() int {
 	defer d.mu.Unlock()
 	d.rollLocked()
 	return len(d.done)
-}
-
-// atomicWrite 临时文件 + rename：进程被砍在写中间也不会留下半截 JSON。
-func atomicWrite(path string, raw []byte) error {
-	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	// Windows：rename 不覆盖已存在目标，先删再改名。
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(path)
-		if err2 := os.Rename(tmp, path); err2 != nil {
-			_ = os.Remove(tmp)
-			return err2
-		}
-	}
-	return nil
 }

@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -108,6 +111,61 @@ func TestDayStateRecordsTimestamp(t *testing.T) {
 	}
 	if ts := rec.Done["keepalive|u9"]; ts == 0 || time.Since(time.Unix(ts, 0)) > time.Minute {
 		t.Fatalf("记录时间戳不可信: %d", ts)
+	}
+}
+
+// 并发落盘：dispatchBatch 每类任务一个 goroutine，它们都会 MarkDone。写盘若不加
+// 序列，多个 writer 会同时往同一个 path+".tmp" 写再 rename——要么写出混合内容
+// （下次启动解析失败 = 当日整表作废），要么旧快照最后落盘（丢记录）。两种结果
+// 都是这张表要防的那件事：重启后全池重复签到。
+func TestDayStateConcurrentMarksAllPersist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "task-state.json")
+	d := newDayState(path)
+
+	const n = 24
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start // 尽量让 n 个 writer 同一刻进入 save()
+			d.MarkDone("checkin", "u"+strconv.Itoa(i))
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读状态文件: %v", err)
+	}
+	var rec dayRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatalf("并发写留下了不可解析的文件: %v\n%s", err, raw)
+	}
+	if len(rec.Done) != n {
+		t.Fatalf("并发写丢了 %d 条记录（剩 %d，应为 %d）——旧快照覆盖了新快照", n-len(rec.Done), len(rec.Done), n)
+	}
+	reopened := newDayState(path)
+	for i := 0; i < n; i++ {
+		uid := "u" + strconv.Itoa(i)
+		if !reopened.Done("checkin", uid) {
+			t.Fatalf("重启后 %s 的今日已成标记丢失", uid)
+		}
+	}
+}
+
+// 残留的 .tmp 不该被当成状态文件读进来（进程被砍在 rename 之前会留下它）。
+func TestDayStateLeavesNoTempFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "task-state.json")
+	d := newDayState(path)
+	d.MarkDone("checkin", "u1")
+	matches, _ := filepath.Glob(path + "*")
+	for _, m := range matches {
+		if m != path && !strings.HasSuffix(m, ".json") {
+			t.Fatalf("写盘后残留临时文件: %s", m)
+		}
 	}
 }
 

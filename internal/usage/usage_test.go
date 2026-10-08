@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -128,5 +130,44 @@ func TestLifecycleFlush(t *testing.T) {
 	r.Stop()
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("Stop 后应有落盘文件: %v", err)
+	}
+}
+
+// 面板的 Save() 与后台 ticker 会同时落盘。老写法（固定 .tmp 名 + 写盘在锁外）
+// 在这里的后果不是少记几条，而是 usage.json 整个读不到。
+func TestConcurrentSaveKeepsFileUsable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	r := New(path)
+
+	const writers = 16
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			uid := "u" + strconv.Itoa(i)
+			<-start
+			for k := 0; k < 5; k++ {
+				r.Add(time.Now(), "cn", uid, "m", Delta{PromptTokens: 10, HasPromptTokens: true, TotalTokens: 10, HasTotal: true}, true)
+				r.Save()
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	r.Save() // 收尾一次，把还在内存里的桶落下去
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("并发 Save 之后读不到 usage.json: %v", err)
+	}
+	var f file
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatalf("并发 Save 写坏了 usage.json: %v", err)
+	}
+	reloaded := New(path)
+	if got := len(reloaded.buckets); got != writers {
+		t.Fatalf("落盘桶数=%d，期望 %d（每个 writer 一个 uid）", got, writers)
 	}
 }

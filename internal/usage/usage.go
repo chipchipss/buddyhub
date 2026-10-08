@@ -19,11 +19,12 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/chipchipss/buddyhub/internal/atomicfile"
 )
 
 // hourlyKeep 小时桶的保留时长；超出后折叠为日桶。
@@ -73,6 +74,10 @@ type Recorder struct {
 	buckets map[string]*bucket // key: scope|realm|uid|model
 	dirty   bool
 	started time.Time
+
+	// wmu 把「取快照 → 写盘」排成一条队（见 flush）。逐请求的 Add 只碰 mu，不被
+	// 磁盘拖住；后台 ticker 与面板 Save() 因此不会交错写同一个文件。
+	wmu sync.Mutex
 
 	stopOnce sync.Once
 	stop     chan struct{}
@@ -272,6 +277,12 @@ func (r *Recorder) flush(force bool) {
 	if r == nil || r.path == "" {
 		return
 	}
+	// wmu 把「取快照 → 写盘」排成一条队：没有它，先取到旧快照的那位可能最后才写盘，
+	// 把别人刚记的桶覆盖掉。内存是事实源，下一轮 flush 会补回来，但那段时间的账
+	// 先缺一块——成本台账缺的正好是排查时最想要的那块。
+	r.wmu.Lock()
+	defer r.wmu.Unlock()
+
 	r.mu.Lock()
 	if !r.dirty && !force {
 		r.mu.Unlock()
@@ -289,17 +300,13 @@ func (r *Recorder) flush(force bool) {
 		log.Printf("[usage] 序列化失败: %v", err)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
-		log.Printf("[usage] 建目录失败: %v", err)
-		return
-	}
-	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		log.Printf("[usage] 写临时文件失败: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, r.path); err != nil {
-		log.Printf("[usage] 原子替换失败: %v", err)
+	if err := atomicfile.Write(r.path, raw); err != nil {
+		log.Printf("[usage] 落盘失败: %v", err)
+		// 写失败要把「还有未落盘内容」这件事还回去，否则这一版快照要等到下次
+		// 有请求把它标 dirty 才会再试——低峰期等于静默少记一段时间。
+		r.mu.Lock()
+		r.dirty = true
+		r.mu.Unlock()
 	}
 }
 
