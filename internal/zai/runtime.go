@@ -253,6 +253,9 @@ func (c *Client) Do(ctx context.Context, body []byte) (*Result, error) {
 			_ = c.Pool.Store().Update(acc.ID, func(a *Account) {
 				a.Invalidate(fmt.Sprintf("HTTP %d：%s", resp.StatusCode, truncate(string(raw), 160)))
 			})
+			// JWT 无 exp 且无程序轮换路径，失效只能人工重新授权——这行必须打出来，
+			// 否则日志面板只见对话 401，看不出「该去面板重新走一遍授权」。
+			logf("zai: 账号 %s 凭证失效（HTTP %d），需在面板重新授权（Z.AI 凭证无法自动续期）", acc.Name, resp.StatusCode)
 			lastErr = fmt.Errorf("账号 %s 凭证失效（HTTP %d）", acc.Name, resp.StatusCode)
 			continue
 

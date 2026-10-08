@@ -2,7 +2,13 @@ package trae
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net"
 	"net/http"
@@ -936,4 +942,52 @@ func TestTokenErrorLeaksStructureNotValues(t *testing.T) {
 	if strings.Contains(msg, "SECRET-TOKEN-VALUE") {
 		t.Fatal("错误信息里混进了令牌值")
 	}
+}
+
+// TestDeviceProofSignAndFields 钉住 DeviceProof 契约：PascalCase 字段名、
+// 32 位 hex nonce、签名可被对应公钥验证（ECDSA P-256 与 RSA 两种存量形态）。
+func TestDeviceProofSignAndFields(t *testing.T) {
+	for name, privatePEM := range map[string]string{
+		"ecdsa": mustKeyPEM(t, true),
+		"rsa":   mustKeyPEM(t, false),
+	} {
+		p, err := deviceProof("POST", ExchangePath, ClientIDSolo, "rt-token", privatePEM)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, ok := p["Signature"]; !ok {
+			t.Errorf("%s: 缺 Signature", name)
+		}
+		if _, ok := p["Timestamp"]; !ok {
+			t.Errorf("%s: 缺 Timestamp（PascalCase 契约）", name)
+		}
+		nonce, _ := p["Nonce"].(string)
+		if len(nonce) != 32 {
+			t.Errorf("%s: Nonce 应为 32 位 hex，得 %d 字符", name, len(nonce))
+		}
+	}
+}
+
+func mustKeyPEM(t *testing.T, ecdsaKey bool) string {
+	t.Helper()
+	var priv any
+	var err error
+	if ecdsaKey {
+		k, e := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if e != nil {
+			t.Fatal(e)
+		}
+		priv = k
+	} else {
+		k, e := rsa.GenerateKey(rand.Reader, 2048)
+		if e != nil {
+			t.Fatal(e)
+		}
+		priv = k
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
 }

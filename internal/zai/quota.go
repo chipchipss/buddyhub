@@ -332,6 +332,19 @@ func (c *Client) StartQuotaLoop(interval time.Duration) func() {
 				if ok > 0 || fail > 0 {
 					logf("zai: 额度刷新完成 成功 %d / 失败 %d", ok, fail)
 				}
+				// 池级预警：启用中的 JWT 号全部凭证失效时单独点出——单号 chip 在
+				// 账号页里，不打开看不到；这与 healthz「全池掉线才算故障」同一口径。
+				if ok == 0 && fail == len(ids) {
+					invalid := 0
+					for _, a := range c.Snapshots() {
+						if a.Mode == ModeJWT && a.Enabled && a.Status == StatusInvalid {
+							invalid++
+						}
+					}
+					if invalid == len(ids) {
+						logf("zai: ⚠ 启用中的 %d 个 JWT 账号凭证全部失效，通道已不可用——请在面板逐个重新授权（凭证无法自动续期）", len(ids))
+					}
+				}
 			}
 			timer.Reset(interval)
 		}

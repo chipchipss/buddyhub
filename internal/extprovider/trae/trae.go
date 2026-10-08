@@ -35,11 +35,15 @@ package trae
 import (
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -201,9 +205,81 @@ func uuidV4() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+// publicFromPrivate 从落盘的设备私钥推导公钥 PEM。
+func publicFromPrivate(privatePEM string) (string, error) {
+	block, _ := pem.Decode([]byte(privatePEM))
+	if block == nil {
+		return "", fmt.Errorf("设备私钥 PEM 解析失败")
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("设备私钥解析失败：%w", err)
+	}
+	switch k := key.(type) {
+	case *ecdsa.PrivateKey:
+		pubDER, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
+		if err != nil {
+			return "", err
+		}
+		return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})), nil
+	case *rsa.PrivateKey:
+		pubDER, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
+		if err != nil {
+			return "", err
+		}
+		return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})), nil
+	}
+	return "", fmt.Errorf("设备私钥类型不支持")
+}
+
+// deviceProof 签设备证明：ECDSA P-256/SHA-256/DER/base64（存量 RSA 私钥用
+// PKCS1v15 兜底）。canonical 见 signDeviceProof；字段名必须 PascalCase——
+// 小写会被上游当「无 proof」，报 401 20405 "Device proof required."。
+func deviceProof(method, path, clientID, refreshToken, privatePEM string) (map[string]any, error) {
+	block, _ := pem.Decode([]byte(privatePEM))
+	if block == nil {
+		return nil, fmt.Errorf("设备私钥 PEM 解析失败")
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("设备私钥解析失败：%w", err)
+	}
+	ts := time.Now().Unix()
+	nonce := hexString(16)
+	canonical := strings.Join([]string{method, path, clientID, refreshToken, itoa64(ts), nonce}, "\n")
+	digest := sha256.Sum256([]byte(canonical))
+	var sig []byte
+	switch k := key.(type) {
+	case *ecdsa.PrivateKey:
+		sig, err = ecdsa.SignASN1(rand.Reader, k, digest[:])
+	case *rsa.PrivateKey:
+		sig, err = rsa.SignPKCS1v15(rand.Reader, k, crypto.SHA256, digest[:])
+	default:
+		err = fmt.Errorf("设备私钥类型不支持")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"Signature": base64.StdEncoding.EncodeToString(sig),
+		"Timestamp": ts,
+		"Nonce":     nonce,
+	}, nil
+}
+
+// hexString n 字节的 hex 随机串（2n 字符）。Proof.Nonce 是 32 位 hex 随机数。
+func hexString(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func itoa64(v int64) string { return strconv.FormatInt(v, 10) }
+
 // deviceKeyPair 生成设备密钥对（PEM）。私钥随凭据落盘——它参与设备绑定。
+// 用 ECDSA P-256（对齐官方客户端 DeviceProof 的签名算法），不用 RSA。
 func deviceKeyPair() (publicPEM, privatePEM string, err error) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return "", "", err
 	}
@@ -692,15 +768,30 @@ func parseTokenResponse(raw []byte, c *LoginContext) (*Credential, error) {
 /* ── 续期 ────────────────────────────────────────────────────── */
 
 // Refresh 用 refresh_token 续期。
+//
+// 上游对续期同样校验设备绑定：body 必须带 DeviceInfo（含注册时的公钥）与
+// DeviceProof（设备私钥对 canonical 串的 ECDSA 签名），缺任一都是
+// 401 20405 "Device proof required."。x-cloudide-token 头保持**空**——
+// 带旧 access token 会走错鉴权分支，同样 20405。
 func Refresh(ctx context.Context, cred *Credential) (*Credential, error) {
 	if cred.RefreshToken == "" {
 		return nil, fmt.Errorf("缺少 refresh_token，需重新登录")
 	}
+	proof := map[string]any{}
+	if cred.DevicePrivatePEM != "" {
+		p, err := deviceProof(http.MethodPost, ExchangePath, ClientIDSolo, cred.RefreshToken, cred.DevicePrivatePEM)
+		if err == nil {
+			proof = p
+		}
+		// 签名失败不阻断：与旧实现一致退回无 proof 请求，由上游给出明确错误。
+	}
 	body, _ := json.Marshal(map[string]any{
 		"ClientID":     ClientIDSolo,
+		"ClientSecret": "",
 		"RefreshToken": cred.RefreshToken,
-		"IDEVersion":   IDEVersion,
 		"DeviceInfo":   refreshDeviceInfo(cred),
+		"DeviceProof":  proof,
+		"IDEVersion":   IDEVersion,
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, DefaultLoginHost+ExchangePath, bytes.NewReader(body))
 	if err != nil {
@@ -739,6 +830,12 @@ func Refresh(ctx context.Context, cred *Credential) (*Credential, error) {
 }
 
 func refreshDeviceInfo(cred *Credential) map[string]any {
+	// DevicePublicKey 必须带：上游续期同样校验设备绑定（缺失时 401 20405
+	// "Device proof required."）。公钥从落盘私钥实时推导，不用另存。
+	pub, err := publicFromPrivate(cred.DevicePrivatePEM)
+	if err != nil {
+		pub = ""
+	}
 	return map[string]any{
 		"DeviceID":        cred.DeviceID,
 		"MachineID":       cred.MachineID,
@@ -747,7 +844,7 @@ func refreshDeviceInfo(cred *Credential) map[string]any {
 		"DeviceName":      "DESKTOP-CPASOLO",
 		"DeviceModel":     DeviceBrand,
 		"ClientVersion":   IDEVersion,
-		"DevicePublicKey": "",
+		"DevicePublicKey": pub,
 		"DeviceBrand":     "Microsoft",
 		"DeviceCPU":       "",
 		"OSInfo":          "windows",
