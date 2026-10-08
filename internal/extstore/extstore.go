@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chipchipss/buddyhub/internal/atomicfile"
 	"github.com/chipchipss/buddyhub/internal/extprovider/accio"
 	"github.com/chipchipss/buddyhub/internal/extprovider/autoclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
@@ -104,18 +105,16 @@ func NewManager(dataDir string) *Manager {
 }
 
 func (m *Manager) saveLocked() error {
-	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {
-		return err
-	}
 	raw, err := json.MarshalIndent(store{Accounts: m.accounts}, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := m.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, m.path)
+	// 共享原子写入器（0600）。原先这里自己写 .tmp 再 rename，权限给的是 0644：
+	// Windows 忽略权限位所以从未暴露，Linux 上这份文件装着全部外部平台的凭据
+	// （session / refresh_token / DPAPI 密文密码），同机任何用户和任何能读该
+	// 目录的进程都能拿走。loomy_password_test.go 与包注释一直按「0600」写的，
+	// 现在才与声称一致。
+	return atomicfile.Write(m.path, raw)
 }
 
 // List 返回全部账号快照（按 provider + label 排序）。

@@ -86,7 +86,11 @@ func UnprotectPassword(stored string) (string, error) {
 	}
 	if len(stored) > len(pwPrefixDPAPI) && stored[:len(pwPrefixDPAPI)] == pwPrefixDPAPI {
 		if runtime.GOOS != "windows" {
-			return "", errors.New("dpapi 密文只能在 Windows 原机原用户解密")
+			// Windows 上 DPAPI 绑当前用户，非 Windows 根本没有这个设施。原先只
+			// 说「只能 Windows 解密」，运维在 Linux 上看到的就是一条没有下一步的
+			// 死消息——而下一步是把密码重输一次（重存即变本机可读的 plain: 前缀），
+			// 自动续期就回来了。session 本身照常用，只有到期续期会跳过。
+			return "", errors.New("密码是 Windows DPAPI 密文，本机解不开；请在面板重新登录该 Loomy 账号一次（重存后本机可自动续期）")
 		}
 		blob, err := base64.StdEncoding.DecodeString(stored[len(pwPrefixDPAPI):])
 		if err != nil {
@@ -94,7 +98,7 @@ func UnprotectPassword(stored string) (string, error) {
 		}
 		out, err := dpapiUnprotect(blob)
 		if err != nil {
-			return "", fmt.Errorf("DPAPI 解密失败（换用户/换机?）: %w", err)
+			return "", fmt.Errorf("DPAPI 解密失败（换了 Windows 用户或机器）；请在面板重新登录该 Loomy 账号一次: %w", err)
 		}
 		return string(out), nil
 	}

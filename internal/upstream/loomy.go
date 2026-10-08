@@ -11,9 +11,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/chipchipss/buddyhub/internal/atomicfile"
 )
 
 // DefaultLoomyBaseURL Loomy 官方生产环境任务服务地址。
@@ -121,11 +124,30 @@ func NewLoomyClient(baseURL string) *LoomyClient {
 	}
 }
 
+// loomySessionDir 面板单号凭据文件所在目录，默认 "data"（历史行为：相对 CWD）。
+// 启动装配时用 SetLoomySessionDir 改写为 state_file 的同目录。
+var loomySessionDir = "data"
+
+// SetLoomySessionDir 指定 loomy-session.json 的目录（cmd/server 传 state_file
+// 的兄弟目录，与 usage.json / model.json / task-state.json 同一条规则）。
+//
+// 为什么需要一个 setter 而不是继续写死 "data"：数据目录挪走之后（systemd 换了
+// WorkingDirectory、或 config 里改了 state_file），这里仍会往**当前目录**新建
+// 一个 data/，于是面板 Loomy 页读到空目录、桥的凭据来源 2 失效——而账号在
+// 外部池里明明是好用的。空串与 "." 一律忽略，绝不把凭据摊到当前目录。
+func SetLoomySessionDir(dir string) {
+	if dir != "" && dir != "." {
+		loomySessionDir = dir
+	}
+}
+
+// loomySessionPath 面板与 loomy 桥共用的单号凭据路径。
+func loomySessionPath() string { return filepath.Join(loomySessionDir, "loomy-session.json") }
+
 // FindLoomySession 自动探测或读取 Loomy 客户端的登录态。
 func FindLoomySession() (*LoomySession, error) {
-	// 0. 优先检查本地面板保存的会话 data/loomy-session.json
-	dataPath := filepath.Join("data", "loomy-session.json")
-	if data, err := os.ReadFile(dataPath); err == nil {
+	// 0. 优先检查本地面板保存的会话（目录见 loomySessionPath）
+	if data, err := os.ReadFile(loomySessionPath()); err == nil {
 		var raw LoomySession
 		if json.Unmarshal(data, &raw) == nil && raw.Session != "" {
 			return &raw, nil
@@ -139,46 +161,59 @@ func FindLoomySession() (*LoomySession, error) {
 		}
 	}
 
-	// 2. 检索公共目录 C:\Users\Public\Loomy\*\userData\auth-session.json
-	publicLoomy := filepath.Join(os.Getenv("PUBLIC"), "Loomy")
-	if publicLoomy == "" || publicLoomy == "Loomy" {
-		publicLoomy = `C:\Users\Public\Loomy`
+	// 2. 检索公共目录 <PUBLIC>\Loomy\*\userData\auth-session.json。PUBLIC 是
+	//    Windows 独有变量；原先 PUBLIC 未设时会伪造一个 C:\ 字面量继续找，在
+	//    Linux/macOS 上永远匹配不到（filepath.Glob 不把反斜杠当分隔符），白跑
+	//    一趟还让仓库里留了一条跨平台假路径。
+	publicLoomy := ""
+	if pub := os.Getenv("PUBLIC"); pub != "" {
+		publicLoomy = filepath.Join(pub, "Loomy")
+	} else if runtime.GOOS == "windows" {
+		publicLoomy = `C:\Users\Public\Loomy` // 精简环境无 PUBLIC 变量时的等价路径
 	}
-	matches, _ := filepath.Glob(filepath.Join(publicLoomy, "*", "userData", "auth-session.json"))
-	for _, m := range matches {
-		dir := filepath.Dir(m)
-		if s, err := readAuthSessionFromDir(dir); err == nil && s.Session != "" {
+	if publicLoomy != "" {
+		if s, ok := firstAuthSessionUnder(publicLoomy); ok {
 			return s, nil
 		}
 	}
 
-	// 3. 检索当前用户 AppData
-	if appData := os.Getenv("APPDATA"); appData != "" {
-		matches, _ = filepath.Glob(filepath.Join(appData, "Loomy", "*", "userData", "auth-session.json"))
-		for _, m := range matches {
-			dir := filepath.Dir(m)
-			if s, err := readAuthSessionFromDir(dir); err == nil && s.Session != "" {
-				return s, nil
-			}
+	// 3. 检索当前用户的客户端目录。os.UserConfigDir 在三平台各自给出正确位置
+	//    （Windows=%APPDATA%，Linux=~/.config，macOS=~/Library/Application
+	//    Support），Electron 系客户端的 userData 都落在这里——原先只查
+	//    APPDATA，Linux/macOS 上这一步直接跳过。
+	if cfgDir, err := os.UserConfigDir(); err == nil {
+		if s, ok := firstAuthSessionUnder(filepath.Join(cfgDir, "Loomy")); ok {
+			return s, nil
 		}
 	}
 
 	return nil, fmt.Errorf("未找到本地 Loomy 客户端登录态 (auth-session.json)")
 }
 
-// SaveLoomySession 保存 Loomy 凭证到 data/loomy-session.json。
+// firstAuthSessionUnder 在 <base>/*/userData/auth-session.json 里取第一个可用会话。
+func firstAuthSessionUnder(base string) (*LoomySession, bool) {
+	matches, _ := filepath.Glob(filepath.Join(base, "*", "userData", "auth-session.json"))
+	for _, m := range matches {
+		if s, err := readAuthSessionFromDir(filepath.Dir(m)); err == nil && s.Session != "" {
+			return s, true
+		}
+	}
+	return nil, false
+}
+
+// SaveLoomySession 保存 Loomy 凭证到 loomy-session.json（目录随 state_file 走）。
 func SaveLoomySession(s *LoomySession) error {
 	if s == nil || s.Session == "" {
 		return fmt.Errorf("session 为空")
-	}
-	if err := os.MkdirAll("data", 0755); err != nil {
-		return err
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join("data", "loomy-session.json"), data, 0644)
+	// 走共享原子写入器（0600 + 临时文件改名 + 同路径串行）。这里原先是
+	// os.WriteFile(..., 0644)：Windows 忽略权限位所以本地看不出问题，Linux
+	// 上等于把这个号的登录态摊给同机所有用户和任何能读目录的进程。
+	return atomicfile.Write(loomySessionPath(), data)
 }
 
 func readAuthSessionFromDir(dir string) (*LoomySession, error) {

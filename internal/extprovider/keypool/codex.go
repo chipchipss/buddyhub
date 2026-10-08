@@ -40,18 +40,32 @@ type CodexAccount struct {
 }
 
 // codexHomes 可扫描的 CODEX_HOME 候选（账号 A = 官方默认，B+ = 多号池扩展目录）。
+//
+// 主目录来源优先级：显式 CODEX_HOME（官方 codex CLI 认这个变量，服务器部署常
+// 只设它不设 HOME）→ os.UserHomeDir()/.codex。
+// HOME 取不到时返回空而不是 filepath.Join("", ".codex")＝相对路径 ".codex"——
+// 那会去扫当前工作目录里的同名文件夹，把无关目录当成账号池凭据源。
 func codexHomes() []struct {
 	Key  string
 	Home string
 } {
-	home, _ := os.UserHomeDir()
+	if env := os.Getenv("CODEX_HOME"); env != "" {
+		return []struct {
+			Key  string
+			Home string
+		}{{Key: "a", Home: env}}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
 	return []struct {
 		Key  string
 		Home string
 	}{
-		{"a", filepath.Join(home, ".codex")},
-		{"b", filepath.Join(home, ".codex-pool-b")},
-		{"c", filepath.Join(home, ".codex-pool-c")},
+		{Key: "a", Home: filepath.Join(home, ".codex")},
+		{Key: "b", Home: filepath.Join(home, ".codex-pool-b")},
+		{Key: "c", Home: filepath.Join(home, ".codex-pool-c")},
 	}
 }
 

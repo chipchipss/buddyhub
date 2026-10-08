@@ -2,6 +2,9 @@ package extstore
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -9,6 +12,27 @@ import (
 func newTestManager(t *testing.T) *Manager {
 	t.Helper()
 	return NewManager(t.TempDir())
+}
+
+// 这份文件装着所有外部平台的凭据（session / refresh_token / DPAPI 密文密码），
+// POSIX 下必须 0600。Windows 不认权限位，所以这条只能在 Linux 上真正跑到——
+// 写它是因为 saveLocked 曾长期用 0644，而包注释按 0600 描述自己。
+func TestStoreFilePermissionIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 无 POSIX 权限位")
+	}
+	dir := t.TempDir()
+	m := NewManager(dir)
+	if err := m.Add(PQoder, "q1", "Qoder 一号", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "ext-accounts.json"))
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("凭据文件权限 = %o, want 600（同机任意用户可读走全部平台凭据）", perm)
+	}
 }
 
 // 「今天跑没跑过」是任务中心待办判定的唯一依据，四个分支必须都对：

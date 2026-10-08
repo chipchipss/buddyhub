@@ -72,13 +72,18 @@ func TestUnprotectLegacyNoPrefix(t *testing.T) {
 
 // dpapi: 密文在非 Windows 上必须明确报错，而不是静默返回乱码——
 // 静默失败会让「无人值守续期」拿着错误密码反复重登。
+// 报错还要给出下一步：跨机迁移后运维面对一条死消息，只能靠猜。
 func TestDPAPICipherOnNonWindowsFailsLoudly(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows 上本就应能解密")
 	}
 	stored := pwPrefixDPAPI + "QUJD"
-	if _, err := UnprotectPassword(stored); err == nil {
-		t.Error("非 Windows 解 dpapi: 密文应报错")
+	_, err := UnprotectPassword(stored)
+	if err == nil {
+		t.Fatal("非 Windows 解 dpapi: 密文应报错")
+	}
+	if !strings.Contains(err.Error(), "重新登录") {
+		t.Errorf("错误里没有下一步动作，运维无从处理: %v", err)
 	}
 }
 

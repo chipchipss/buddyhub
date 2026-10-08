@@ -6,8 +6,56 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+// 面板 Loomy 凭据的两条 Linux-only 隐患：写死 ./data（换 WorkingDirectory 就
+// 与 state_file 分家）和 0644（Windows 不认权限位，本机永远看不出问题）。
+func TestLoomySessionFollowsDirAndIsPrivate(t *testing.T) {
+	prev := loomySessionDir
+	defer SetLoomySessionDir(prev)
+
+	dir := filepath.Join(t.TempDir(), "state")
+	SetLoomySessionDir(dir)
+	if err := SaveLoomySession(&LoomySession{Session: "sess-1", UserID: "u-1"}); err != nil {
+		t.Fatalf("落盘失败: %v", err)
+	}
+
+	path := filepath.Join(dir, "loomy-session.json")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("没有写进指定目录（%v），凭据跟着 CWD 走就是这次要修的", err)
+	}
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("登录态文件权限 = %o, want 600（同机其他用户可读）", perm)
+		}
+	}
+
+	// 读侧必须走同一个目录，否则写完自己找不到。
+	got, err := FindLoomySession()
+	if err != nil {
+		t.Fatalf("FindLoomySession 读不回: %v", err)
+	}
+	if got.Session != "sess-1" || got.UserID != "u-1" {
+		t.Fatalf("读回 %+v，期望 sess-1/u-1", got)
+	}
+}
+
+// 空串与 "." 一律忽略：一次误传就把凭据写到当前目录，正是上面要避免的事。
+func TestSetLoomySessionDirIgnoresEmptyAndDot(t *testing.T) {
+	prev := loomySessionDir
+	defer SetLoomySessionDir(prev)
+
+	dir := filepath.Join(t.TempDir(), "data")
+	SetLoomySessionDir(dir)
+	SetLoomySessionDir(".")
+	SetLoomySessionDir("")
+	if got := loomySessionPath(); got != filepath.Join(dir, "loomy-session.json") {
+		t.Fatalf("空参数把目录改成了 %s，应当保持 %s", got, filepath.Join(dir, "loomy-session.json"))
+	}
+}
 
 func TestMaskPhone(t *testing.T) {
 	cases := []struct {

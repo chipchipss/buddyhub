@@ -10,8 +10,10 @@
 // 关键协议事实（Jet-Hub 抓包+消融实验实证）：
 //   - /sash/ 端点必须带 Cosy-ClientType: 10（桌面 app 身份），用 5（CLI）恒拿不到可领活动
 //   - 还必须带 Cosy-MachineToken + Cosy-MachineType 成对头 —— 值来自本机
-//     Qoder 客户端的 %APPDATA%\Qoder\SharedClientCache\cache\machine_token.json
-//     （{token, type}）。缺任一头服务端不下发 CLAIM_BENEFIT 活动。
+//     Qoder 客户端 userData 下的
+//     SharedClientCache/cache/machine_token.json（{token, type}；Windows 上
+//     userData = %APPDATA%\Qoder，Linux = ~/.config/Qoder，见 FindMachineIdentity）。
+//     缺任一头服务端不下发 CLAIM_BENEFIT 活动。
 //     纯插件登录的账号没有该文件 → 照常发请求（只是拿不到可领项），保守降级。
 //   - claim 幂等判据是响应体 replayed:true（不是 HTTP 状态码）
 //   - 「今天已领」的判据：存在 CLAIM_BENEFIT 且 claimStatus=CLAIMED 的活动，
@@ -100,18 +102,19 @@ type MachineIdentity struct {
 //
 // 实测该文件即使很旧 token 依然有效，故不做时效校验。
 // 候选路径覆盖国际版/国内版两个客户端。
+//
+// 根目录用 os.UserConfigDir() 而不是 %APPDATA%：Windows 上两者是同一个值
+// （行为不变），Linux 给 $XDG_CONFIG_HOME|~/.config、macOS 给
+// ~/Library/Application Support——原先只读 APPDATA，非 Windows 上恒为 nil，
+// 带 machine 头的活动领取在 Linux 部署里静默不生效。
 func FindMachineIdentity() *MachineIdentity {
-	appData := os.Getenv("APPDATA")
-	if appData == "" {
+	base, err := os.UserConfigDir()
+	if err != nil || base == "" {
 		return nil
 	}
-	candidates := []string{
-		filepath.Join(appData, "Qoder", "SharedClientCache", "cache", "machine_token.json"),
-		filepath.Join(appData, "Qoder CN", "SharedClientCache", "cache", "machine_token.json"),
-		filepath.Join(appData, "com.qoder.app.stable", "SharedClientCache", "cache", "machine_token.json"),
-		filepath.Join(appData, "com.qodercn.app.stable", "SharedClientCache", "cache", "machine_token.json"),
-	}
-	for _, p := range candidates {
+	names := []string{"Qoder", "Qoder CN", "com.qoder.app.stable", "com.qodercn.app.stable"}
+	for _, name := range names {
+		p := filepath.Join(base, name, "SharedClientCache", "cache", "machine_token.json")
 		raw, err := os.ReadFile(p)
 		if err != nil {
 			continue
