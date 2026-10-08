@@ -1094,15 +1094,19 @@ func TestAutoFlush(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetCredits("u1", 77, 0)
 
+	// 轮询条件是「盘上出现 77」而不是「state.json 存在」：flusher 每 20ms 落一次，
+	// Add 与 SetCredits 之间完全可能先落一版 credits=0 的快照。按存在判定就会把
+	// 那半程状态当最终态读走——CPU 紧张（全包并跑）时实测就是这个理由失败。
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if _, err := os.Stat(fp); err == nil {
+		if s, ok := accountOnDisk(fp, "u1"); ok && s.Credits == 77 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("state.json not written by background flusher")
+			s, ok := accountOnDisk(fp, "u1")
+			t.Fatalf("后台 flusher 2s 内没把 credits=77 落盘（在盘上 ok=%v %+v）", ok, s)
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
@@ -1110,6 +1114,21 @@ func TestAutoFlush(t *testing.T) {
 	if !ok || st.Credits != 77 {
 		t.Fatalf("auto flush not persisted: %+v ok=%v", st, ok)
 	}
+}
+
+// accountOnDisk 直读 state.json 里某账号的落盘状态（不新建 Pool：探测用的池子
+// 自己带 flusher，会把被测对象写的文件再改写一遍）。
+func accountOnDisk(fp, uid string) (stateAccount, bool) {
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		return stateAccount{}, false
+	}
+	var sf stateFile
+	if json.Unmarshal(raw, &sf) != nil {
+		return stateAccount{}, false
+	}
+	s, ok := sf.Accounts[uid]
+	return s, ok
 }
 
 func TestFlushIdempotentWhenClean(t *testing.T) {
