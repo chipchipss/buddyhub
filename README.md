@@ -661,10 +661,11 @@ flowchart LR
 | 服务身份标识 | `buddyhub`（`/healthz` 的 `service` 字段与 `X-Service` 头） | `internal/server/handler.go` 的 `ServiceName` |
 | 网关生成的会话 ID | `buddyhub-<毫秒>` 等前缀 | `internal/scheduler`、`internal/upstream` |
 
-> **Release 现状（诚实口径）**：截至本次更新，仓库**没有 tag、没有 Release**，上表的 tar.gz/zip
-> 资产还取不到——`go-binaries.yml` 的 publish job 只在 `v*` tag 上运行。在首个 tag 推上去之前，
-> 单文件路径请**从源码构建**（下方三个「单文件运行」小节的 `go build` 命令就是那条路径），
-> 不要按旧 README 去 Release 页找 `wb2api.exe`。
+> **Release 现状（诚实口径）**：首个正式 Release 是 **v1.11.8**（含 5 平台二进制 +
+> `checksums.txt`），单文件路径可直接去
+> [Releases 页](https://github.com/chipchipss/buddyhub/releases) 下载对应平台的
+> `buddyhub-v<版本>-<os>-<arch>` 包；GHCR 镜像同理有 `1.11.8` / `latest` 版本 tag。
+> 后续发版照旧由 `v*` tag 自动触发。不要按旧 README 去 Release 页找 `wb2api.exe`。
 
 ### 方式〇：GHCR 镜像（免克隆免构建）
 
@@ -783,8 +784,8 @@ services:
 ### 方式二：Windows 单文件运行（无需 Docker）
 
 ```powershell
-# 1) 有 Release 时下载 buddyhub-v<版本>-windows-amd64.zip（内含 buddyhub.exe）；
-#    仓库当前还没有 tag / Release（见上方「产物名对照」），就先从源码构建：
+# 1) 下载 buddyhub-v<版本>-windows-amd64.zip（内含 buddyhub.exe，见上方「产物名对照」）；
+#    或从源码构建：
 go build -trimpath -ldflags="-s -w" -o buddyhub.exe ./cmd/server
 
 # 2) 直接运行：首次启动自动生成 config.json（含随机 api_key，日志打印一次）
@@ -801,7 +802,7 @@ exe 为**单文件自包含**（前端资源已 embed 进二进制），拷到�
 Linux 走的是同一个二进制，但**多机器部署必须处理三件事**——工作目录、时区、凭据权限：
 
 ```bash
-# 1) 构建（当前无 tag，Release 里没有 tar.gz；有 tag 后直接解压即可）
+# 1) 下载 Release 包直接解压（buddyhub-v<版本>-linux-amd64.tar.gz），或从源码构建：
 git clone https://github.com/chipchipss/buddyhub.git && cd buddyhub
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o buddyhub ./cmd/server
 
@@ -1446,9 +1447,10 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 ### 3. 发布来源与合规边界
 
-- **产物由 CI 发布，但目前还没有 tag**：`go-binaries.yml` 在 `v*` tag 上产出五平台包并附
-  `checksums.txt`（`sha256sum`），`docker-ghcr.yml` 在 `main` / `v*` 上推多架构镜像。仓库现状是无
-  tag / 无 Release，所以此刻唯一可信的产物路径是**源码自构建**（Dockerfile 多阶段在本地构建时完成）
+- **产物由 CI 发布**：`go-binaries.yml` 在 `v*` tag 上产出五平台包并附
+  `checksums.txt`（`sha256sum`），`docker-ghcr.yml` 在 `main` / `v*` 上推多架构镜像。
+  当前最新 Release 为 [v1.11.8](https://github.com/chipchipss/buddyhub/releases/tag/v1.11.8)，
+  不想等 CI 时源码自构建（Dockerfile 多阶段在本地构建时完成）依旧完全等效
 - 登录 / 签到 / 积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`
 - **校验和覆盖范围**：Release 包有 `checksums.txt`；`go.sum` 仅约束 Go 模块依赖；GHCR 镜像以 digest
   （`sha256:` manifest digest）而非单独文件校验，`docker pull` 时由 containerd 自动核对
