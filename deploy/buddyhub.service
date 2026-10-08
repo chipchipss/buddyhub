@@ -1,0 +1,61 @@
+# buddyhub 裸机（systemd）部署单元 —— Docker 之外的另一条 Linux 路径。
+#
+# 安装见 README「方式三：Linux 裸机 / systemd」。三条不能删的赋值各挡一个
+# 「进程活着、功能不对」的坑，删掉不会有报错，只会静默跑错，所以写在注释里
+# 而不是靠人记住：
+#   WorkingDirectory —— 配置里 auth_dir/state_file 默认是相对路径（./auths、
+#     ./data/state.json）。systemd 默认 CWD 是 /，不设这条就是凭据往根目录写、
+#     写不出来则每次重启全池重签一遍。
+#   Environment=TZ   —— 排程的小时槽按主机本地时区取，日界按固定 UTC+8。UTC 的
+#     Linux 宿主上「9 点」会在北京 17:00 触发；不设就靠启动那条时区警告提示。
+#   ReadWritePaths   —— ProtectSystem=strict 把 / 挂成只读，凭据/状态/配置写回
+#     要落在这两个目录（config.json 的占位密钥轮换、面板保存配置都要写文件）。
+[Unit]
+Description=BuddyHub - OpenAI 兼容网关（多账号池 + 面板 + 自动任务）
+Documentation=https://github.com/chipchipss/buddyhub
+After=network-online.target
+Wants=network-online.target
+# 配置写错（比如非法 duration）会以非零退出；不限流的话 journal 会被重启循环灌满。
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=buddyhub
+Group=buddyhub
+WorkingDirectory=/var/lib/buddyhub
+ExecStart=/usr/local/bin/buddyhub -config /etc/buddyhub/config.json
+
+# 时区：见文件头。用 TZ 而不是改机器全局时区，避免影响同机其他服务。
+Environment=TZ=Asia/Shanghai
+
+# 网关会同时开多条上游流式连接，默认 1024 fd 容易先于带宽耗尽。
+LimitNOFILE=65536
+
+# 掉线/异常退出都拉起来（网关是常驻服务，不是跑一次就退的任务）。
+Restart=always
+RestartSec=5s
+
+# 0077：新建目录收成 0700。落盘的是 accessToken/refreshToken 与池状态，
+# 文件本身由 internal/atomicfile 固定 0600，这条补齐目录权限。
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/buddyhub /etc/buddyhub
+
+# SIGTERM 走 main.go 的 signal.NotifyContext → srv.Shutdown 优雅收尾
+# （在途请求收完再退），所以 TimeoutStopSec 给足，别让 systemd 中途 SIGKILL。
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

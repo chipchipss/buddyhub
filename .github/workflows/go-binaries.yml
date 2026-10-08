@@ -37,6 +37,101 @@ jobs:
       # ubuntu runner 自带 node → panel 包的 JS 运行时冒烟测试（TestAppJSTopLevelSmoke）会真实执行
       - run: go test ./...
 
+      # Linux 裸机启动冒烟。存在的理由：上面的交叉矩阵只证明「编得出来」，而本仓库的
+      # Linux 专属分支（0600 凭据权限、WB2A_* 环境变量覆盖、时区警告、优雅停机）在
+      # Windows 开发机上要么看不见、要么永远为真。这里在真实 Linux 上逐个跑出正/负两面。
+      - name: Linux 裸机启动冒烟
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          BIN="$RUNNER_TEMP/buddyhub-smoke"
+          go build -trimpath -ldflags="-s -w" -o "$BIN" ./cmd/server
+          PORT=7899
+          BASE="http://127.0.0.1:$PORT"
+
+          wait_ready() { # $1=日志文件
+            for _ in $(seq 1 60); do
+              code=$(curl -s -o "$1.health" -w '%{http_code}' "$BASE/healthz" || echo 000)
+              if [ "$code" = 200 ] || [ "$code" = 503 ]; then return 0; fi
+              sleep 0.5
+            done
+            return 1
+          }
+
+          # ---- A) 全新目录、无配置、无凭据（新人 clone 后第一命令的形态）----
+          A="$RUNNER_TEMP/a"; mkdir -p "$A"; cd "$A"
+          export WB2A_LISTEN="127.0.0.1:$PORT"
+          "$BIN" -config config.json > a.log 2>&1 &
+          APID=$!
+          wait_ready a || { kill "$APID" 2>/dev/null || true; cat a.log; fail "A: 60 次探测内没起来"; }
+          grep -q '"api_key": "sk-' config.json || fail "A: 首启没自动生成随机 api_key"
+          [ "$(stat -c '%a' config.json)" = "600" ] || fail "A: config.json 权限应为 600，实为 $(stat -c '%a' config.json)"
+          grep -q '"service":"buddyhub"' a.health || fail "A: /healthz 没透出 service=buddyhub"
+          grep -q "listening on 127.0.0.1:$PORT" a.log || fail "A: WB2A_LISTEN 没生效（日志端口不对）"
+          [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/v1/models")" = "401" ] || fail "A: 无密钥 /v1/models 应 401"
+          KEY=$(sed -n 's/.*"api_key": "\(sk-[^"]*\)".*/\1/p' config.json)
+          [ "$(curl -s -o a.models -w '%{http_code}' -H "Authorization: Bearer $KEY" "$BASE/v1/models")" = "200" ] || fail "A: 带密钥 /v1/models 应 200"
+          grep -q '"object":"model"' a.models || fail "A: /v1/models 没返回模型目录"
+          [ "$(curl -s -o a.panel -w '%{http_code}' "$BASE/panel/")" = "200" ] || fail "A: 面板页应 200"
+          ct=$(curl -s -o /dev/null -w '%{content_type}' "$BASE/panel/js/boot.js")
+          [ "$ct" = "text/javascript; charset=utf-8" ] || fail "A: 面板 JS 没内嵌进二进制（content-type=$ct）"
+          # runner 默认 UTC → 排程按北京时间划天，两条时间线错开，警告必须出现
+          grep -q '主机时区' a.log || fail "A: UTC 宿主上没打时区警告（正例失败）"
+          kill -TERM "$APID"
+          for _ in $(seq 1 20); do kill -0 "$APID" 2>/dev/null || break; sleep 0.5; done
+          if kill -0 "$APID" 2>/dev/null; then fail "A: SIGTERM 10 秒内没退出"; fi
+          grep -q 'bye$' a.log || fail "A: 没走优雅停机路径（日志缺 bye）"
+
+          # ---- B) TZ=Asia/Shanghai（容器/systemd 的推荐形态）→ 同一警告必须消失 ----
+          B="$RUNNER_TEMP/b"; mkdir -p "$B"; cd "$B"
+          export TZ=Asia/Shanghai
+          "$BIN" -config config.json > b.log 2>&1 &
+          BPID=$!
+          wait_ready b || { kill "$BPID" 2>/dev/null || true; cat b.log; fail "B: 没起来"; }
+          if grep -q '主机时区' b.log; then fail "B: 主机已是北京时间还警告（负例失败）"; fi
+          kill -TERM "$BPID"; wait "$BPID" 2>/dev/null || true
+          unset TZ
+
+          # ---- C) 用 config.example.json 起步 → 公开占位密钥必须就地换掉并写回 ----
+          C="$RUNNER_TEMP/c"; mkdir -p "$C"; cd "$C"
+          cp "$GITHUB_WORKSPACE/config.example.json" config.json
+          grep -q '"api_key": "test_key"' config.json || fail "C: 样例配置已不含 test_key，本用例前提变了"
+          export TZ=UTC
+          "$BIN" -config config.json > c.log 2>&1 &
+          CPID=$!
+          wait_ready c || { kill "$CPID" 2>/dev/null || true; cat c.log; fail "C: 没起来"; }
+          grep -q '示例占位符' c.log || fail "C: 没报告占位密钥被轮换"
+          ! grep -q '"api_key": "test_key"' config.json || fail "C: 写回失败，文件里还是公开占位密钥"
+          [ "$(stat -c '%a' config.json)" = "600" ] || fail "C: 写回后权限应为 600"
+          kill -TERM "$CPID"; wait "$CPID" 2>/dev/null || true
+
+      # Linux 单文件 bind mount 上 rename 会失败（EBUSY/EXDEV），配置写回因此要走
+      # 就地 O_TRUNC 回退路径 —— 这正是 Docker 部署唯一能碰到它的地方。
+      - name: 单文件 bind mount 下配置写回
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          BIN="$RUNNER_TEMP/buddyhub-smoke"
+          SRC="$RUNNER_TEMP/mnt/config.json"
+          DST="$RUNNER_TEMP/mnt/inside.json"
+          mkdir -p "$RUNNER_TEMP/mnt" "$(dirname "$DST")"
+          cp "$GITHUB_WORKSPACE/config.example.json" "$SRC"
+          touch "$DST"
+          sudo mount --bind "$SRC" "$DST" || { echo "::notice::runner 不支持 bind mount，跳过"; exit 0; }
+          cd "$(dirname "$DST")"
+          WB2A_LISTEN=127.0.0.1:7901 TZ=UTC timeout 25 "$BIN" -config "$DST" > d.log 2>&1 &
+          DPID=$!
+          for _ in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7901/healthz || echo 000)
+            { [ "$code" = 200 ] || [ "$code" = 503 ]; } && break
+            sleep 0.5
+          done
+          kill -TERM "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
+          sudo umount "$DST"
+          grep -q '示例占位符' d.log || { cat d.log; fail "占位密钥没走回退路径写回"; }
+          ! grep -q '"api_key": "test_key"' "$SRC" || fail "bind mount 目标没被写回"
+          echo "回退路径 OK：挂载文件已就地轮换密钥"
+
   build:
     needs: test
     runs-on: ubuntu-latest

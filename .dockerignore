@@ -3,6 +3,7 @@ data/
 *.tmp
 .git/
 .gitignore
+.gitattributes
 docs/
 scripts/__pycache__/
 # 根目录已提交/未提交的二进制产物不进构建上下文（与 .gitignore 对齐）
@@ -10,6 +11,17 @@ scripts/__pycache__/
 /credit
 /buddyhub
 /signin_bin
+*.exe
+# 本地临时产物：诊断脚本、抓包台账、会话导出全在这里，一句 `COPY . .` 就会
+# 把它们带进构建阶段层（最终镜像不含，但构建缓存里留着）。凭据类目录必须排除。
+tmp/
+.claude/
+*.log
+# 外来参考仓库（调研用，不属于本模块，git 里也没跟踪）
+/ima2api/
+/marvis2api/
+/tencent-ima-copilot-mcp/
+/refs/
 # 真实配置不进镜像（镜像默认用 config.example.json，生产以挂载卷覆盖）
 config.json
 PLAN.md

@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.23-alpine AS build
 WORKDIR /src
-COPY go.mod ./
+# go.sum 必须与 go.mod 同层：只 COPY go.mod 时 `go mod download` 那层拿不到
+# 校验和，go.sum 要到 `COPY . .` 才进来——依赖层缓存因此失去意义（改 go.sum
+# 会重下全部依赖），且校验推迟到构建之后。
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
@@ -26,8 +29,11 @@ COPY --from=build /out/credit /app/credit
 COPY login.sh signin.sh credit.sh /app/
 COPY scripts/probe_active.py /app/scripts/probe_active.py
 RUN sed -i 's/\r$//' /app/login.sh /app/signin.sh /app/credit.sh && chmod 755 /app/login.sh /app/signin.sh /app/credit.sh
-# 镜像不带真实配置：落 example 作为默认（生产由挂载卷 /app/config.json 覆盖）
-COPY config.example.json /app/config.json
+# 镜像不带真实配置：落 example 作为默认（生产由挂载卷 /app/config.json 覆盖）。
+# 必须 --chown 给 app：首启会把 example 里的占位 api_key 换成随机密钥并写回该
+# 文件（cmd/server/config.go: rotateExampleKey），root 所有的 0644 文件写不回去
+# 就只能带着公开可预测的密钥跑起来。
+COPY --chown=app:app config.example.json /app/config.json
 USER app
 EXPOSE 7863
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \

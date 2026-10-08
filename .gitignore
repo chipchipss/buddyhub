@@ -8,10 +8,12 @@ data/
 .env.*
 
 # Binaries (anchored to repo root only — bare "login"/"credit" would also ignore cmd/login/, cmd/credit/)
+# /server：不带 -o 直接 `go build ./cmd/server` 的默认产物名（Linux/macOS 无 .exe 后缀）。
 /login
 /credit
 /buddyhub
 /signin_bin
+/server
 
 # Config with secrets (use config.example.json)
 config.json

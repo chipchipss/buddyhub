@@ -1,0 +1,22 @@
+# 全仓库统一 LF，检出时不随平台改写。
+#
+# 为什么要显式写死：仓库里的提交对象本来全是 LF，但 Windows 上
+# core.autocrlf=true 会把检出内容变成 CRLF，于是出现两类只有别人会踩的问题：
+#   1) gofmt -l 把每个 CRLF 的 .go 文件都列出来（看着像格式没跑过）；
+#   2) 从 Windows 检出目录直接 build Docker 镜像时，上下文里的 login.sh /
+#      signin.sh / credit.sh 带着 CRLF，容器里 ./login.sh 报 bad interpreter
+#      ——Dockerfile 里那句 sed 就是给这个场景擦屁股的。
+# 本仓库不含 .bat/.ps1 等必须 CRLF 的文件，所以可以一刀切。
+* text=auto eol=lf
+
+# 明确的二进制类型，防止 text=auto 的内容嗅探把它们当文本转换。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.pdf binary

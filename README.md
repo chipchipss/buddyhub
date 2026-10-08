@@ -23,7 +23,7 @@
 
 ## 项目简介
 
-WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。
+BuddyHub（曾用名 WorkBuddy2API，二进制与服务身份现为 `buddyhub`）是一个自托管的 **OpenAI 兼容反向代理网关**，把腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。
 
 - 官方不提供 OpenAI 形态的开放 API，本项目通过 **OAuth 设备授权**（面板「添加账号」或 `login.sh`）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
 - 面向 **个人多账号** 场景：多账号共享、单号故障自动换号、冷却 / 熔断防止雪崩、会话粘性保证多轮上下文不跳号；
@@ -111,7 +111,9 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 召唤开学季专家 | +50c +1抽奖 | viewed 后 mp 事件链（召唤×3 + 对话） |
 | 学生认证 | +100c | 需微信学生真实认证，不做 |
 
-抽奖次数自动全部抽完。期间逆向成果（cf-connect 加密通道、mp 云对话全链路）记录在 `data/desktop-task-protocol.md` §8。
+抽奖次数自动全部抽完。期间逆向成果（cf-connect 加密通道、mp 云对话全链路）记在维护者的本地研究笔记里
+（`data/desktop-task-protocol.md` §8；`data/` 与除本文件外的 `*.md` 都在 `.gitignore` 内，**该笔记不随仓库分发**，
+此处只保留结论出处，不作为可读链接）。
 
 同一活动在成长任务中心还有两条**小程序口径**任务（`X-Client-Platform: miniprogram` 专属下发，默认列表不可见，各 +100c+5e）：
 
@@ -641,9 +643,28 @@ flowchart LR
 ### 环境要求
 
 - **Docker + Docker Compose**（服务端部署方式，镜像内已含低权限用户与全部工具脚本）——或
-- **Windows / macOS / Linux 直接跑单文件二进制**（无需 Docker，见下方「Windows 单文件运行」）
+- **Windows / macOS / Linux 直接跑单文件二进制**（无需 Docker，见「[Windows 单文件运行](#方式二windows-单文件运行无需-docker)」
+  与「[Linux 裸机 / systemd](#方式三linux-裸机--systemd无需-docker)」）
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
 - 宿主机 Go ≥ 1.22（仅从源码构建时需要）
+
+### 产物名对照（先看清这个，否则第一步就会失败）
+
+仓库改名为 `buddyhub` 后，README 早先写的都是**祖先仓库 / 旧二进制名**，照旧名操作会 404。当前真实名字：
+
+| 东西 | 真实名称 | 由谁产生 |
+|---|---|---|
+| 源码仓库 | `github.com/chipchipss/buddyhub` | — |
+| Docker 镜像 | `ghcr.io/<你的仓库拥有者>/buddyhub`（本仓库即 `ghcr.io/chipchipss/buddyhub`） | `docker-ghcr.yml`，push `main` / `v*` tag |
+| 主服务二进制 | `buddyhub`（Windows 为 `buddyhub.exe`） | `go build ./cmd/server` |
+| Release 资产 | `buddyhub-v<版本>-windows-amd64.zip` / `-linux-amd64.tar.gz` / `-linux-arm64.tar.gz` / `-darwin-*.tar.gz` | `go-binaries.yml`，**仅 `v*` tag 触发** |
+| 服务身份标识 | `buddyhub`（`/healthz` 的 `service` 字段与 `X-Service` 头） | `internal/server/handler.go` 的 `ServiceName` |
+| 网关生成的会话 ID | `buddyhub-<毫秒>` 等前缀 | `internal/scheduler`、`internal/upstream` |
+
+> **Release 现状（诚实口径）**：截至本次更新，仓库**没有 tag、没有 Release**，上表的 tar.gz/zip
+> 资产还取不到——`go-binaries.yml` 的 publish job 只在 `v*` tag 上运行。在首个 tag 推上去之前，
+> 单文件路径请**从源码构建**（下方三个「单文件运行」小节的 `go build` 命令就是那条路径），
+> 不要按旧 README 去 Release 页找 `wb2api.exe`。
 
 ### 方式〇：GHCR 镜像（免克隆免构建）
 
@@ -652,19 +673,30 @@ CI 会自动构建多架构镜像（`amd64` / `arm64`）并发布到 GHCR，`git
 ```bash
 # 1. 准备配置与数据目录
 mkdir -p auths data && cp config.example.json config.json
-#    建议编辑 config.json 设置 api_key（或留空由程序自动生成随机密钥）
+#    api_key 可以不改：config.example.json 里的 "test_key" 是公开仓库里看得到的占位符，
+#    网关启动时自动换成随机 sk-… 并写回本文件（日志打印一次，之后去文件里取）。
+#    想自己定密钥就直接编辑 config.json 写 api_key，程序不会覆盖非占位符的值。
 
 # 2. 拉取并运行
-docker run -d --name workbuddy2api \
+docker run -d --name buddyhub \
   -p 7863:7863 -e TZ=Asia/Shanghai \
   -v ./auths:/app/auths -v ./data:/app/data -v ./config.json:/app/config.json \
-  ghcr.io/linguo2625469/workbuddy2api-panel:latest
+  ghcr.io/chipchipss/buddyhub:latest
 
 # 3. 健康检查（无可用账号时返回 503）
 curl -s http://localhost:7863/healthz
+# {"healthy":0,"total":0,"service":"buddyhub"}
 ```
 
-> **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `workbuddy2api-panel` →
+> **Linux 宿主上先解决属主**：镜像以 `app`（uid 10001）运行，而 `mkdir` 出来的 `auths/`、`data/`
+> 和 `cp` 出来的 `config.json` 属于当前用户，10001 写不进去，症状是登录/落盘报
+> `permission denied`。三选一：`sudo chown -R 10001:10001 auths data config.json`、
+> 加 `--user "$(id -u):$(id -g)"`、或改走下面的 Compose 方式（`PUID`/`PGID` 已参数化）。
+>
+> **`config.json` 不能挂 `:ro`**：面板「配置」页和上面的占位符更换都要写回该文件。
+> Linux 单文件 bind mount 无法 rename 覆盖（`EBUSY`），程序内置了就地 `O_TRUNC` 写回的回退路径。
+>
+> **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `buddyhub` →
 > Package settings → Change visibility → Public，否则拉取需要 `docker login ghcr.io`。
 >
 > 镜像 tag 规则：`main` 分支推送 `latest` / `main` / `sha-xxxxxx`；打 `v*` tag 额外发布
@@ -674,19 +706,21 @@ curl -s http://localhost:7863/healthz
 
 ```bash
 # 1. 克隆
-git clone https://github.com/linguo2625469/workbuddy2api-panel.git
-cd workbuddy2api-panel
+git clone https://github.com/chipchipss/buddyhub.git
+cd buddyhub
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
 cp config.example.json config.json
-#    建议编辑 config.json 设置 api_key（或留空由程序自动生成随机密钥）
+#    api_key 可留占位符不填：启动时自动换成随机 sk-… 并写回（详见方式〇的说明）
 
 # 3. 启动（首次会构建镜像，约 1-2 分钟）
+#    Linux 宿主建议带上自己的 uid/gid，否则挂载目录属主对不上会 permission denied：
+#    PUID=$(id -u) PGID=$(id -g) docker compose up -d --build
 docker compose up -d --build
 
 # 4. 健康检查（无可用账号时返回 503）
 curl -s http://localhost:7863/healthz
-# {"healthy":0,"total":0,"service":"workbuddy2api"}
+# {"healthy":0,"total":0,"service":"buddyhub"}
 ```
 
 启动后打开 **`http://localhost:7863/panel/`**，用面板「添加账号」完成登录（见下节）。
@@ -702,11 +736,12 @@ docker compose down             # 停止并移除容器（数据在 ./auths 与 
 ### 方式二：Windows 单文件运行（无需 Docker）
 
 ```powershell
-# 1) 下载 Release 中的 wb2api.exe，或从源码构建
-go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
+# 1) 有 Release 时下载 buddyhub-v<版本>-windows-amd64.zip（内含 buddyhub.exe）；
+#    仓库当前还没有 tag / Release（见上方「产物名对照」），就先从源码构建：
+go build -trimpath -ldflags="-s -w" -o buddyhub.exe ./cmd/server
 
 # 2) 直接运行：首次启动自动生成 config.json（含随机 api_key，日志打印一次）
-.\wb2api.exe -config config.json
+.\buddyhub.exe -config config.json
 
 # 3) 浏览器打开面板添加账号
 #    http://127.0.0.1:7863/panel/
@@ -714,7 +749,47 @@ go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
 
 exe 为**单文件自包含**（前端资源已 embed 进二进制），拷到任意 Windows 机器即可运行，只需保证 `auths/`（凭证）与 `data/`（状态）目录可写。
 
-### 方式三：源码运行（开发调试）
+### 方式三：Linux 裸机 / systemd（无需 Docker）
+
+Linux 走的是同一个二进制，但**多机器部署必须处理三件事**——工作目录、时区、凭据权限：
+
+```bash
+# 1) 构建（当前无 tag，Release 里没有 tar.gz；有 tag 后直接解压即可）
+git clone https://github.com/chipchipss/buddyhub.git && cd buddyhub
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o buddyhub ./cmd/server
+
+# 2) 独立于源码的运行时目录（避免以 root 构建的树可写=服务可写）
+sudo install -m 0755 buddyhub /usr/local/bin/buddyhub
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin buddyhub
+sudo mkdir -p /etc/buddyhub /var/lib/buddyhub
+sudo cp config.example.json /etc/buddyhub/config.json
+sudo chown -R buddyhub:buddyhub /etc/buddyhub /var/lib/buddyhub
+sudo chmod 600 /etc/buddyhub/config.json
+
+# 3) 装 unit 并启动
+sudo cp deploy/buddyhub.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now buddyhub
+systemctl status buddyhub
+journalctl -u buddyhub -f
+```
+
+`deploy/buddyhub.service` 里三个值不能省，删掉就得到「服务正常但功能不对」：
+
+- **`Environment=TZ=Asia/Shanghai`** —— 签到 / 出行 / 活跃等定时任务的**小时槽按主机本地时区**取（`nextFire` 用
+  `now.Location()`），而按天去重的**日界**用固定 UTC+8。UTC 的 Linux 宿主上两者错开 8 小时：配置里的
+  「9 点」会在北京 17:00 触发，且当日首次点火可能落错天。不设 TZ 时网关启动会打一条警告（见下）。
+- **`WorkingDirectory=/var/lib/buddyhub`** —— `auth_dir` / `state_file` 默认是相对路径（`./auths`、
+  `./data/state.json`），systemd 默认工作目录是 `/`，不设这条就是「每次重启全池重签一遍」。
+- **`ReadWritePaths=`（不能用 `ProtectSystem=strict` 单独兜住）** —— 凭据、状态、`config.json` 写回都要落在这两个可写路径上；
+  其余文件系统对服务只读，进程被攻破时拿不到系统写权限。
+
+凭据权限：Linux 上 `auths/*.json`、`data/*.json`、`loomy-session.json`、`ext-accounts.json` 都由
+`internal/atomicfile` 以 **0600** 写出（同机其他用户读不到）。从 **Windows 迁过来**的 Loomy 账号密码是
+DPAPI 密文，绑定「原机器 + 原 Windows 用户」，Linux 上永久解不开——网关不再静默跳过，而是在日志和
+账号状态里给出「请在面板重新登录该 Loomy 账号一次」的提示。
+
+### 方式四：源码运行（开发调试）
 
 ```bash
 go build ./...
@@ -725,14 +800,17 @@ go run ./cmd/server -config config.json
 
 > 前端没有独立的 dev server：`internal/panel/web/` 下的 ES 模块与样式在构建时 embed 进二进制，**改完重新 `go build` 即可**（浏览器刷新时记得 Ctrl+F5，模块有缓存）。有 node 时 `go test ./internal/panel/` 会额外跑模块语法校验与顶层求值冒烟，无 node 自动跳过。
 
-构建全部二进制：
+构建全部二进制（主服务产物叫 `buddyhub`；`.gitignore` 里的四条 `/buddyhub /signin_bin /login /credit` 锚定在仓库根目录，就是为了不吞掉 `cmd/login/`、`cmd/credit/` 这些同名源码目录）：
 
 ```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o buddyhub ./cmd/server
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o signin_bin ./cmd/signin
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o login ./cmd/login
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
 ```
+
+> 还有第五个 `cmd/trial`（一次性批量领 global trial 加油包），故意不预编译进镜像，需要时
+> `go run ./cmd/trial` 或自行构建后 `docker cp` 进去。
 
 ### 添加账号（登录）
 
@@ -949,7 +1027,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 - 一条上报同时点亮 growth 连登 + 解锁 `first_buddy` 任务（领养前置）
 - 每号每天 1 次即可（单时点）：日活跃奖励按天去重，重复上报无额外收益
-- `conversationId` 由网关生成（`wb2api-<ms>`），无需真实会话
+- `conversationId` 由网关生成（`buddyhub-<ms>`，见 `internal/scheduler/scheduler.go`），无需真实会话
 - 限速：账号间间隔 800ms（与旅行同口径）
 - **streak 自检**：上报成功后回读连登天数（只读 oracle），日志每号一行可 grep：`activity <uid>: streak days=N`。`days=0` 记 **warn**（`report OK but streak.days=0 (silent drop?)`，对应上游「200 但静默丢弃」）；回读失败记 warn 但不影响主流程（上报按天幂等，不重试，只观测）
 - 手动诊断 / 补跑用 `python3 scripts/probe_active.py`（只读探测；写操作默认 dry-run，需 `--yes`）
@@ -1069,12 +1147,12 @@ web/
 `/healthz` 响应示例（200 / 503 同结构，仅状态码与计数变化）：
 
 ```json
-{"healthy": 2, "total": 3, "service": "workbuddy2api"}
+{"healthy": 2, "total": 3, "service": "buddyhub"}
 ```
 
-响应同时带 `X-Service: workbuddy2api` 头。这两个身份标识用于区分**本网关**与同端口上可能残留的其他服务——对方即使返回 2xx 也不会带该字段 / 头，宿主探测据此避免"假成功"。
+响应同时带 `X-Service: buddyhub` 头。这两个身份标识用于区分**本网关**与同端口上可能残留的其他服务——对方即使返回 2xx 也不会带该字段 / 头，宿主探测据此避免"假成功"。
 
-**宿主健康探测指引**：强校验（推荐）用 `/status` + `api_key`——只有持有正确 `api_key` 的本网关返回 200，其他服务返回 401 / 404；弱校验（不适合持 key 的负载均衡器）用 `/healthz` + `service` 字段判据（`/healthz` 恒无鉴权，`service == "workbuddy2api"` 才算命中本网关）。容器自带 `HEALTHCHECK` 用的就是弱校验（仅进程内自检，够用）。
+**宿主健康探测指引**：强校验（推荐）用 `/status` + `api_key`——只有持有正确 `api_key` 的本网关返回 200，其他服务返回 401 / 404；弱校验（不适合持 key 的负载均衡器）用 `/healthz` + `service` 字段判据（`/healthz` 恒无鉴权，`service == "buddyhub"` 才算命中本网关）。容器自带 `HEALTHCHECK` 用的就是弱校验（仅进程内自检，够用）。
 
 ### 模型路由（前缀即协议）
 
@@ -1202,12 +1280,14 @@ python import_codearts.py <accessKeys.csv>   # CodeArts AK/SK 批量导入面板
 
 多阶段镜像（`golang:1.23-alpine` 构建 → `alpine:3.20` 运行）一次编译全部四个二进制并随镜像分发：
 
-- **wb2api**（主服务）、**signin_bin**、**login**、**credit** + 脚本（`login.sh` / `signin.sh` / `credit.sh` / `scripts/probe_active.py`）
+- **buddyhub**（主服务）、**signin_bin**、**login**、**credit** + 脚本（`login.sh` / `signin.sh` / `credit.sh` / `scripts/probe_active.py`）
 - 以 `app` 用户（uid 10001）运行，`app/auths` 与 `app/data` 预建
-- 镜像内默认落 `config.example.json` 作为空配置（不含密钥），生产用挂载卷覆盖 `/app/config.json`
+- 镜像内 `config.example.json` 直接落为 `/app/config.json`（`--chown=app:app`），其中的 `api_key` 是
+  公开可预测的占位符 `test_key`，首启由 `rotateExampleKey` 换成随机密钥并写回；生产仍建议挂载卷覆盖
 - 内置 `HEALTHCHECK`（`wget /healthz`，30s 间隔）
 
-账号 / 数据通过 `docker-compose.yml` 卷挂载持久化：`./auths`、`./data`、`./config.json`。
+账号 / 数据通过 `docker-compose.yml` 卷挂载持久化：`./auths`、`./data`、`./config.json`（**不挂 `:ro`**，
+面板保存配置和占位符密钥轮换都要写回它）。
 
 ### 跨平台构建
 
@@ -1220,11 +1300,33 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o buddyhub ./cmd/server
 # macOS / Windows 同理，换 GOOS/GOARCH 即可
 ```
 
+> **「能编译出来」不等于「在 Linux 上行为正确」**。交叉编译矩阵只保证类型和 build tag 过得了，
+> 下面这几类只有真正在 Linux 上跑才会暴露，已经逐个修掉（每条都有对应测试）：
+>
+> | 类别 | Windows 上的表现 | Linux 上的后果 |
+> |---|---|---|
+> | 凭据文件权限位 | `os.WriteFile(..., 0644)` 的权限参数被完全忽略，看不出问题 | `loomy-session.json` / `ext-accounts.json` 世界可读，同机任何进程拿走全部平台凭据 → 现统一走 `internal/atomicfile`（0600） |
+> | 相对数据目录 | 双击 exe 时 CWD 就是程序目录，凭据自然落在旁边 | systemd / cron 的 CWD 是 `/`，凭据写进根目录或干脆写不出来 → `data/` 类文件现跟随 `state_file` 的兄弟目录，`loomy-session.json` 一并纳入 |
+> | 硬编码 Windows 路径 | `%APPDATA%\Loomy`、`C:\Users\Public\Loomy` 探测正常 | 这些字符串在 Linux 上永不命中，客户端凭据「查无」被误报成账号问题 → 改用 `os.UserConfigDir()` / `os.UserHomeDir()`，并保留 Windows 分支 |
+> | 主机本地时区 | 开发机就在 UTC+8，两条时间线重合 | 小时槽按本地时区、日界按固定 UTC+8，错开 8 小时 → 见下方时区说明与 `deploy/buddyhub.service` |
+>
+> **时区**：调度器的**小时槽**取自主机本地时区（`nextFire` 用 `now.Location()`），而**日界**
+> （签到 / 出行的「今天是否已跑过」）用固定 UTC+8。两者只有在主机时区为北京时间时才重合。
+> 因此：容器请带 `-e TZ=Asia/Shanghai`（compose 已写死）、systemd 请保留
+> `Environment=TZ=Asia/Shanghai`（镜像装了 `tzdata`）；裸机若坚持 UTC，请把 `schedule.*` 的
+> 小时值整体平移 +8 的补数，并接受启动时的时区警告。网关启动时会检查 `time.Now().Zone()`
+> 的偏移，不等于 +8 且排程已启用时打一条 warn，把这条踩坑变成可见的。
+>
 > 唯一的平台相关代码是 **Loomy 密码的 Windows DPAPI 加密**（`internal/upstream/loomy_dpapi_windows.go`，
 > `//go:build windows`）。非 Windows 由 `loomy_dpapi_other.go` 提供桩，实际走
-> `plain:` 明文前缀落盘（文件由 extstore 以 0600 写出）——DPAPI 绑定「本机+当前用户」，
+> `plain:` 明文前缀落盘（文件由 atomicfile 以 0600 写出）——DPAPI 绑定「本机+当前用户」，
 > 没有跨平台等价物。**它曾经没有 build tag，导致 Linux 交叉编译失败、Docker 镜像构建不出来**，
-> 现已拆分隔离（见 `loomy_store.go` 的 runtime.GOOS 分支）。
+> 现已拆分隔离（见 `loomy_store.go` 的 runtime.GOOS 分支）。从 Windows 迁到 Linux 的存量 Loomy
+> 密码解不开，日志会直接给出「请在面板重新登录该 Loomy 账号一次」，不再静默跳过。
+>
+> 另有**故意保留的 Windows 指纹**：`internal/zai/fingerprint.go`、`upstream/desktop.go`、
+> `upstream/school.go`、`extprovider/lobsterai`、`extprovider/trae` 里的设备指纹 payload 写死
+> Windows，**不要**「顺手」改成 `runtime.GOOS`——一批账号暴露出 Linux 内核指纹会被上游判成同源。
 
 **镜像里没有 Node.js / Chromium**，因此 `schedule.zai.captcha_solver`（Z.AI Plan 通道的
 阿里云无痕验证求解器）在容器内不可用——不配置时 `zai:` 通道降级为**仅 API Key 回退**，
@@ -1286,15 +1388,23 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 ### 2. 网络暴露与日志敏感度
 
-- 默认监听 `:7863`，compose 暴露 `0.0.0.0:7863`，**无内置 TLS**；公网部署必须设置 `api_key`，建议前置反代 / 内网
+- **默认监听 `:7863`（所有网卡）**，compose 暴露 `0.0.0.0:7863`，**无内置 TLS**；公网部署必须设置 `api_key`，建议前置反代 / 内网
+- **`api_key` 为空 = 不鉴权**（不是「随机密钥」）：`api_key` 与 `api_keys` 都留空且监听地址是公网可达时，
+  任何能连到该端口的人都能调用池里全部账号，网关启动会打一条 warn 提醒；要么设密钥，要么改监听 `127.0.0.1:7863`。
+  从 `config.example.json` 复制出来的 `test_key` 是公开仓库里看得到的占位符，首启会自动换成随机 `sk-…` 并写回配置文件
 - 请求日志字段：序号 / 模型 / 模式 / 状态码 / **uid 前 8 位** / TTFB / token 数——**不含** `accessToken` / `refreshToken` / `api_key` 明文（不读取 `Authorization` 头）
 - 日志写 **stdout / stderr**（容器内进入 `docker logs`），代码无任何落盘日志文件
+- **凭据文件权限**：`auths/*.json`、`data/*.json`、`ext-accounts.json`、`loomy-session.json` 一律经
+  `internal/atomicfile` 以 **0600** 原子写出。Windows 忽略权限参数，这条只在 Linux/macOS 上真正生效
 
 ### 3. 发布来源与合规边界
 
-- **无预编译 release**：仓库无 Release / tag，产物 = 源码自构建（Dockerfile 多阶段在本地构建时完成）
+- **产物由 CI 发布，但目前还没有 tag**：`go-binaries.yml` 在 `v*` tag 上产出五平台包并附
+  `checksums.txt`（`sha256sum`），`docker-ghcr.yml` 在 `main` / `v*` 上推多架构镜像。仓库现状是无
+  tag / 无 Release，所以此刻唯一可信的产物路径是**源码自构建**（Dockerfile 多阶段在本地构建时完成）
 - 登录 / 签到 / 积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`
-- **无产物校验和**：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
+- **校验和覆盖范围**：Release 包有 `checksums.txt`；`go.sum` 仅约束 Go 模块依赖；GHCR 镜像以 digest
+  （`sha256:` manifest digest）而非单独文件校验，`docker pull` 时由 containerd 自动核对
 - 上游 CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
 
 ### 4. 授权使用边界
