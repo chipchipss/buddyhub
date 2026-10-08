@@ -60,6 +60,12 @@ usage.json
 /server.log
 /server.err.log
 
+# 本机专属的 compose 覆写（改端口绑定、加外部网络、换 TZ/卷路径）。
+# docker compose 会自动合并同目录的 docker-compose.override.yml，所以它是「在我这台机器
+# 上跟默认不一样」的正确落点——不用在部署机上背一个本地 commit（背了就要 reset --hard +
+# cherry-pick，一旦上游也改 docker-compose.yml 就必冲突，见 README 方式一）。
+docker-compose.override.yml
+
 # 参考仓库 / 调研产物（外来项目，不属于本仓库）
 /ima2api/
 /marvis2api/

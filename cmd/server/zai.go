@@ -69,7 +69,10 @@ func buildZaiStack(cfg *Config) (*zai.Client, *zai.CaptchaManager) {
 	captcha.Start()
 
 	blocks := zai.LoadSystemBlocks(zc.SystemFile)
-	if len(blocks) == 0 {
+	// 身份块是「走 Plan 通道的 JWT 账号」的前提，所以只在真有这样账号时才警告。
+	// 原先无条件打这条：没配 zai 的部署每次启动多两行废话（这条 + 就绪:0 个账号），
+	// 而 0 账号时 3012 这个后果根本不可能发生——警告的适用条件不成立。
+	if len(blocks) == 0 && gate() {
 		log.Printf("[zai] 未配置 Plan 通道身份块（schedule.zai.system_file）：JWT 账号可能被上游拒为 3012")
 	}
 
@@ -97,8 +100,12 @@ func buildZaiStack(cfg *Config) (*zai.Client, *zai.CaptchaManager) {
 		_ = stopClaim
 	}
 
-	log.Printf("[zai] 账号池就绪：%d 个账号（%s）· 单账号并发 %d · 验证码求解器 %s · 额度轮询 %d 分钟 · 领取轮 %d 分钟",
-		len(accounts), accountsPath, maxConc, enabledWord(captcha.Enabled()), interval, claimMin)
+	// 空池时上面那条「账号池为空」已经说完了（含往哪加账号），这条纯重复；
+	// 打出来只会让没启用 zai 的部署每次启动多一行 0 个账号。
+	if len(accounts) > 0 {
+		log.Printf("[zai] 账号池就绪：%d 个账号（%s）· 单账号并发 %d · 验证码求解器 %s · 额度轮询 %d 分钟 · 领取轮 %d 分钟",
+			len(accounts), accountsPath, maxConc, enabledWord(captcha.Enabled()), interval, claimMin)
+	}
 	return client, captcha
 }
 

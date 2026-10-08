@@ -711,7 +711,11 @@ curl -s http://localhost:7863/healthz
 > **`docker ps` 里的 `healthy` 与 `/healthz` 的 503 是两件事**：`/healthz` 的判活口径是
 > 「池里有可服务账号」，空池返回 503；镜像的 `HEALTHCHECK` 只问「进程在不在答 HTTP」，
 > 200 和 503 都算健康。否则每个新人第一次 `docker run` 都会看到一个 `(unhealthy)` 的容器，
-> 配了自动重建的编排（watchtower / k8s liveness）还会反复重启它。要看池子状态请自己 curl。
+> 配了自动重建的编排（watchtower / k8s liveness）还会反复重启它。
+> **代价要说清楚**：这样「全部账号过期」就没有任何内置信号了（进程活着即 healthy）。池子状态
+> 属于业务健康，请自己按 `/healthz` 的 `healthy` 计数告警，例如挂 cron 或监控探针：
+> `curl -s http://127.0.0.1:7863/healthz` → `.healthy == 0` 且 `.total > 0` 就是全池掉线。
+> （`total == 0` 是你还没添加账号，不是故障，别报。）
 >
 > **这条路径 CI 每次推 main 会真跑一遍**：`docker-ghcr.yml` 在推送之后按上面的命令实跑容器，
 > 断言 `/healthz` 身份、面板资源已内嵌、无密钥 401、bind mount 上的就地写回、`HEALTHCHECK`
@@ -755,6 +759,26 @@ docker compose logs -f          # 跟踪日志
 docker compose restart          # 重启
 docker compose down             # 停止并移除容器（数据在 ./auths 与 ./data，不受影响）
 ```
+
+#### 本机要和默认不一样：写 override，不要在部署机上背一个本地 commit
+
+想改端口绑定（比如只绑回环：`127.0.0.1:7863:7863`）、挂外部网络、换卷路径，都在**同目录**建
+`docker-compose.override.yml` —— `docker compose` 会自动读它，而它已被 `.gitignore` 排除，
+所以部署机可以永远保持 `git reset --hard origin/main` 一句流，没有本地 commit，也就没有
+「上游改了 compose 我 cherry-pick 必冲突」这回事。
+
+```yaml
+# docker-compose.override.yml —— 本机专属，不进 git
+services:
+  buddyhub:
+    ports:
+      - "127.0.0.1:7863:7863"
+```
+
+> **别凭记忆猜 compose 的合并语义**：`ports` / `volumes` 这类列表字段在 override 下究竟是整段
+> 替换还是按 target 归并合并，版本之间变过。用渲染结果自查，一秒出真相：
+> `docker compose config | grep -A4 'ports:'` —— 看到几条、绑到哪个地址，就是实际生效的。
+> 想要**确定只有一条**，就在 override 里把整个 `ports` 列表重写完整（而不是只加一条）。
 
 ### 方式二：Windows 单文件运行（无需 Docker）
 
