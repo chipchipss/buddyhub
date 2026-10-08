@@ -668,7 +668,19 @@ flowchart LR
 
 ### 方式〇：GHCR 镜像（免克隆免构建）
 
-CI 会自动构建多架构镜像（`amd64` / `arm64`）并发布到 GHCR，`git clone` 之外的部署路径：
+CI 会自动构建多架构镜像（`amd64` / `arm64`）并发布到 GHCR，`git clone` 之外的部署路径。
+
+**先确认包是公开的**，否则第 2 步会 `denied`：GHCR 上新建的包默认继承仓库可见性之外的
+自己的设置，第一次发布后需要有人到 GitHub 网页上把它设成 Public（下面「首次发布后须将包
+设为公开」那条）。任何人不用登录都能自查：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -u "anonymous:anonymous" \
+  "https://ghcr.io/token?scope=repository:chipchipss/buddyhub:pull&service=ghcr.io"
+# 200 → 匿名可拉，照下面的步骤走
+# 403 → 包还是私有：要么按下方指引改可见性，要么直接走方式一（compose 本地构建，不依赖 GHCR）
+```
 
 ```bash
 # 1. 准备配置与数据目录
@@ -706,7 +718,9 @@ curl -s http://localhost:7863/healthz
 > 判健康、`docker stop` 走优雅停机，并额外用 QEMU 起一次 **arm64** 变体。
 >
 > **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `buddyhub` →
-> Package settings → Change visibility → Public，否则拉取需要 `docker login ghcr.io`。
+> Package settings → Change visibility → Public，否则匿名拉取返回 `denied`（自查方法见本节开头）。
+> 注意 CI 里的冒烟是**登录之后**拉自己推的镜像，所以它绿不代表别人拉得动——这条只能靠
+> 上面那条匿名 token 探测确认。
 >
 > 镜像 tag 规则：`main` 分支推送 `latest` / `main` / `sha-xxxxxx`；打 `v*` tag 额外发布
 > `1.2.3` / `1.2` / `1` 语义化版本；PR 仅构建验证、不推送。
