@@ -81,3 +81,102 @@ jobs:
           cache-to: type=gha,mode=max
           # 关闭 provenance attestation：避免 ghcr 页面出现 unknown/unknown 架构条目
           provenance: false
+
+      # 上面只证明 buildx 编得出来、推得上 ghcr；不证明 `docker run` 之后有人能用。
+      # 这一步按 README「方式〇」原样跑一遍（含 config.json 单文件 bind mount），
+      # 覆盖只有真实容器才能碰到的分支：镜像内 uid 10001 对挂载卷的写权限、首启占位
+      # 密钥在 bind mount 上的就地写回、embed 进二进制的面板资源、以及空池 503 下
+      # HEALTHCHECK 不再把新装容器判死。PR 不推送镜像，因此也就没东西可跑。
+      - name: 镜像运行冒烟（按 README 方式〇 实跑）
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          IMAGE=$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | head -1)
+          # 刚推完立刻拉，registry 偶发还没可见 → 重试而不是误判成镜像坏了
+          pulled=0
+          for _ in 1 2 3; do
+            if docker pull "$IMAGE" >/dev/null; then pulled=1; break; fi
+            sleep 5
+          done
+          if [ "$pulled" != 1 ]; then fail "刚推送的镜像拉不下来：$IMAGE"; fi
+
+          W="$RUNNER_TEMP/img"
+          rm -rf "$W"; mkdir -p "$W/auths" "$W/data"
+          cp config.example.json "$W/config.json"
+          # 文档让用户 chown 给 app(10001)；CI 里 10001 不是我们的用户，用 0777/0666
+          # 等价地放开「镜像内那个 uid 能不能写这些挂载路径」。
+          chmod 777 "$W/auths" "$W/data"; chmod 666 "$W/config.json"
+
+          dump() { docker logs bh-smoke 2>&1 | tail -40 || true; }
+          docker run -d --name bh-smoke \
+            -p 7863:7863 -e TZ=Asia/Shanghai \
+            --health-interval=2s --health-start-period=1s --health-retries=2 \
+            -v "$W/auths:/app/auths" -v "$W/data:/app/data" -v "$W/config.json:/app/config.json" \
+            "$IMAGE" >/dev/null || fail "容器启动失败：$IMAGE"
+
+          up=0
+          for _ in $(seq 1 40); do
+            code=$(curl -s -o "$W/health.json" -w '%{http_code}' http://127.0.0.1:7863/healthz || echo 000)
+            if [ "$code" = 200 ] || [ "$code" = 503 ]; then up=1; break; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' bh-smoke)" = "false" ]; then break; fi
+            sleep 0.5
+          done
+          if [ "$up" != 1 ]; then dump; fail "容器 20 秒内没有回答 /healthz（最后状态码 ${code:-无}）"; fi
+          if ! grep -q '"service":"buddyhub"' "$W/health.json"; then dump; fail "/healthz 没透出 service=buddyhub"; fi
+          if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7863/panel/)" != 200 ]; then
+            dump; fail "容器里面板页不是 200（前端资源没进镜像？）"
+          fi
+          ct=$(curl -s -o /dev/null -w '%{content_type}' http://127.0.0.1:7863/panel/js/boot.js)
+          if [ "$ct" != "text/javascript; charset=utf-8" ]; then fail "面板 JS content-type=$ct"; fi
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7863/v1/models)" = "401" ] \
+            || fail "容器里无密钥 /v1/models 应 401（鉴权没生效？）"
+
+          # 单文件 bind mount 上的首启写回：rename 覆盖会 EBUSY，必须走就地 O_TRUNC。
+          docker logs bh-smoke > "$W/out.log" 2>&1
+          if ! grep -q '示例占位符' "$W/out.log"; then dump; fail "容器里没换掉公开占位密钥"; fi
+          if grep -q '"api_key": "test_key"' "$W/config.json"; then
+            dump; fail "挂载的 config.json 仍是公开占位密钥（bind mount 写回没成功）"
+          fi
+
+          # 空池 → /healthz 503，此时 HEALTHCHECK 必须判 healthy；判 unhealthy 就是
+          # 每个新人第一次 docker run 都看到一个「红着的」容器。
+          hs=starting
+          for _ in $(seq 1 30); do
+            hs=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' bh-smoke)
+            if [ "$hs" = "healthy" ]; then break; fi
+            sleep 1
+          done
+          if [ "$hs" != "healthy" ]; then
+            docker inspect -f '{{json .State.Health}}' bh-smoke || true
+            fail "空池（503）下 HEALTHCHECK 判成 $hs —— 新装容器会被编排系统反复重启"
+          fi
+
+          # 优雅停机：docker stop 发的是 SIGTERM，必须走完 srv.Shutdown 再退
+          # （日志末行 bye）。硬杀留下的半截状态文件只有容器路径会天天踩。
+          docker stop -t 20 bh-smoke >/dev/null || { dump; fail "docker stop 20 秒内没停住（优雅停机卡死？）"; }
+          docker logs bh-smoke > "$W/stop.log" 2>&1
+          if ! grep -q 'bye' "$W/stop.log"; then dump; fail "docker stop 没走优雅停机路径（日志缺 bye）"; fi
+          docker rm -f bh-smoke >/dev/null
+
+          # arm64 变体：manifest 里有它 ≠ 它跑得起来。README 明说镜像覆盖 arm64，
+          # 而 amd64 开发机永远碰不到那条层——只有真在 arm64 云主机/树莓派上的人
+          # 会发现「镜像拉得下来、起不来」。本 job 开头已 setup-qemu-action，
+          # binfmt 全局生效，所以 --platform linux/arm64 能直接 run。
+          if ! docker pull --platform linux/arm64 "$IMAGE" >/dev/null; then
+            fail "manifest 里的 arm64 拉不下来：$IMAGE"
+          fi
+          docker run -d --name bh-arm --platform linux/arm64 \
+            -p 7864:7863 -e TZ=Asia/Shanghai \
+            -v "$W/auths:/app/auths" -v "$W/data:/app/data" -v "$W/config.json:/app/config.json" \
+            "$IMAGE" >/dev/null || fail "arm64 镜像起不来：$IMAGE"
+          arm=0
+          for _ in $(seq 1 60); do
+            acode=$(curl -s -o "$W/health-arm.json" -w '%{http_code}' http://127.0.0.1:7864/healthz || echo 000)
+            if [ "$acode" = 200 ] || [ "$acode" = 503 ]; then arm=1; break; fi
+            sleep 1
+          done
+          if [ "$arm" != 1 ]; then docker logs bh-arm 2>&1 | tail -20 || true; fail "arm64 容器 60 秒内没答 /healthz"; fi
+          if ! grep -q '"service":"buddyhub"' "$W/health-arm.json"; then fail "arm64 的 /healthz 没透出 service=buddyhub"; fi
+          docker rm -f bh-arm >/dev/null
+          echo "镜像运行冒烟 OK（amd64 + arm64）：$IMAGE"

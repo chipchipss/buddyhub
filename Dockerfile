@@ -36,6 +36,12 @@ RUN sed -i 's/\r$//' /app/login.sh /app/signin.sh /app/credit.sh && chmod 755 /a
 COPY --chown=app:app config.example.json /app/config.json
 USER app
 EXPOSE 7863
+# 探活必须接受 503。/healthz 的判活口径是「池里有可服务账号」，而新装的容器
+# 池子是空的（handler.go 无账号 → 503，README 也写明 503 属正常初态）。用
+# `wget -qO-` 会在 503 上退出非零（busybox=1 / GNU=8），于是每个新人第一次
+# docker run 都在 docker ps 里看到 (unhealthy)，配了自动重建的编排还会反复重启它。
+# 这里只区分「进程在答 HTTP」与「连不上」：200/503 记健康，拒连/超时记不健康。
+# 用 python3 而不是 wget，是因为要读状态码而不是让工具替它决定成败；镜像已装。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
-  CMD wget -qO- http://127.0.0.1:7863/healthz || exit 1
+  CMD python3 -c "import http.client as c,sys; s=c.HTTPConnection('127.0.0.1',7863,timeout=4); s.request('GET','/healthz'); r=s.getresponse(); r.read(); sys.exit(0 if r.status in (200,503) else 1)"
 ENTRYPOINT ["/app/buddyhub", "-config", "/app/config.json"]

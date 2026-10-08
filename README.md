@@ -696,6 +696,15 @@ curl -s http://localhost:7863/healthz
 > **`config.json` 不能挂 `:ro`**：面板「配置」页和上面的占位符更换都要写回该文件。
 > Linux 单文件 bind mount 无法 rename 覆盖（`EBUSY`），程序内置了就地 `O_TRUNC` 写回的回退路径。
 >
+> **`docker ps` 里的 `healthy` 与 `/healthz` 的 503 是两件事**：`/healthz` 的判活口径是
+> 「池里有可服务账号」，空池返回 503；镜像的 `HEALTHCHECK` 只问「进程在不在答 HTTP」，
+> 200 和 503 都算健康。否则每个新人第一次 `docker run` 都会看到一个 `(unhealthy)` 的容器，
+> 配了自动重建的编排（watchtower / k8s liveness）还会反复重启它。要看池子状态请自己 curl。
+>
+> **这条路径 CI 每次推 main 会真跑一遍**：`docker-ghcr.yml` 在推送之后按上面的命令实跑容器，
+> 断言 `/healthz` 身份、面板资源已内嵌、无密钥 401、bind mount 上的就地写回、`HEALTHCHECK`
+> 判健康、`docker stop` 走优雅停机，并额外用 QEMU 起一次 **arm64** 变体。
+>
 > **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `buddyhub` →
 > Package settings → Change visibility → Public，否则拉取需要 `docker login ghcr.io`。
 >
