@@ -192,19 +192,27 @@ export function parseHash() {
 
 /** setHashSeg(view, seg) —— 写入视图的子状态段（不触发导航，只改地址栏）。 */
 export function setHashSeg(view, seg) {
-  const target = '#' + view + (seg ? '?seg=' + seg : '');
-  if (location.hash !== target) history.replaceState(null, '', target);
+  writeHash('#' + view + (seg ? '?seg=' + seg : ''), false);
+}
+
+// push=true 留一条历史（跨视图导航），false 只改写当前条目（子状态、原地刷新）。
+function writeHash(target, push) {
+  if (location.hash === target) return;
+  if (push && history.pushState) history.pushState(null, '', target);
+  else history.replaceState(null, '', target);
 }
 
 export function navigate(id) {
   if (!views.has(id)) id = views.keys().next().value;
   const cur = parseHash();
   if (cur.view !== id) {
-    history.replaceState(null, '', '#' + id);
+    // 跨视图 = 真正的导航，要留历史（replaceState 会让返回键直接退出面板）。
+    writeHash('#' + id, true);
     viewId.set(id);
   } else if (cur.seg) {
-    // 同视图跳转（如目录页「管理 →」）：清掉旧子状态，落到默认分段
-    history.replaceState(null, '', '#' + id);
+    // 同视图跳转（如目录页「管理 →」）：清掉旧子状态，落到默认分段。
+    // 子状态是页面内的视图切换，不该各占一条历史，继续 replace。
+    writeHash('#' + id, false);
     viewId.set(id);
   }
 }
@@ -341,14 +349,23 @@ export function startShell() {
     if (views.has(view)) viewId.set(view);
   });
 
+  // 返回/前进：pushState 不触发 hashchange，得单独接 popstate。
+  // 已在目标视图时 viewId.set 是同值，不会重复挂载。
+  addEventListener('popstate', () => {
+    const { view } = parseHash();
+    if (views.has(view)) viewId.set(view);
+  });
+
   addEventListener('keydown', ev => {
     const meta = ev.metaKey || ev.ctrlKey;
     if (meta && ev.key.toLowerCase() === 'k') { ev.preventDefault(); openPalette(); return; }
     if (ev.key === 'Escape') { closePalette(); closeDrawer(); }
   });
 
-  // 轮询：只驱动当前视图的 tick
+  // 轮询：只驱动当前视图的 tick；标签页在后台时整轮跳过——
+  // 没人看的页面不该每秒打后端、更不该攒一堆挂起重绘。
   setInterval(() => {
+    if (document.hidden) return;
     const def = views.get(viewId.peek());
     if (def && def.tick) { try { def.tick(); } catch (e) { console.error('[tick]', e); } }
   }, 5000);

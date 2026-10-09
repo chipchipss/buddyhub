@@ -43,13 +43,120 @@ export function signal(init) {
   return read;
 }
 
+/* ── 交互护栏：人正在看/操作时不要换 DOM ────────────────────────
+   轮询会重建整棵视图子树，直接换 DOM 的代价是用户实测得到的四类故障：
+   滚动位置跳、悬停态闪、选中的文字丢、下拉框被关。所以任一「正在用」
+   信号成立时，把新产物挂起，等操作结束再一次性落地——数据照常更新，
+   只是那一次不动界面。判据（宁多勿漏）：抽屉未关 / 焦点在输入控件里 /
+   页面有文字选区 / 1.2 秒内滚动过。 */
+const pendingSwap = new Set();   // 挂起中的 effect（后到的产物覆盖先到的）
+let lastScrollAt = 0;
+
+function isScroller(el) {
+  if (!el || el.nodeType !== 1) return false;
+  const cs = el.ownerDocument && el.ownerDocument.defaultView
+    ? el.ownerDocument.defaultView.getComputedStyle(el) : null;
+  const ov = (cs && cs.overflowY) || '';
+  return (ov === 'auto' || ov === 'scroll' || el.classList.contains('content'))
+    && el.scrollHeight > el.clientHeight + 1;
+}
+
+export function isEngaged() {
+  if (drawerState !== 'closed') return true;
+  const a = document.activeElement;
+  if (a && a.nodeType === 1 && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return true;
+  const sel = document.getSelection && document.getSelection();
+  if (sel && !sel.isCollapsed && String(sel).trim() !== '') return true;
+  return (typeof performance !== 'undefined' ? performance.now() : 0) - lastScrollAt < 1200;
+}
+
+/* 滚动位置快照：跨替换留存的祖先容器按元素记，子树内的按文档序下标记。
+   回填时新树同下标元素形状一致；不一致时 scrollTop 赋值会被浏览器静默
+   夹到上限，不会抛错。 */
+function captureScroll(oldNode) {
+  const snap = { hosts: [], inner: [] };
+  for (let el = oldNode.parentNode; el; el = el.parentNode) {
+    if (isScroller(el)) snap.hosts.push([el, el.scrollTop]);
+  }
+  if (isScroller(oldNode)) snap.inner.push(oldNode.scrollTop);
+  const kids = oldNode.querySelectorAll ? oldNode.querySelectorAll('*') : [];
+  for (const el of kids) if (isScroller(el)) snap.inner.push(el.scrollTop);
+  return snap;
+}
+
+function restoreScroll(snap, newNode) {
+  for (const [el, top] of snap.hosts) {
+    if (el) el.scrollTop = top;
+  }
+  let targets = [];
+  if (isScroller(newNode)) targets.push(newNode);
+  const kids = newNode.querySelectorAll ? newNode.querySelectorAll('*') : [];
+  for (const el of kids) if (isScroller(el)) targets.push(el);
+  for (let i = 0; i < targets.length && i < snap.inner.length; i++) {
+    targets[i].scrollTop = snap.inner[i];
+  }
+}
+
+/* 焦点 + 选区快照：只在焦点位于被替换的子树内时才需要恢复。 */
+function captureFocus(oldNode) {
+  const a = document.activeElement;
+  if (!a || !oldNode.contains || !oldNode.contains(a)) return null;
+  const f = { id: a.id || null, top: a.scrollTop, selStart: null, selEnd: null };
+  try {
+    if ('selectionStart' in a) { f.selStart = a.selectionStart; f.selEnd = a.selectionEnd; }
+  } catch { /* 不支持选区的控件 */ }
+  return f;
+}
+
+function restoreFocus(f, newNode) {
+  if (!f) return;
+  let el = f.id && document.getElementById ? document.getElementById(f.id) : null;
+  if (!el || !newNode.contains(el)) return;   // id 不在新树里就别乱猜，交给浏览器
+  try {
+    el.focus({ preventScroll: true });
+    if (f.selStart != null && 'selectionStart' in el) {
+      el.setSelectionRange(f.selStart, f.selEnd);
+    }
+  } catch { /* 控件已不可交互 */ }
+}
+
+// 「操作结束就补落地」的唯一一条路：挂起队列非空时才开表，排空即停。
+// 不常驻定时器——既省掉每秒空转，也让无头 Node 测试脚本能自然退出。
+let flushTimer = 0;
+function flushPending() {
+  flushTimer = 0;
+  if (pendingSwap.size === 0) return;
+  if (isEngaged()) { armFlush(); return; }
+  for (const e of [...pendingSwap]) {
+    pendingSwap.delete(e);
+    if (e.disposed || !e.node || !e.node.parentNode || !e.pending) continue;
+    const next = e.pending;
+    e.pending = null;
+    const snap = captureScroll(e.node);
+    const fsnap = captureFocus(e.node);
+    e.node.replaceWith(next);
+    e.node = next;
+    restoreScroll(snap, next);
+    restoreFocus(fsnap, next);
+  }
+  if (pendingSwap.size > 0) armFlush();
+}
+function armFlush() {
+  if (!flushTimer) flushTimer = setInterval(flushPending, 400);
+}
+
+document.addEventListener('scroll', () => {
+  lastScrollAt = typeof performance !== 'undefined' ? performance.now() : 0;
+}, { capture: true, passive: true });
+
 /* ── effect：自动追踪依赖；返回 DOM 时自动替换旧节点 ──────────── */
 export function effect(fn) {
   const e = {
     deps: new Set(),
     node: null,
+    pending: null,
     disposed: false,
-    dispose() { e.disposed = true; for (const s of e.deps) s.delete(e); e.deps.clear(); },
+    dispose() { e.disposed = true; pendingSwap.delete(e); for (const s of e.deps) s.delete(e); e.deps.clear(); },
     run() {
       if (e.disposed) { return; }
       for (const s of e.deps) s.delete(e);
@@ -66,7 +173,15 @@ export function effect(fn) {
         ACTIVE = prev;
       }
       if (out instanceof Node) {
-        if (e.node && e.node.parentNode) e.node.replaceWith(out);
+        if (e.node && e.node.parentNode) {
+          if (isEngaged()) { e.pending = out; pendingSwap.add(e); armFlush(); return out; }
+          const snap = captureScroll(e.node);
+          const fsnap = captureFocus(e.node);
+          e.node.replaceWith(out);
+          restoreScroll(snap, out);
+          restoreFocus(fsnap, out);
+        }
+        e.pending = null;
         e.node = out;
       }
       return out;
