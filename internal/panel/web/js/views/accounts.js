@@ -18,7 +18,8 @@ import { overview, refreshOverview } from '../store.js';
 import { loadPlatforms } from '../platforms.js';
 import { buildRows, platformsOf, matches, bulkKind } from '../rows.js';
 import { statusChip } from '../status.js';
-import { run } from '../acts.js';
+import { run, inverseOf } from '../acts.js';
+import { begin, report, finish } from '../jobs.js';
 import { openAddAccount } from '../drawers.js';
 import { loadZai, zaiData } from './zai-segment.js';
 import { loadExt, extData } from './ext-segment.js';
@@ -28,6 +29,48 @@ const filter = signal('all');    // 'all' 或平台 id
 const query = signal('');
 const sel = signal(new Set());   // 选中行的 key（provider:id）
 const bulk = signal(null);       // 批量执行中：{label, done, total, bad}
+const flash = signal({});        // key -> {state:'run'|'ok'|'fail', label, msg, undo}
+const flashTimers = new Map();
+
+/* ── 行内三态回执（清单 15 / 16）───────────────────────────────
+   不能直接改按钮节点：行每次重绘都换新节点，改完就丢。状态存在 flash 信号里，
+   rowNode() 照着画，定时清除时再重画一次。成功只亮 1 秒（打勾），失败留 6 秒，
+   期间旁边给「撤销」——可逆的动作不再靠确认框，也不飘到顶部 toast。 */
+const FLASH_OK_MS = 1000;
+const FLASH_BAD_MS = 6000;
+
+function setFlash(key, v) {
+  const next = Object.assign({}, flash.peek());
+  if (v === null) delete next[key]; else next[key] = v;
+  flash.set(next);
+  clearTimeout(flashTimers.get(key));
+  flashTimers.delete(key);
+  if (v && v.state !== 'run') {
+    const ms = v.state === 'ok' ? FLASH_OK_MS : FLASH_BAD_MS;
+    flashTimers.set(key, setTimeout(() => { flashTimers.delete(key); setFlash(key, null); }, ms));
+  }
+  paint();
+}
+
+/** undoFor —— 哪些结果能撤回、怎么撤。停用↔启用是一对，其余都不该假装可撤销。 */
+function undoFor(kind, r) {
+  const inv = inverseOf(kind);
+  if (!inv) return null;
+  return async () => {
+    // 用当前数据重新取一行：撤销发生在动作之后，点按钮时那个行对象已经旧了。
+    const cur = allRows().find(x => x.key === r.key) || r;
+    const res = await run(inv, cur);
+    setFlash(cur.key, {
+      state: res.ok ? 'ok' : 'fail',
+      label: res.ok ? '已撤销' : inv,
+      text: res.ok ? '已撤销' : '撤销失败',
+      msg: res.msg,
+    });
+    if (!res.ok) toast('撤销失败：' + res.msg, 'fail');
+    return res;
+  };
+}
+
 
 function allRows() {
   return buildRows(overview()?.accounts, zaiData()?.accounts, extData()?.accounts);
@@ -151,28 +194,48 @@ function rowNode(r) {
     ),
     h('div', { class: 'cell st', title: r.st.tip || '' }, statusChip(r.st)),
     balanceCell(r),
-    h('div', { class: 'cell acts' },
-      r.primary ? h('button', {
-        // 一屏只允许一个主按钮（清单 49）：行内动作保持普通描边，
-        // 异常与否由状态芯片表达，强调留给抽屉里的那一个。
-        class: 'btn sm',
-        text: r.primary.label,
-        title: r.primary.tip || '',
-        disabled: !!bulk.peek(),
-        onclick: ev => actOne(r, r.primary, ev.currentTarget),
-      }) : null,
-      h('button', {
-        class: 'btn sm icon ghost', title: '更多操作', disabled: !!bulk.peek(),
-        onclick: ev => openMenu(ev.currentTarget, menuFor(r)),
-      }, icon('more')),
-    ),
+    h('div', { class: 'cell acts' }, ...actsCell(r)),
   );
+}
+
+/** actsCell —— 行尾动作区：空闲（一个动作 + ⋯）／转圈／打勾／失败 + 撤销。
+ *  状态读自 flash 信号而不是改节点：行每次重绘都换新节点，改完就丢（清单 15）。 */
+function actsCell(r) {
+  const f = flash.peek()[r.key];
+  const out = [];
+  if (f) {
+    out.push(h('button', {
+      class: 'btn sm' + (f.state === 'run' ? ' spin' : f.state === 'ok' ? ' ok' : f.state === 'fail' ? ' bad' : ''),
+      disabled: f.state === 'run',
+      title: f.msg || '',
+      text: f.state === 'run' ? (f.text || f.label || '执行中') : (f.text || (f.state === 'ok' ? '完成' : '失败')),
+    }));
+    if (f.state !== 'run' && f.undo) out.push(h('button', {
+      class: 'btn sm ghost', text: '撤销', onclick: () => f.undo(),
+    }));
+  } else if (r.primary) {
+    out.push(h('button', {
+      // 一屏只允许一个主按钮（清单 49）：行内动作保持普通描边，
+      // 异常与否由状态芯片表达，强调留给抽屉里的那一个。
+      class: 'btn sm',
+      text: r.primary.label,
+      title: r.primary.tip || '',
+      disabled: !!bulk.peek(),
+      onclick: () => actOne(r, r.primary),
+    }));
+  }
+  // ⋯ 常驻：回执那一秒里少一个按钮，行宽就跳一下（清单 15 的代价是「不跳」）。
+  out.push(h('button', {
+    class: 'btn sm icon ghost', title: '更多操作', disabled: !!bulk.peek() || (!!f && f.state === 'run'),
+    onclick: ev => openMenu(ev.currentTarget, menuFor(r)),
+  }, icon('more')));
+  return out;
 }
 
 function menuFor(r) {
   const mk = a => ({
     label: a.label, danger: a.danger, tip: a.tip || a.confirm,
-    onclick: () => actOne(r, a, null),
+    onclick: () => actOne(r, a),
   });
   return [
     { label: '查看详情', onclick: () => openAccountDetail(r) },
@@ -180,16 +243,26 @@ function menuFor(r) {
   ];
 }
 
-/** actOne —— 单行单个动作：按钮进「执行中」态 → 调用 → 回执 → 就地重画。 */
-async function actOne(r, a, btn) {
+/** actOne —— 单行单个动作：行内进「转圈」态 → 调用 → 就地给打勾/失败回执，
+ *  同时记一条作业（换页回来还能看到刚才那一下的结果）。
+ *  可逆的（停用/启用）不弹确认框，回执旁边直接给「撤销」；只有移除凭证这种
+ *  不可逆的才确认，且确认文案里点名账号（清单 16）。 */
+async function actOne(r, a) {
   if (a.kind === 'relogin') { openAddAccount(r.provider); return; }
   if (a.danger && a.confirm && !await confirmDialog(a.confirm, { ok: a.label })) return;
-  const label = btn ? btn.textContent : '';
-  if (btn) { btn.disabled = true; btn.textContent = '执行中…'; }
+  setFlash(r.key, { state: 'run', label: a.label });
+  const job = begin(`${a.label} · ${r.name}`, 1);
   const res = await run(a.kind, r);
-  if (btn) { btn.disabled = false; btn.textContent = label; }
-  toast(res.ok ? `${a.label}：${res.msg}` : `${a.label}失败：${res.msg}`, res.ok ? undefined : 'fail');
-  paint();
+  const undo = res.ok ? undoFor(a.kind, r) : null;
+  report(job, { name: r.name, ok: res.ok, msg: res.msg, undo });
+  setFlash(r.key, {
+    state: res.ok ? 'ok' : 'fail',
+    label: a.label,
+    text: res.ok ? '完成' : a.label + '失败',
+    msg: res.msg,
+    undo,
+  });
+  if (!res.ok) toast(`${a.label}失败：${res.msg}`, 'fail');
 }
 
 /* ── 选择 ────────────────────────────────────────────────────── */
@@ -236,15 +309,6 @@ function paintBulk(rows) {
   if (!keys.size) { bulkEl.hidden = true; bulkEl.replaceChildren(); return; }
   bulkEl.hidden = false;
   const picked = rows.filter(r => keys.has(r.key));
-  const b = bulk.peek();
-  if (b) {
-    bulkEl.replaceChildren(
-      h('span', { class: 't', text: b.label }),
-      h('div', { class: 'meter' }, h('i', { style: { width: Math.round(b.done / Math.max(1, b.total) * 100) + '%' } })),
-      h('span', { class: 'p', text: `${b.done} / ${b.total}${b.bad ? ` · 失败 ${b.bad}` : ''}` }),
-    );
-    return;
-  }
   const usable = op => picked.filter(r => bulkKind(r, op)).length;
   bulkEl.replaceChildren(
     h('span', { class: 't', text: `已选 ${picked.length} 个账号` }),
@@ -266,32 +330,33 @@ function paintBulk(rows) {
   );
 }
 
-/** runBulk —— 逐账号执行（不是后台一把梭）：每完成一个就更新进度，
- *  失败的账号单独计数，结束后留在原地可见。 */
+/** runBulk —— 逐账号执行，每完成一个就在活动栏里记一条（清单 14）。
+ *  起跑即清空选择：批量条收起，进度与结果由右下角的作业卡接手，跑完换页回来
+ *  还在；`bulk` 只留着把「正在处理的那几行」标出来。 */
 async function runBulk(op, label, picked) {
   const targets = picked.filter(r => bulkKind(r, op));
-  if (op === 'remove' && !targets.length) return;
+  if (!targets.length) return;
   if (op === 'remove') {
-    if (!await confirmDialog(`将删除 ${targets.length} 个账号，池状态与本地凭证文件一并清掉，不可恢复。`, { ok: '删除' })) return;
+    // 不可逆，且要点名删了谁（清单 16）
+    const named = targets.slice(0, 5).map(r => r.name).join('、')
+      + (targets.length > 5 ? ' …' : '');
+    if (!await confirmDialog(`将删除 ${targets.length} 个账号：${named}。池状态与本地凭证文件一并清掉，不可恢复。`, { ok: '删除' })) return;
   }
   const keys = new Set(targets.map(r => r.key));
-  bulk.set({ label: `${label} 中`, done: 0, total: targets.length, bad: 0, keys });
+  sel.set(new Set());
+  bulk.set({ keys });
   paint();
-  let bad = 0;
-  const fails = [];
+  const job = begin(`${label} ${targets.length} 个`, targets.length);
   for (const r of targets) {
-    const res = await run(bulkKind(r, op), r);
-    if (!res.ok) { bad++; fails.push(`${r.name}：${res.msg}`); }
-    bulk.set({ label: `${label} 中`, done: bulk.peek().done + 1, total: targets.length, bad, keys });
+    const kind = bulkKind(r, op);
+    const res = await run(kind, r);
+    report(job, { name: r.name, ok: res.ok, msg: res.msg, undo: undoFor(kind, r) });
     paint();
   }
   bulk.set(null);
-  sel.set(new Set());
-  paint();
-  if (bad) toast(`${label}完成：成功 ${targets.length - bad} · 失败 ${bad}`, 'fail', {
-    action: { label: '看原因', onclick: () => toast(fails.slice(0, 4).join(' / ') || '原因见日志', 'fail') } },
-  );
-  else toast(`${label}完成：${targets.length} 个`);
+  finish(job);
+  // 成功不再飘 toast（活动栏就是回执）；只有失败提醒一声，免得有人没看见 ✗
+  if (job.bad) toast(`${label}完成：成功 ${job.ok} · 失败 ${job.bad}，右下角可看原因`, 'fail');
 }
 
 /* ── 列表容器（命令式局部重画）───────────────────────────────────

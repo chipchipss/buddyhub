@@ -70,6 +70,14 @@ export async function extAct(provider, id, action, body) {
   }
 }
 
+/** inverseOf(kind) —— 哪个动作能撤回、撤回是下发哪个动作（清单 16）。
+ *  只有停用↔启用这一对是真的可逆；签到/查余额/换指纹/移除都不该假装能撤销。 */
+export function inverseOf(kind) {
+  if (kind === 'disable') return 'enable';
+  if (kind === 'enable') return 'disable';
+  return null;
+}
+
 /** run(kind, row) —— 按动作类型在对应数据源上执行（行内按钮、菜单、批量条共用）。
  *  kind ∈ checkin | balance | quota | claim | rotate | remove | enable | disable。
  *  「启用/停用」三家形态不同（池=revive+disable、Z.AI=单个翻转接口、外部=带 body 的

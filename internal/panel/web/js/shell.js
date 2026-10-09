@@ -6,7 +6,8 @@
    ══════════════════════════════════════════════════════════════════ */
 
 import { h, icon, signal, effect, api, toast, closeDrawer, ensureLayers } from './kernel.js';
-import { overview, viewId, applyTheme, theme, toggleTheme, refreshOverview } from './store.js';
+import { overview, viewId, applyTheme, theme, toggleTheme, refreshOverview, lastSync } from './store.js';
+import { mountActivityBar } from './jobs.js';
 
 /* ── 导航模型：一级页 + 页内分段 ─────────────────────────────────
    面板原先 8 个导航并列，混了对象（账号/密钥/模型）、动作（任务/日志）、
@@ -208,6 +209,7 @@ function buildStatusbar() {
       h('span', { class: 'stat-item' }, '积分 ', h('b', { text: totals > 0 ? `${credits}/${totals}` : String(credits) })),
       h('span', { class: 'stat-item' }, '在途 ', h('b', { text: String(inflight) })),
       h('span', { class: 'grow' }),
+      h('span', { class: 'sync', id: 'sync-ago', title: '数据轮询：5 秒一轮，标签页在后台时暂停', text: syncText(lastSync.peek()) }),
       h('span', { class: 'mono', text: d ? `v${d.version} · ${d.redis_mode === 'upstash' ? 'redis 镜像' : '本地内存'}` : '' }),
       h('span', { class: 'mono', text: d ? `运行 ${fmtUptime(d.uptime_sec)}` : '' }),
     );
@@ -221,6 +223,25 @@ function fmtUptime(sec) {
   const up = Math.floor(sec || 0);
   return (up >= 86400 ? Math.floor(up / 86400) + '天' : '') +
     Math.floor(up % 86400 / 3600) + '时' + Math.floor(up % 3600 / 60) + '分';
+}
+
+/** syncText —— 「轮询要可见」（清单 17）：数据什么时候刷新的要说得出口。 */
+function syncText(ts) {
+  if (!ts) return '正在连接…';
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 5) return '刚刚更新';
+  if (s < 60) return `${s} 秒前更新`;
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前更新`;
+  return `${Math.floor(s / 3600)} 小时前更新`;
+}
+
+let statusbarEl = null;
+
+// 这一行每秒改一次文字——只改 textContent，不重建状态条（状态条整体跟着
+// overview 重画，频率由轮询决定）。
+function tickSyncLabel() {
+  const el = statusbarEl && statusbarEl.querySelector('#sync-ago');
+  if (el) el.textContent = syncText(lastSync.peek());
 }
 
 /* ── 路由 ─────────────────────────────────────────────────────── */
@@ -468,15 +489,18 @@ export function startShell() {
   // 先把地址栏翻译成路由，再建界面（首帧就得是用户要的那一页）
   applyHash();
 
+  statusbarEl = buildStatusbar();
   const app = h('div', { class: 'app' + (railMiniState ? ' rail-mini' : '') },
     buildRail(),
     h('div', { class: 'stage' },
       buildTopbar(),
       h('main', { class: 'content', id: 'content' }),
     ),
-    buildStatusbar(),
+    statusbarEl,
   );
   document.body.append(app);
+  // 活动栏挂在 shell 上：换页、换分段都不能把正在跑的作业弄丢（清单 14）
+  mountActivityBar();
 
   // 路由：一级页/分段变化 → 换视图 + 同步侧栏选中
   viewId.subscribe(() => { syncRailActive(); mountPage(); });
@@ -502,6 +526,9 @@ export function startShell() {
     const def = activeSection();
     if (def && def.tick) { try { def.tick(); } catch (e) { console.error('[tick]', e); } }
   }, 5000);
+
+  // 「N 秒前更新」按秒走；后台标签页不轮询，文字就停在那儿如实反映最后一次成功
+  setInterval(tickSyncLabel, 1000);
 
   refreshOverview();
 }

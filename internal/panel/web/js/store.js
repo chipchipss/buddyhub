@@ -40,12 +40,15 @@ export function toggleTheme() {
 /* ── 概览（账号池快照）───────────────────────────────────────── */
 export const overview = signal(null);
 export const overviewErr = signal(null);
+// 最近一次成功拉到数据的时间戳，状态条用它说「N 秒前更新」（清单 17）
+export const lastSync = signal(0);
 
 export async function refreshOverview(quiet = true) {
   try {
     const d = await api('overview');
     overview.set(d);
     overviewErr.set(null);
+    lastSync.set(Date.now());
     return d;
   } catch (e) {
     if (!quiet) { overviewErr.set(e.message); toast(e.message, 'fail'); }

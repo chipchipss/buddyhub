@@ -12,7 +12,8 @@ import {
   h, icon, signal, api, toast, openDrawer, closeDrawer, confirmDialog,
   dur, ago, fmtToken, fmtMs, fmtRate,
 } from '../kernel.js';
-import { run } from '../acts.js';
+import { run, inverseOf } from '../acts.js';
+import { begin, report, finish } from '../jobs.js';
 import { buildRows, logMatcher, coolText } from '../rows.js';
 import { statusOf, statusChip } from '../status.js';
 import { navigate } from '../shell.js';
@@ -29,6 +30,11 @@ let row = null;
 let host = null;
 let footEl = null;
 let busy = '';                     // 正在执行的动作 kind（按钮三态：转圈→禁用）
+// 成功后的那一秒：doneFlash 存点击时的动作排布，doneKind 标出该打勾的那一个（清单 15）。
+// 必须冻结排布：「启用/停用」成功后整排按钮会换一套，✓ 落到别的格子上就是骗人。
+let doneFlash = null;
+let doneKind = '';
+let doneTimer = 0;
 
 /** openAccountDetail(r) —— 打开某个账号的详情抽屉。 */
 export function openAccountDetail(r) {
@@ -41,6 +47,9 @@ export function openAccountDetail(r) {
   tasks.set(null);
   taskErr.set('');
   busy = '';
+  doneFlash = null;
+  doneKind = '';
+  clearTimeout(doneTimer);
   host = h('div', { class: 'stack' });
   footEl = h('div', { class: 'row wrap detail-foot' });
   openDrawer({
@@ -72,7 +81,10 @@ function paint() {
 
 function paintFoot() {
   if (!footEl) return;
-  const acts = allActions();
+  // 打勾那一秒：排布冻结在点击时的样子（见 doneFlash），否则「停用」成功后
+  // 动作表整个换成「启用/查余额/移除」，✓ 会落到别的格子上，等于骗人。
+  const acts = doneFlash || allActions();
+  const done = a => !!doneFlash && a.kind === doneKind;
   footEl.replaceChildren(
     h('div', { class: 'row', style: { gap: '4px' } }, ...tabs()),
     h('span', { class: 'grow' }),
@@ -80,10 +92,11 @@ function paintFoot() {
       // 一屏一个主按钮（清单 49）：只有行模型认定的那个主行动点亮，其余平铺，
       // 「移除/删除」永远排在最后并标成危险态。
       ...acts.map((a, i) => h('button', {
-        class: 'btn sm' + (a.danger ? ' danger' : (i === 0 ? ' primary' : '')),
-        text: busy === a.kind ? '执行中…' : a.label,
+        class: 'btn sm' + (a.danger ? ' danger' : (i === 0 ? ' primary' : ''))
+          + (busy === a.kind ? ' spin' : done(a) ? ' ok' : ''),
+        text: busy === a.kind ? '执行中…' : done(a) ? '完成' : a.label,
         title: a.tip || a.confirm || '',
-        disabled: !!busy,
+        disabled: !!busy || !!doneFlash,
         onclick: () => doAction(a),
       }))),
   );
@@ -104,18 +117,41 @@ function setTab(v) {
   paint();
 }
 
-/** doAction —— 一次动作：按钮转圈（禁用）→ 就地更新数据 → 结果回显。
+/** doAction —— 一次动作：按钮转圈（禁用）→ 就地更新数据 → 打勾 1 秒。
+ *  结果同时记进右下角活动栏（换页、关掉抽屉都还在，可撤销的旁边带「撤销」）。
  *  账号被删除后抽屉没有意义，直接收起。 */
 async function doAction(a) {
   if (a.kind === 'relogin') { openAddAccount(row.provider); return; }
+  // 清单 16：可撤销的（停用/启用）直接生效，不再弹确认框；只有移除凭证这种
+  // 不可逆的才确认，确认文案里点名账号（a.confirm 由 rows.js 统一措辞）。
   if (a.danger && a.confirm) {
     if (!await confirmDialog(a.confirm, { ok: a.label })) return;
   }
   busy = a.kind;
-  paint();
+  paintFoot();
+  const job = begin(`${a.label} · ${row.name}`, 1);
   const r = await run(a.kind, row);
+  const inv = inverseOf(a.kind);
+  report(job, {
+    name: row.name, ok: r.ok, msg: r.msg,
+    undo: r.ok && inv ? async () => {
+      const cur = freshRow(row) || row;
+      const res = await run(inv, cur);
+      row = freshRow(row) || row;
+      paint();
+      if (!res.ok) toast('撤销失败：' + res.msg, 'fail');
+      return res;
+    } : null,
+  });
+  finish(job);
   busy = '';
-  toast(r.ok ? `${a.label}：${r.msg}` : `${a.label}失败：${r.msg}`, r.ok ? undefined : 'fail');
+  if (!r.ok) toast(`${a.label}失败：${r.msg}`, 'fail');
+  else {
+    doneFlash = allActions();
+    doneKind = a.kind;
+    clearTimeout(doneTimer);
+    doneTimer = setTimeout(() => { doneFlash = null; doneKind = ''; paintFoot(); }, 1000);
+  }
   const fresh = freshRow(row);
   if (!fresh) { closeDrawer(); return; }
   row = fresh;

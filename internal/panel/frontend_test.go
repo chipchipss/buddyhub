@@ -176,9 +176,12 @@ const domStub = `class El {
       v ? s.add(c) : s.delete(c); self.className = [...s].join(' '); return v; },
     contains: c => self._cs().has(c),
   }; }
-  setAttribute(k, v) { if (k === 'class') { this.className = v; return; } this.props[k] = String(v); }
+  setAttribute(k, v) { if (k === 'class') { this.className = v; return; } this.props[k] = String(v);
+    // disabled 在真实 DOM 是布尔属性：setAttribute('disabled','') 之后 el.disabled
+    // 立刻为 true（按钮点不动）。桩不镜像这一条，「转圈时禁用」就永远测不出来。
+    if (k === 'disabled') this.disabled = true; }
   getAttribute(k) { return this.props[k] ?? null; }
-  removeAttribute(k) { delete this.props[k]; }
+  removeAttribute(k) { delete this.props[k]; if (k === 'disabled') this.disabled = false; }
   setAttributeNS(a, k, v) { this.setAttribute(k, v); }
   addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
   removeEventListener() {}
@@ -579,8 +582,14 @@ const TASKS = { tasks: [
   { task_code: 'chat_5', title: '对话 5 次', current: 5, target: 5, claimable: true, credit: 100 },
   { task_code: 'Buddy_App', title: '进入 Buddy 应用', current: 0, target: 1, accept_status: 'unaccepted' },
 ] };
-globalThis.fetch = async url => {
+const POSTS = [];   // 动作真实下发了什么（撤销链要能对上号）
+// 动作之后视图会重新拉概览；桩必须照原样把池吐回来，否则「/api/overview」落到
+// 兜底分支变成 {ok:true}，池就被清空，测试会误报成「行丢了」。
+const OVERVIEW = { total: 3, healthy: 2, version: '1.11.8', redis_mode: 'local', uptime_sec: 120, accounts: POOL };
+globalThis.fetch = async (url, opt) => {
   const u = String(url);
+  POSTS.push(((opt && opt.method) || 'GET') + ' ' + u);
+  if (u.includes('/api/overview')) return j(OVERVIEW);
   if (u.includes('/api/platforms')) return j({ ok: true, platforms: REG });
   if (u.includes('/api/zai/accounts')) return j(ZAI);
   if (u.includes('/api/ext/accounts')) return j(EXT);
@@ -612,7 +621,7 @@ const { loadZai, zaiData } = await import('./views/zai-segment.js');
 const { loadExt, extData } = await import('./views/ext-segment.js');
 const { closeMenu } = await import('./kernel.js');
 await loadPlatforms(); await loadZai(); await loadExt();
-overview.set({ total: 3, healthy: 2, version: '1.11.8', redis_mode: 'local', uptime_sec: 120, accounts: POOL });
+overview.set(OVERVIEW);
 
 const view = (await import('./views/accounts.js')).default;
 let root = view.render();
@@ -728,6 +737,83 @@ else {
   if (!bar2 || !bar2.hidden || bar2.children.length) bad('取消选择后批量条没收起（应 hidden 且清空）');
 }
 
+/* ── 6b. 活动栏：批量操作变成看得见的作业（清单 14 / 16）────────
+   原先一把批量只有一条 toast，跑完就得自己去日志翻哪个账号失败了。现在每条
+   作业常驻右下角（挂在 shell 上，不是挂在账号页里），点开逐账号看结果，可逆的
+   旁边直接给「撤销」。 */
+{
+  const { mountActivityBar, jobsSnapshot } = await import('./jobs.js');
+  mountActivityBar();
+  const host = qsel(document.body, '.activitybar');
+  if (!host) bad('活动栏没挂到 body 上（挂在页面里就会随换页丢掉作业）');
+  else if (!host.hidden) bad('没有作业时活动栏应收起');
+
+  for (const r of rowsOf(root)) fire(findByClass(r, 'cbx'), 'change');
+  const toggleBefore = POSTS.filter(p => /disable|toggle/.test(p)).length;
+  fire(findButton(findByClass(root, 'bulkbar'), '停用'), 'click');
+  await tick(); await tick();
+
+  const jobs = jobsSnapshot();
+  if (!jobs.length) bad('批量停用没记成作业');
+  else {
+    const j0 = jobs[0];
+    if (j0.total !== 6 || j0.done !== 6) bad('作业计数应为 6/6，实为 ' + j0.done + '/' + j0.total);
+    if (j0.bad !== 0) bad('桩里全部该成功，失败数应为 0，实为 ' + j0.bad);
+    if (j0.state !== 'done') bad('跑完的作业状态应是 done，实为 ' + j0.state);
+    if (POSTS.filter(p => /disable|toggle/.test(p)).length !== toggleBefore + 6) bad('停用没有逐账号下发');
+  }
+  if (host.hidden) bad('有作业时活动栏还收着');
+  if (!host.textContent.includes('停用 6 个')) bad('作业标题没说清动作与数量：' + host.textContent.trim().slice(0, 40));
+  // 起跑即收起批量条：进度与回执只有一个落点（活动栏），两个进度条不该同时存在
+  if (!findByClass(root, 'bulkbar').hidden) bad('批量起跑后批量条没收起');
+
+  fire(qsel(host, '.job-x'), 'click');                    // 展开看每个账号
+  let items = findAll(qsel(document.body, '.activitybar'), 'job-item');
+  if (items.length !== 6) bad('展开后逐账号结果应有 6 条，实有 ' + items.length);
+  else {
+    const undoable = items.filter(it => findButton(it, '撤销'));
+    if (undoable.length !== 6) bad('停用是可逆动作，每条结果都该给「撤销」，实有 ' + undoable.length);
+    const revBefore = POSTS.filter(p => /revive|toggle/.test(p)).length;
+    fire(findButton(items[0], '撤销'), 'click');
+    await tick(); await tick();
+    if (POSTS.filter(p => /revive|toggle/.test(p)).length === revBefore) bad('点「撤销」没下发反向动作');
+    // 撤销会重画作业卡，必须回屏幕上那一棵取，不能拿旧节点断言
+    items = findAll(qsel(document.body, '.activitybar'), 'job-item');
+    if (!items[0].textContent.includes('已撤销')) bad('撤销成功后结果行没标「已撤销」：' + items[0].textContent.trim());
+    if (findButton(items[0], '撤销')) bad('已撤销的结果还给「撤销」（撤一次就够）');
+  }
+  if (stray(qsel(document.body, '.activitybar')).length) bad('活动栏渲染出脏字文本：' + stray(qsel(document.body, '.activitybar')).join('/'));
+}
+
+/* ── 6c. 单次动作：免确认直接生效，三态与撤销都落在行内（清单 15 / 16）── */
+{
+  const bob0 = rowNamed(root, '鲍勃');                     // 停用中的号，主按钮是「启用」
+  if (!bob0) bad('批量作业跑完后「鲍勃」那行丢了');
+  else {
+    const reviveBefore = POSTS.filter(p => /revive/.test(p)).length;
+    fire(qsel(bob0, '.btn'), 'click');
+    // 动作还没落地时：按钮禁用并转圈，且没有弹确认框——可逆的直接生效
+    const during = qsel(rowNamed(root, '鲍勃'), '.btn');
+    if (!during) bad('执行中动作按钮丢了');
+    else if (!hasCls(during, 'spin') || !during.disabled) bad('动作执行中行内按钮没进「转圈（禁用）」态');
+    await tick(); await tick();
+    if (POSTS.filter(p => /revive/.test(p)).length === reviveBefore) bad('「启用」没直接下发（不该等确认框）');
+    const bob1 = rowNamed(root, '鲍勃');
+    const btns1 = findAll(bob1, 'btn');
+    const words = btnTexts(btns1);
+    if (words.join(' ') !== '完成 撤销') bad('成功后行内应是「完成 + 撤销」，实为 ' + words.join('/'));
+    if (!hasCls(btns1[0], 'ok')) bad('成功态没打勾（缺 .ok）');
+    // ⋯ 在那一秒里必须还在：少一个按钮，行宽就跳一下
+    if (btns1.length !== 3) bad('回执那一秒行内按钮数变了（⋯ 该常驻）：' + btns1.length);
+    // 结果就地更新在行内，不再飘到顶部：动作成功后不新增 toast
+    fire(findAll(bob1, 'btn')[1], 'click');                  // 撤销「启用」= 再停用
+    await tick(); await tick();
+    if (POSTS.filter(p => /\/disable/.test(p)).length === 0) bad('行内「撤销」没下发反向动作');
+    const words2 = btnTexts(findAll(rowNamed(root, '鲍勃'), 'btn'));
+    if (words2.join(' ') !== '已撤销') bad('撤销后行内回执不对：' + words2.join('/'));
+  }
+}
+
 /* ── 7. ⋯ 菜单：其余动作 + 移除置末（清单 II.7）─────────────── */
 const moreBtn = findAll(alice, 'btn').slice(-1)[0];
 fire(moreBtn, 'click');
@@ -768,6 +854,25 @@ if (foot) {
     if (!hasCls(actBtns.slice(-1)[0], 'danger')) bad('抽屉里的「移除」没标危险态');
   }
 }
+/* 抽屉里的按钮三态（清单 15）：转圈（禁用）→ 原位打勾 1 秒。
+   「原位」是重点：启用/停用这类动作成功后整排按钮会换一套（kind 已经不存在），
+   ✓ 只有按位置落在用户刚点过的那一格，视线才接得上。 */
+{
+  fire(findAll(foot, 'btn')[3], 'click');                 // 签到
+  const mid = findAll(foot, 'btn');
+  if (!hasCls(mid[3], 'spin') || !mid[3].disabled) bad('抽屉动作执行中没进「转圈（禁用）」态');
+  if (mid[3].textContent.trim() !== '执行中…') bad('抽屉执行中的文案不对：' + mid[3].textContent.trim());
+  await tick(); await tick();
+  const okBtns = findAll(foot, 'btn');
+  if (!hasCls(okBtns[3], 'ok') || okBtns[3].textContent.trim() !== '完成') {
+    bad('抽屉成功后没在刚点过的那一格打勾：' + btnTexts(okBtns).join('/'));
+  }
+  // 打勾那一秒整排按钮冻结在点击时的样子（换成新动作表会把 ✓ 挪到别的格子上）
+  if (btnTexts(okBtns).join(' ') !== '概览 任务 日志 完成 查余额 停用 移除') {
+    bad('打勾那一秒的按钮排布变了：' + btnTexts(okBtns).join('/'));
+  }
+  if (okBtns.slice(3).some(b => !b.disabled)) bad('打勾那一秒动作按钮没禁用（用户会点到过期动作）');
+}
 fire(findButton(foot, '日志'), 'click');
 await tick();
 const lines = findAll(drawer, 'ln');
@@ -792,6 +897,9 @@ if (stray(document.documentElement).length) bad('界面里出现脏字文本：'
 
 if (problems.length) { console.error(problems.join('\n')); process.exit(1); }
 console.log('TABLE OK');
+// 活动栏的自动收起计时（8 秒/2 分钟）是无 ref 的定时器，node 会等它们跑完才退；
+// 先让 stdout 落盘，再主动退出，别让一次绿测试挂成超时。
+setTimeout(() => process.exit(0), 50);
 `
 	runNodeHarness(t, node, dir, "table.mjs", harness, "TABLE OK", "账号表渲染不符")
 }
