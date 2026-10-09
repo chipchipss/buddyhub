@@ -171,3 +171,61 @@ func TestConcurrentSaveKeepsFileUsable(t *testing.T) {
 		t.Fatalf("落盘桶数=%d，期望 %d（每个 writer 一个 uid）", got, writers)
 	}
 }
+
+// DailySeries：逐账号日粒度曲线。三条口径必须是死的——
+// 只含本 uid、缺日期补 0（横轴连续）、折叠出的日桶与小时桶归到同一天。
+func TestDailySeriesPerUID(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.Add(now, "cn", "u1", "glm-5.2", Delta{PromptTokens: 10, HasPromptTokens: true, CompletionTokens: 5, HasCompletion: true}, true)
+	r.Add(now, "cn", "u1", "glm-5.2", Delta{}, false) // 失败尝试也要进这一天的请求数
+	r.Add(now.Add(-24*time.Hour), "cn", "u1", "m", Delta{PromptTokens: 7, HasPromptTokens: true}, true)
+	r.Add(now, "cn", "u2", "m", Delta{PromptTokens: 99, HasPromptTokens: true}, true)
+
+	// Rollup 产物（"d:" 前缀）落在 3 天前
+	day3 := now.AddDate(0, 0, -3).Format(dayLayout)
+	r.buckets["d:"+day3+"|cn|u1|m"] = &bucket{Scope: "d:" + day3, Realm: "cn", UID: "u1", Model: "m", Req: 4, PT: 40, TT: 40}
+
+	pts := r.DailySeries("u1", 7)
+	if len(pts) != 7 {
+		t.Fatalf("点数 = %d, want 7（窗口内每天都要有一个点）", len(pts))
+	}
+	if pts[6].T != now.Format(dayLayout) || pts[0].T != now.AddDate(0, 0, -6).Format(dayLayout) {
+		t.Fatalf("横轴 = %s…%s, want 六天前到今天", pts[0].T, pts[6].T)
+	}
+	for i, p := range pts {
+		if p.Scope != "day" {
+			t.Fatalf("点 %d scope = %q, want day", i, p.Scope)
+		}
+	}
+	if p := pts[6]; p.PromptTokens != 10 || p.CompletionTok != 5 || p.TotalTokens != 15 || p.Requests != 2 || p.Errors != 1 {
+		t.Fatalf("今天 = %+v, want pt10/ct15/tt15/req2/err1（u2 的 99 不能漂进来）", p)
+	}
+	// 点序为「今天在前还是在后」= 升序：index i 对应 now+(i-6) 天，故 3 天前是 pts[3]。
+	if p := pts[3]; p.PromptTokens != 40 || p.Requests != 4 {
+		t.Fatalf("3 天前的日桶 = %+v, want pt40/req4", p)
+	}
+	if p := pts[1]; p.Requests != 0 || p.TotalTokens != 0 {
+		t.Fatalf("空白天 = %+v, want 全 0（补 0 而不是跳过）", p)
+	}
+
+	// 24h 前那条按「它所在的那一天」计，与 Snapshot 的日桶归日一致。
+	y := pts[5]
+	if y.PromptTokens != 7 {
+		t.Fatalf("昨天 pt = %d, want 7", y.PromptTokens)
+	}
+
+	if got := len(r.DailySeries("u1", 0)); got != 7 {
+		t.Fatalf("days<=0 应回落到 7, got %d", got)
+	}
+	if got := len(r.DailySeries("u1", 500)); got != 90 {
+		t.Fatalf("days 应夹到 90, got %d", got)
+	}
+	if got := r.DailySeries("", 7); got != nil {
+		t.Fatalf("空 uid 应返回 nil, got %+v", got)
+	}
+	var nilR *Recorder
+	if got := nilR.DailySeries("u1", 7); got != nil {
+		t.Fatalf("nil recorder 应返回 nil, got %+v", got)
+	}
+}

@@ -9,13 +9,11 @@ import { h, svgEl, icon, signal, api, toast, fmtTok, fmtMs, fmtRate } from '../k
 import { defineView } from '../shell.js';
 import { platforms, loadPlatforms, platName } from '../platforms.js';
 
-const seg = signal('usage');
 const hours = signal(72);
 const plat = signal('all');
 const usage = signal(null);
 const pk = signal(null);
 const pkPlat = signal('all');
-const note = signal('');
 
 async function loadUsage(quiet = true) {
   try {
@@ -321,29 +319,41 @@ function pkSeg() {
   );
 }
 
-export default defineView({
-  id: 'usage',
-  title: '用量与积分',
+/* ── 两段各归一位（清单 I.2）────────────────────────────────────
+   「用量与积分」不再自成一级页：调用统计（请求 / token / 延迟）是网关的
+   运行时数据，进「网关」；积分是账号的属性，进「账号」页的「积分构成」。 */
+export const statsView = defineView({
+  id: 'stats',
+  page: 'gateway',
+  tab: '调用统计',
+  title: '调用统计',
   icon: 'usage',
-  group: '数据',
-  keywords: '用量 token 积分 对比 统计',
+  keywords: '用量 token 请求 延迟 统计 时序 chart',
   sub() {
     const d = usage();
     return d ? `请求 ${fmtTok((d.totals || {}).requests)} · token ${fmtTok((d.totals || {}).total_tokens)}` : '正在读取…';
   },
   render() {
     loadPlatforms();
-    const s = seg();
-    if (s === 'usage' && !usage()) loadUsage();
-    if (s === 'pk' && !pk()) loadPk();
-    return h('div', { class: 'view stack' },
-      h('div', { class: 'row' },
-        h('div', { class: 'seg' },
-          h('button', { class: s === 'usage' ? 'on' : '', text: 'Token 用量', onclick: () => seg.set('usage') }),
-          h('button', { class: s === 'pk' ? 'on' : '', text: '积分构成', onclick: () => seg.set('pk') }),
-        ),
-      ),
-      s === 'usage' ? usageSeg() : pkSeg(),
-    );
+    if (!usage()) loadUsage();
+    return h('div', { class: 'view stack' }, usageSeg());
+  },
+});
+
+export const creditsView = defineView({
+  id: 'credits',
+  page: 'accounts',
+  tab: '积分构成',
+  title: '积分构成',
+  icon: 'wallet',
+  keywords: '积分 余额 包 构成 对比 credits',
+  sub() {
+    const d = pk();
+    return d ? `${(d.accounts || []).length} 个账号的积分包` : '正在读取…';
+  },
+  render() {
+    loadPlatforms();
+    if (!pk()) loadPk();
+    return h('div', { class: 'view stack' }, pkSeg());
   },
 });

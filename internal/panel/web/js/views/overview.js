@@ -111,10 +111,10 @@ function recentFeed() {
 
 export default defineView({
   id: 'overview',
-  title: '总览',
+  page: 'home',
+  title: '首页',
   icon: 'overview',
-  group: '',
-  keywords: 'dashboard 首页 概览',
+  keywords: 'dashboard 首页 概览 待办',
   sub() {
     const d = overview();
     if (!d) return '正在连接…';

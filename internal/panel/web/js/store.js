@@ -26,9 +26,15 @@ export function applyTheme() {
   document.documentElement.dataset.theme = theme.peek();
 }
 
+/** setTheme(mode) —— 明暗由「设置 · 外观」决定，只存浏览器本地。 */
+export function setTheme(mode) {
+  if (mode !== 'light' && mode !== 'dark') return;
+  theme.set(mode);
+  try { localStorage.setItem(LS_THEME, mode); } catch { /* 私密模式 */ }
+}
+
 export function toggleTheme() {
-  theme.set(theme.peek() === 'light' ? 'dark' : 'light');
-  try { localStorage.setItem(LS_THEME, theme.peek()); } catch { /* 私密模式 */ }
+  setTheme(theme.peek() === 'light' ? 'dark' : 'light');
 }
 
 /* ── 概览（账号池快照）───────────────────────────────────────── */
@@ -47,6 +53,7 @@ export async function refreshOverview(quiet = true) {
   }
 }
 
-/* ── 当前视图 ─────────────────────────────────────────────────── */
-// 初始视图取 hash 的 view 部分（#accounts?tab=ext → accounts；子状态由各视图自行解析）
-export const viewId = signal(((location.hash || '#overview').slice(1).split('?')[0]) || 'overview');
+/* ── 当前一级页 ───────────────────────────────────────────────── */
+// 初始值取 hash 的 page 部分（#accounts?seg=credits&tab=zai → accounts）；
+// 旧 hash 与分段由 shell.applyHash() 在启动时归一，这里只当占位。
+export const viewId = signal(((location.hash || '#home').slice(1).split('?')[0]) || 'home');

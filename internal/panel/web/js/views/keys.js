@@ -47,9 +47,10 @@ async function generate() {
 
 export default defineView({
   id: 'keys',
+  page: 'gateway',
+  tab: 'API 密钥',
   title: 'API 密钥',
   icon: 'keys',
-  group: '网关',
   keywords: 'key api 密钥 token',
   sub() {
     const k = keys();

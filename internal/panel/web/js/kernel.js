@@ -63,6 +63,7 @@ function isScroller(el) {
 
 export function isEngaged() {
   if (drawerState !== 'closed') return true;
+  if (menuEl) return true;          // 菜单开着 = 人正在做选择，别换掉它锚定的那一行
   const a = document.activeElement;
   if (a && a.nodeType === 1 && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return true;
   const sel = document.getSelection && document.getSelection();
@@ -124,9 +125,10 @@ function restoreFocus(f, newNode) {
 // 不常驻定时器——既省掉每秒空转，也让无头 Node 测试脚本能自然退出。
 let flushTimer = 0;
 function flushPending() {
-  flushTimer = 0;
-  if (pendingSwap.size === 0) return;
-  if (isEngaged()) { armFlush(); return; }
+  // 定时器句柄保持有效（不能被置零后再 clearInterval，那会把它变成常驻轮询）：
+  // 队列空了就自己停手。
+  if (pendingSwap.size === 0) { stopFlush(); return; }
+  if (isEngaged()) return;          // 人还在操作，下一轮再看
   for (const e of [...pendingSwap]) {
     pendingSwap.delete(e);
     if (e.disposed || !e.node || !e.node.parentNode || !e.pending) continue;
@@ -143,6 +145,9 @@ function flushPending() {
 }
 function armFlush() {
   if (!flushTimer) flushTimer = setInterval(flushPending, 400);
+}
+function stopFlush() {
+  if (flushTimer) { clearInterval(flushTimer); flushTimer = 0; }
 }
 
 document.addEventListener('scroll', () => {
@@ -172,6 +177,9 @@ export function effect(fn) {
       } finally {
         ACTIVE = prev;
       }
+      // 视图复用同一棵树（数据到了就地重画，见 views/accounts.js）：没什么要换的，
+      // 更不能换——把已经上屏的节点搬进新包装会让页面当场空一截。
+      if (out === e.node) return out;
       if (out instanceof Node) {
         if (e.node && e.node.parentNode) {
           if (isEngaged()) { e.pending = out; pendingSwap.add(e); armFlush(); return out; }
@@ -473,13 +481,15 @@ export function ensureLayers() {
 /** openDrawer({ title, hint, body, footer }) —— body/footer 为 DOM 节点 */
 export function openDrawer({ title, hint, body, footer }) {
   ensureLayers();
+  // 没有 footer 时不能把 null 交给 replaceChildren：真实 DOM 会把它当字符串渲染成
+  // 一个 "null" 文本节点（h() 会过滤，replaceChildren 不会）。2026-10-09 浏览器实测。
   drawerEl.replaceChildren(
     h('header', null,
       h('div', { class: 'grow' }, h('h2', { text: title }), hint ? h('div', { class: 'hint', text: hint }) : null),
       h('button', { class: 'btn icon ghost', title: '关闭', onclick: () => closeDrawer() }, icon('close')),
     ),
     h('div', { class: 'body' }, body),
-    footer ? h('footer', null, footer) : null,
+    ...(footer ? [h('footer', null, footer)] : []),
   );
   drawerState = 'open';
   drawerEl.setAttribute('aria-hidden', 'false');
@@ -611,6 +621,58 @@ export function confirmDialog(message, { ok = '确认', cancel = '取消' } = {}
   });
 }
 
+/* ── 上下文菜单（⋯ 按钮的落点）────────────────────────────────
+   一行账号上有五六个动作，全部平铺就成了一堵按钮墙（清单 II.7：一个主按钮
+   + 一个 ⋯）。菜单锚定触发源、放不下就朝上翻，点外面 / Escape / 滚动 / 改窗口
+   大小即关——菜单是临时物，任何把视线从它上面移开的动作都该结束它。 */
+let menuEl = null, menuOff = null;
+
+export function closeMenu() {
+  if (!menuEl) return;
+  const el = menuEl;
+  menuEl = null;
+  if (menuOff) { menuOff(); menuOff = null; }
+  el.remove();
+  armFlush();    // 菜单开着时挂起的重绘，此刻补落地
+}
+
+/** openMenu(anchor, items) —— items: [{label, onclick, danger?, tip?, disabled?}] */
+export function openMenu(anchor, items) {
+  closeMenu();
+  const panel = h('div', { class: 'menu', role: 'menu' },
+    ...items.map(it => h('button', {
+      class: 'menu-item' + (it.danger ? ' danger' : ''),
+      role: 'menuitem',
+      title: it.tip || '',
+      disabled: !!it.disabled,
+      onclick: () => { const fn = it.onclick; closeMenu(); fn?.(); },
+    }, h('span', { text: it.label }))),
+  );
+  const wrap = h('div', {
+    class: 'menu-wrap',
+    onpointerdown: ev => { if (ev.target === wrap) closeMenu(); },
+  }, panel);
+  document.body.append(wrap);
+  menuEl = wrap;
+
+  const r = anchor.getBoundingClientRect();
+  const pw = panel.offsetWidth || 186, ph = panel.offsetHeight;
+  panel.style.left = Math.max(8, Math.min(r.right - pw, window.innerWidth - pw - 8)) + 'px';
+  panel.style.top = (r.bottom + ph + 14 > window.innerHeight
+    ? Math.max(8, r.top - ph - 6) : r.bottom + 6) + 'px';
+
+  const onKey = ev => { if (ev.key === 'Escape') { ev.stopPropagation(); closeMenu(); } };
+  const onScroll = () => closeMenu();
+  document.addEventListener('keydown', onKey, true);
+  addEventListener('scroll', onScroll, true);
+  addEventListener('resize', onScroll);
+  menuOff = () => {
+    document.removeEventListener('keydown', onKey, true);
+    removeEventListener('scroll', onScroll, true);
+    removeEventListener('resize', onScroll);
+  };
+}
+
 /* ── 复制（非安全上下文降级）────────────────────────────────── */
 export function copyText(text) {
   if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
@@ -669,6 +731,7 @@ const PATHS = {
   wallet: 'M2.6 4.6h9.6a1.2 1.2 0 0 1 1.2 1.2v4.4a1.2 1.2 0 0 1-1.2 1.2H2.6zM2.6 4.6V3.4h8M10.4 8.5h.01',
   eye: 'M1.8 8S4.2 4.4 8 4.4 14.2 8 14.2 8 11.8 11.6 8 11.6 1.8 8 1.8 8Z M8 9.6a1.6 1.6 0 1 0 0-3.2 1.6 1.6 0 0 0 0 3.2Z',
   lock: 'M4.4 7.2V5.4a3.6 3.6 0 0 1 7.2 0v1.8M3.4 7.2h9.2v6H3.4z',
+  more: 'M3.4 8h.01M8 8h.01M12.6 8h.01',
 };
 
 /** icon('plus') → SVG 节点 */

@@ -116,9 +116,10 @@ function ensureLoaded() {
 
 export default defineView({
   id: 'models',
+  page: 'gateway',
+  tab: '模型与档位',
   title: '模型与档位',
   icon: 'models',
-  group: '网关',
   keywords: '模型 倍率 档位 max tokens',
   sub() {
     const list = models();

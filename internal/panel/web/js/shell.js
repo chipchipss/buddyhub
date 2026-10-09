@@ -1,27 +1,84 @@
 /* ══════════════════════════════════════════════════════════════════
    shell.js · 应用壳层
-   注册视图 → 生成侧栏/顶栏/状态条 → 路由挂载 → 命令面板（⌘K）
+   五个一级页（首页 / 账号 / 自动化 / 网关 / 设置）→ 侧栏 / 顶栏 / 状态条
+   → 路由挂载 → 命令面板（⌘K）。
    视图只需实现 render()，返回一个 DOM 节点；依赖的信号变化时框架自动重建。
    ══════════════════════════════════════════════════════════════════ */
 
-import { h, icon, effect, api, toast, closeDrawer, ensureLayers } from './kernel.js';
-import { overview, theme, toggleTheme, viewId, applyTheme, refreshOverview } from './store.js';
+import { h, icon, signal, effect, api, toast, closeDrawer, ensureLayers } from './kernel.js';
+import { overview, viewId, applyTheme, theme, toggleTheme, refreshOverview } from './store.js';
 
-/* ── 视图注册表 ───────────────────────────────────────────────── */
-const views = new Map();
+/* ── 导航模型：一级页 + 页内分段 ─────────────────────────────────
+   面板原先 8 个导航并列，混了对象（账号/密钥/模型）、动作（任务/日志）、
+   设置（配置）三类东西。现在收成五个一级页；同类对象在一个页里用「分段」
+   （页顶 tab）承载，页内子状态（平台筛选等）另用 ?tab= 表示：
+     #accounts?seg=credits&tab=zai
+     └ 一级页 ┘ └─ 分段 ─┘ └ 页内子状态 ┘
+   ─────────────────────────────────────────────────────────────── */
+const views = new Map();      // 分段 id -> def
+const pages = new Map();      // 一级页 id -> { ...meta, sections: [] }
+
+export const PAGE_META = {
+  home: { title: '首页', icon: 'overview', primary: 'add', keywords: '首页 待办 概览 状态 dashboard' },
+  accounts: { title: '账号', icon: 'accounts', primary: 'add', keywords: '账号 平台 池 积分 用量 凭证 详情' },
+  automation: { title: '自动化', icon: 'automation', keywords: '任务 签到 排程 台账 队列 执行记录 日志' },
+  gateway: { title: '网关', icon: 'keys', keywords: '密钥 模型 档位 倍率 调用统计 token api' },
+  settings: { title: '设置', icon: 'config', keywords: '配置 参数 主题 关于 版本' },
+};
+
+// 旧 hash → [一级页, 默认分段]。收藏夹、README、日志链接里的深链不能断。
+const LEGACY_ROUTE = {
+  overview: ['home', null],
+  accounts: ['accounts', null],
+  usage: ['gateway', 'stats'],
+  tasks: ['automation', 'tasks'],
+  logs: ['automation', 'logs'],
+  keys: ['gateway', 'keys'],
+  models: ['gateway', 'models'],
+  config: ['settings', 'config'],
+};
 
 /**
- * defineView({ id, title, sub, icon, group, keywords, render, tick, actions })
+ * defineView({ id, page, tab, title, icon, keywords, render, tick, sub })
+ *   page    所属一级页（缺省 = 自成一级页）
+ *   tab     页顶分段上显示的名字（缺省用 title）
  *   render()  返回 DOM 节点（必填）
- *   tick()    视图可见时每 5s 调用（可选，用于轮询刷新）
- *   actions() 返回视图工具条按钮数组（可选）
+ *   tick()    本分段可见时每 5s 调用（可选，用于轮询刷新）
+ *   sub()     顶栏副标题（可选）
+ * 同一页的分段顺序 = 注册顺序（boot.js 的 import 顺序）。
  */
 export function defineView(def) {
   views.set(def.id, def);
+  const legacy = LEGACY_ROUTE[def.id];
+  const pageId = def.page || (legacy ? legacy[0] : def.id);
+  let pg = pages.get(pageId);
+  if (!pg) {
+    pg = Object.assign({ id: pageId, sections: [] },
+      PAGE_META[pageId] || { title: def.title, icon: def.icon, keywords: def.keywords || '' });
+    pages.set(pageId, pg);
+  }
+  if (!pg.sections.includes(def)) pg.sections.push(def);
   return def;
 }
 
 export function getView(id) { return views.get(id); }
+
+/** sectionId：当前页内分段。与 viewId（一级页）一起构成完整路由。 */
+export const sectionId = signal('');
+
+const firstPage = () => pages.keys().next().value;
+
+function sectionFor(pg, want) {
+  if (!pg || !pg.sections.length) return null;
+  if (pg.sections.length === 1) return pg.sections[0];
+  return pg.sections.find(d => d.id === want) || pg.sections[0];
+}
+
+export function activePage() { return pages.get(viewId.peek()); }
+export function activeSection() {
+  const pg = activePage();
+  return pg ? sectionFor(pg, sectionId.peek()) : null;
+}
 
 /* ── 侧栏 ─────────────────────────────────────────────────────── */
 const LS_RAIL = 'buddyhub.rail';
@@ -44,17 +101,12 @@ function setRailMini(mini) {
 
 function buildRail() {
   const list = h('div', { class: 'navlist' });
-  let lastGroup = null;
-  for (const def of views.values()) {
-    if (def.group && def.group !== lastGroup) {
-      list.append(h('div', { class: 'navgroup', text: def.group }));
-      lastGroup = def.group;
-    }
+  for (const pg of pages.values()) {
     const item = h('div', {
-      class: 'navitem', dataset: { view: def.id }, title: def.title,
-      onclick: () => navigate(def.id),
-    }, icon(def.icon || 'overview'), h('span', { text: def.title }));
-    def._nav = item;
+      class: 'navitem', dataset: { view: pg.id }, title: pg.title,
+      onclick: () => navigate(pg.id),
+    }, icon(pg.icon || 'overview'), h('span', { text: pg.title }));
+    pg._nav = item;
     list.append(item);
   }
   const toggle = h('button', {
@@ -81,46 +133,46 @@ function buildRail() {
   return h('aside', { class: 'rail' }, inner);
 }
 
-/* 侧栏选中态跟随 viewId */
+/* 侧栏选中态跟随一级页 */
 function syncRailActive() {
-  for (const def of views.values()) {
-    if (def._nav) def._nav.classList.toggle('on', def.id === viewId.peek());
+  for (const pg of pages.values()) {
+    if (pg._nav) pg._nav.classList.toggle('on', pg.id === viewId.peek());
   }
 }
 
 /* ── 顶栏 ─────────────────────────────────────────────────────── */
+/* 顶栏只留搜索 + 当前页的主操作（清单 12）：
+   「刷新余额」原先在顶栏、批量操作、命令面板出现三次，这里收掉；
+   主题切换移进「设置」，腾出顶栏。 */
 function buildTopbar() {
   const title = h('h1', { text: '' });
   const sub = h('div', { class: 'sub', text: '' });
+  const actions = h('div', { class: 'topbar-actions' });
 
   const sync = () => {
-    const def = views.get(viewId.peek());
-    title.textContent = def ? def.title : 'BuddyHub';
-    sub.textContent = def && def.sub ? def.sub() : '';
+    const pg = activePage();
+    const sec = activeSection();
+    title.textContent = pg ? pg.title : 'BuddyHub';
+    sub.textContent = (sec && sec.sub ? sec.sub() : '') || '';
+    const kids = [
+      h('button', {
+        class: 'btn icon ghost', title: '搜索页面或动作 (Ctrl/⌘ + K)',
+        onclick: () => openPalette(),
+      }, icon('search')),
+    ];
+    if (pg && pg.primary === 'add') {
+      kids.push(h('button', { class: 'btn sm primary', onclick: () => openAddAccount() }, icon('plus'), '添加账号'));
+    }
+    actions.replaceChildren(...kids);
   };
   viewId.subscribe(sync);
+  sectionId.subscribe(sync);
   overview.subscribe(sync);
-
-  const themeBtn = h('button', {
-    class: 'btn icon ghost', title: '切换明暗',
-    onclick: () => toggleTheme(),
-  });
-  const paintTheme = () => themeBtn.replaceChildren(theme.peek() === 'light' ? icon('moon') : icon('sun'));
-  theme.subscribe(paintTheme);
-  paintTheme();
 
   return h('header', { class: 'topbar' },
     h('div', { class: 'titles' }, title, sub),
     h('div', { class: 'grow' }),
-    h('div', { class: 'topbar-actions' },
-      h('button', {
-        class: 'btn icon ghost', title: '命令面板 (Ctrl/⌘ + K)',
-        onclick: () => openPalette(),
-      }, icon('search')),
-      themeBtn,
-      h('button', { class: 'btn sm', onclick: doRefreshAll, title: '向所有上游发起一次余额查询（结果写回账号卡）' }, icon('refresh'), '刷新余额'),
-      h('button', { class: 'btn sm primary', onclick: () => openAddAccount() }, icon('plus'), '添加账号'),
-    ),
+    actions,
   );
 }
 
@@ -173,59 +225,95 @@ function fmtUptime(sec) {
 
 /* ── 路由 ─────────────────────────────────────────────────────── */
 let activeEffect = null;
+let lastRouteKey = '';
 
-/** parseHash() —— 解析 #view?seg=xxx 形态的 hash。
- *  返回 { view, seg }：view = 视图 id；seg = 子状态（无则 null）。
- *  子状态让视图内部分段可深链、刷新可保持、后退可用。 */
+/** parseHash() —— 解析 #page?seg=xxx&tab=yyy&acct=zzz 形态的 hash。
+ *  seg = 页内分段；tab = 页内子状态（平台筛选等）；acct = 要直接打开详情的账号。
+ *  三者都能深链、刷新保持、后退可用。 */
 export function parseHash() {
-  const raw = (location.hash || '#overview').slice(1);
+  const raw = (location.hash || '').slice(1);
   const q = raw.indexOf('?');
-  if (q < 0) return { view: raw || 'overview', seg: null };
-  const view = raw.slice(0, q) || 'overview';
-  let seg = null;
-  for (const kv of raw.slice(q + 1).split('&')) {
-    const [k, v] = kv.split('=');
-    if (k === 'seg' || k === 'tab') seg = v;
+  const view = (q < 0 ? raw : raw.slice(0, q)) || 'home';
+  const params = new URLSearchParams(q < 0 ? '' : raw.slice(q + 1));
+  return { view, seg: params.get('seg'), tab: params.get('tab'), acct: params.get('acct') };
+}
+
+/** routeFor(id, seg) —— 把「视图 id」翻译成一页一分段：既认一级页 id，
+ *  也认分段 id 与旧 hash（navigate('logs') 仍然可用）。 */
+function routeFor(id, seg) {
+  if (pages.has(id)) return { page: id, seg: seg || null };
+  const legacy = LEGACY_ROUTE[id];
+  if (legacy) return { page: legacy[0], seg: seg || legacy[1] || null };
+  const def = views.get(id);
+  if (def) {
+    for (const pg of pages.values()) if (pg.sections.includes(def)) return { page: pg.id, seg: def.id };
   }
-  return { view, seg };
+  return { page: firstPage(), seg: null };
 }
 
-/** setHashSeg(view, seg) —— 写入视图的子状态段（不触发导航，只改地址栏）。 */
-export function setHashSeg(view, seg) {
-  writeHash('#' + view + (seg ? '?seg=' + seg : ''), false);
+function hashFor(page, seg, tab) {
+  let s = '#' + page;
+  const qs = [];
+  if (seg) qs.push('seg=' + seg);
+  if (tab) qs.push('tab=' + tab);
+  return qs.length ? s + '?' + qs.join('&') : s;
 }
 
-// push=true 留一条历史（跨视图导航），false 只改写当前条目（子状态、原地刷新）。
+// push=true 留一条历史（换页/换分段），false 只改写当前条目（页内子状态）。
 function writeHash(target, push) {
   if (location.hash === target) return;
   if (push && history.pushState) history.pushState(null, '', target);
   else history.replaceState(null, '', target);
 }
 
-export function navigate(id) {
-  if (!views.has(id)) id = views.keys().next().value;
+/** 写入当前页的子状态（?tab=），不新增历史记录。 */
+export function setHashTab(page, tab) {
   const cur = parseHash();
-  if (cur.view !== id) {
-    // 跨视图 = 真正的导航，要留历史（replaceState 会让返回键直接退出面板）。
-    writeHash('#' + id, true);
-    viewId.set(id);
-  } else if (cur.seg) {
-    // 同视图跳转（如目录页「管理 →」）：清掉旧子状态，落到默认分段。
-    // 子状态是页面内的视图切换，不该各占一条历史，继续 replace。
-    writeHash('#' + id, false);
-    viewId.set(id);
-  }
+  if (cur.view !== page) return;
+  writeHash(hashFor(page, cur.seg, tab), false);
 }
 
-function mountView(id) {
+/** 写入当前页的子状态并保留其它参数（acct 用完即弃的场景）。 */
+export function patchHash(patch) {
+  const cur = parseHash();
+  writeHash(hashFor(cur.view, 'seg' in patch ? patch.seg : cur.seg, 'tab' in patch ? patch.tab : cur.tab), false);
+}
+
+/** applyHash() —— 地址栏 → 路由信号（导航、前进/后退、手改 hash 都走这里）。 */
+function applyHash() {
+  const { view, seg } = parseHash();
+  const { page, seg: want } = routeFor(view, seg);
+  const pg = pages.get(page) || pages.get(firstPage());
+  const sec = sectionFor(pg, want);
+  sectionId.set(sec ? sec.id : '');
+  viewId.set(pg ? pg.id : firstPage());
+}
+
+export function navigate(id, seg) {
+  const { page, seg: want } = routeFor(id, seg);
+  const pg = pages.get(page);
+  const sec = sectionFor(pg, want);
+  const cur = routeFor(parseHash().view, parseHash().seg);
+  // 跨页或换分段都是真正的导航，要留历史（返回键不该直接退出面板）。
+  const push = cur.page !== page || (cur.seg || '') !== (sec ? sec.id : '');
+  writeHash(hashFor(page, pg && pg.sections.length > 1 ? (sec ? sec.id : null) : null, null), push);
+  sectionId.set(sec ? sec.id : '');
+  viewId.set(page);
+}
+
+function mountPage() {
+  const key = viewId.peek() + '/' + sectionId.peek();
+  if (key === lastRouteKey && activeEffect) return;   // 一次导航里两个信号各触发一次
+  lastRouteKey = key;
   if (activeEffect) { activeEffect.dispose(); activeEffect = null; }
-  const def = views.get(id) || views.get([...views.keys()][0]);
+  const def = activeSection();
   const host = document.getElementById('content');
+  if (!host) return;
   host.replaceChildren();
   host.scrollTop = 0;
   const placeholder = document.createComment('root');
   host.append(placeholder);
-  const eff = effect(() => def.render());
+  const eff = effect(() => renderRoute());
   if (eff.node && eff.node.parentNode == null) host.replaceChild(eff.node, placeholder);
   else placeholder.remove();
   activeEffect = eff;
@@ -237,28 +325,76 @@ function mountView(id) {
   }
 }
 
+/** renderRoute() —— 一级页骨架：多段页先画分段条，再画当前分段。
+ *  路由信号用 peek 读：换页/换分段由 mountPage 负责重建，
+ *  这里只响应分段内部的数据信号。
+ *
+ *  同一路由的重跑（轮询到了新数据）尽量原样复用树：视图若就地重画并返回同一个
+ *  节点，包装层也必须返回同一个节点，否则 h() 会把那块已上屏的子树搬进还没挂上去
+ *  的新包装里——页面当场空一截，而护栏又要等用户停手才落地（2026-10-09 实测：
+ *  账号页在搜索框有焦点期间「点什么都没反应」）。 */
+let routeCache = null, routeKey = '', routeBody = null;
+
+function renderRoute() {
+  const pg = pages.get(viewId.peek()) || pages.get(firstPage());
+  const sec = sectionFor(pg, sectionId.peek()) || pg.sections[0];
+  if (!sec) return h('div', { class: 'view empty' }, h('div', { class: 'd', text: '没有可用页面' }));
+  const body = sec.render();
+  const key = pg.id + '/' + sec.id;
+  if (key === routeKey && routeCache && body === routeBody && routeCache.isConnected) return routeCache;
+  routeKey = key; routeBody = body;
+  if (!pg || pg.sections.length < 2) return (routeCache = body);
+  const cur = sec.id;
+  return (routeCache = h('div', { class: 'page stack' },
+    h('div', { class: 'seg page-tabs' },
+      ...pg.sections.map(d => h('button', {
+        class: d.id === cur ? 'on' : '',
+        text: d.tab || d.title,
+        title: (pg.title + ' · ' + (d.tab || d.title)),
+        onclick: () => navigate(d.id),
+      }))),
+    body,
+  ));
+}
+
 /* ── 命令面板（⌘K）────────────────────────────────────────────── */
 let paletteEl = null, paletteInput = null, paletteResults = null;
 let paletteItems = [], paletteSel = 0;
 
 function paletteCommands() {
   const cmds = [];
-  for (const def of views.values()) {
-    cmds.push({
-      label: def.title, kind: '前往', icon: def.icon || 'overview',
-      keywords: (def.title + ' ' + def.id + ' ' + (def.keywords || '')).toLowerCase(),
-      run: () => navigate(def.id),
-    });
+  for (const pg of pages.values()) {
+    if (pg.sections.length > 1) {
+      cmds.push({
+        label: pg.title, kind: '前往', icon: pg.icon,
+        keywords: (pg.title + ' ' + pg.id + ' ' + (pg.keywords || '')).toLowerCase(),
+        run: () => navigate(pg.id),
+      });
+      for (const d of pg.sections) {
+        cmds.push({
+          label: pg.title + ' · ' + (d.tab || d.title), kind: '前往', icon: pg.icon,
+          keywords: ((d.tab || d.title) + ' ' + d.id + ' ' + pg.title + ' ' + (d.keywords || '') + ' ' + (pg.keywords || '')).toLowerCase(),
+          run: () => navigate(d.id),
+        });
+      }
+    } else {
+      const d = pg.sections[0];
+      cmds.push({
+        label: pg.title, kind: '前往', icon: pg.icon,
+        keywords: (pg.title + ' ' + pg.id + ' ' + (d && d.keywords ? d.keywords : pg.keywords || '')).toLowerCase(),
+        run: () => navigate(pg.id),
+      });
+    }
   }
   const acts = [
     ['刷新全部余额', 'refresh', () => api('balance_all', { method: 'POST' }).then(() => { refreshOverview(); toast('余额已刷新'); }).catch(e => toast(e.message, 'fail'))],
-    ['全部签到', 'checkin', () => api('checkin_all', { method: 'POST' }).then(() => toast('全部签到已开始', undefined, { action: { label: '查看日志', onclick: () => navigate('logs') } })).catch(e => toast(e.message, 'fail'))],
-    ['全部保活', 'power', () => api('keepalive_all', { method: 'POST' }).then(() => toast('保活已开始', undefined, { action: { label: '查看日志', onclick: () => navigate('logs') } })).catch(e => toast(e.message, 'fail'))],
-    ['旅行巡检', 'ticket', () => api('travel_all', { method: 'POST' }).then(() => toast('旅行巡检已开始', undefined, { action: { label: '查看日志', onclick: () => navigate('logs') } })).catch(e => toast(e.message, 'fail'))],
-    ['活跃上报', 'scan', () => api('activity_all', { method: 'POST' }).then(() => toast('活跃上报已开始', undefined, { action: { label: '查看日志', onclick: () => navigate('logs') } })).catch(e => toast(e.message, 'fail'))],
+    ['全部签到', 'checkin', () => api('checkin_all', { method: 'POST' }).then(() => toast('全部签到已开始', undefined, { action: { label: '查看执行记录', onclick: () => navigate('logs') } })).catch(e => toast(e.message, 'fail'))],
+    ['全部保活', 'power', () => api('keepalive_all', { method: 'POST' }).then(() => toast('保活已开始', undefined, { action: { label: '查看执行记录', onclick: () => navigate('logs') } })).catch(e => toast(e.message, 'fail'))],
+    ['旅行巡检', 'ticket', () => api('travel_all', { method: 'POST' }).then(() => toast('旅行巡检已开始', undefined, { action: { label: '查看执行记录', onclick: () => navigate('logs') } })).catch(e => toast(e.message, 'fail'))],
+    ['活跃上报', 'scan', () => api('activity_all', { method: 'POST' }).then(() => toast('活跃上报已开始', undefined, { action: { label: '查看执行记录', onclick: () => navigate('logs') } })).catch(e => toast(e.message, 'fail'))],
     ['添加账号', 'plus', () => openAddAccount()],
     ['切换明暗主题', 'moon', () => toggleTheme()],
-    ['查看运行日志', 'logs', () => navigate('logs')],
+    ['查看执行记录', 'logs', () => navigate('logs')],
   ];
   for (const [label, ic, run] of acts) {
     cmds.push({ label, kind: '动作', icon: ic, keywords: label.toLowerCase(), run });
@@ -329,6 +465,9 @@ export function startShell() {
   applyTheme();
   theme.subscribe(applyTheme);
 
+  // 先把地址栏翻译成路由，再建界面（首帧就得是用户要的那一页）
+  applyHash();
+
   const app = h('div', { class: 'app' + (railMiniState ? ' rail-mini' : '') },
     buildRail(),
     h('div', { class: 'stage' },
@@ -339,22 +478,16 @@ export function startShell() {
   );
   document.body.append(app);
 
-  // 路由：viewId 变化 → 换视图 + 同步侧栏选中
-  viewId.subscribe(() => { syncRailActive(); mountView(viewId.peek()); });
+  // 路由：一级页/分段变化 → 换视图 + 同步侧栏选中
+  viewId.subscribe(() => { syncRailActive(); mountPage(); });
+  sectionId.subscribe(mountPage);
   syncRailActive();
-  mountView(viewId.peek());
+  mountPage();
 
-  addEventListener('hashchange', () => {
-    const { view } = parseHash();
-    if (views.has(view)) viewId.set(view);
-  });
+  addEventListener('hashchange', applyHash);
 
   // 返回/前进：pushState 不触发 hashchange，得单独接 popstate。
-  // 已在目标视图时 viewId.set 是同值，不会重复挂载。
-  addEventListener('popstate', () => {
-    const { view } = parseHash();
-    if (views.has(view)) viewId.set(view);
-  });
+  addEventListener('popstate', applyHash);
 
   addEventListener('keydown', ev => {
     const meta = ev.metaKey || ev.ctrlKey;
@@ -362,11 +495,11 @@ export function startShell() {
     if (ev.key === 'Escape') { closePalette(); closeDrawer(); }
   });
 
-  // 轮询：只驱动当前视图的 tick；标签页在后台时整轮跳过——
+  // 轮询：只驱动当前分段自己的 tick；标签页在后台时整轮跳过——
   // 没人看的页面不该每秒打后端、更不该攒一堆挂起重绘。
   setInterval(() => {
     if (document.hidden) return;
-    const def = views.get(viewId.peek());
+    const def = activeSection();
     if (def && def.tick) { try { def.tick(); } catch (e) { console.error('[tick]', e); } }
   }, 5000);
 
@@ -375,3 +508,6 @@ export function startShell() {
 
 /* 供视图/抽屉调用（避免循环依赖，延迟到运行时解析）*/
 export function openAddAccount() { window.__openAddAccount?.(); }
+
+/* 顶栏批量刷新的备用入口（账号页工具条复用同一实现）*/
+export { doRefreshAll };

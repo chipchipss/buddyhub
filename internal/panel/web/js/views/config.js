@@ -6,6 +6,7 @@
 
 import { h, icon, signal, api, toast } from '../kernel.js';
 import { defineView } from '../shell.js';
+import { theme, setTheme } from '../store.js';
 
 const cfg = signal(null);
 const cfgPath = signal('');
@@ -176,11 +177,37 @@ async function save(ev) {
   finally { saving.set(false); }
 }
 
+/** appearance —— 主题开关（清单 53：原先占着顶栏，现在挖进设置）。
+ *  刻意不读 theme 信号：这里一订阅，切主题就会重建整页表单，
+ *  用户刚填进去、还没保存的配置值会被 cfg 里的旧值冲掉。改由点击就地换 class。 */
+function appearance() {
+  const btns = [['dark', '暗色'], ['light', '浅色']].map(([v, label]) => {
+    const b = h('button', {
+      type: 'button', class: theme.peek() === v ? 'on' : '', text: label,
+      onclick: () => { setTheme(v); for (const x of btns) x.classList.toggle('on', x === b); },
+    });
+    return b;
+  });
+  return h('section', { class: 'card' },
+    h('header', null, h('h2', { text: '外观' })),
+    h('div', { class: 'body' },
+      h('div', { class: 'switch-row' },
+        h('div', null,
+          h('div', { class: 'lb', text: '主题' }),
+          h('div', { class: 'muted', style: { fontSize: '11.5px', marginTop: '3px' },
+            text: '只改这台浏览器的面板观感，存在本地，不写进配置文件。' })),
+        h('div', { class: 'seg' }, ...btns),
+      ),
+    ),
+  );
+}
+
 export default defineView({
   id: 'config',
+  page: 'settings',
+  tab: '配置',
   title: '配置',
   icon: 'config',
-  group: '网关',
   keywords: '配置 设置 config 参数',
   sub() { return cfgPath() ? cfgPath() : '读取配置…'; },
   render() {
@@ -195,6 +222,7 @@ export default defineView({
           h('div', { class: g.cols === 3 ? 'grid-3' : 'grid-2' }, ...g.items.map(field)),
         ),
       )),
+      appearance(),
       h('div', { class: 'savebar' },
         h('span', { class: 'note',
           text: 'Upstash Redis 镜像、凭证目录与状态文件路径需手工编辑配置文件' }),

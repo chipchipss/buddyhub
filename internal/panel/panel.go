@@ -191,6 +191,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/balance_all", p.withAuth(p.balanceAll))
 	p.mux.HandleFunc("GET /panel/api/packages", p.withAuth(p.packages))
 	p.mux.HandleFunc("GET /panel/api/usage", p.withAuth(p.usage))
+	p.mux.HandleFunc("GET /panel/api/usage/series", p.withAuth(p.usageSeries))
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
@@ -645,6 +646,33 @@ func (p *Panel) usageSave(w http.ResponseWriter, r *http.Request) {
 	}
 	p.cfg.Usage.Save()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// usageSeries 返回**单个账号**的日粒度用量（面板账号详情抽屉的「近 7 天曲线」）。
+//
+// ?uid=<池内 uid>&days=7（1..90，缺省 7）。窗口只按 uid 过滤，不受「调用统计」页
+// 的时间窗影响——详情看的是这一号的历史，不是当前筛选。Z.AI / 外部通道目前没有
+// 逐请求用量记录（只有腾讯池走 usage.Recorder），points 会全是 0，前端据此显示空态。
+func (p *Panel) usageSeries(w http.ResponseWriter, r *http.Request) {
+	uid := r.URL.Query().Get("uid")
+	if uid == "" {
+		writeErr(w, http.StatusBadRequest, "uid required")
+		return
+	}
+	days := 7
+	if v := r.URL.Query().Get("days"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			writeErr(w, http.StatusBadRequest, "bad days")
+			return
+		}
+		days = n
+	}
+	var pts []usage.Point
+	if p.cfg.Usage != nil {
+		pts = p.cfg.Usage.DailySeries(uid, days)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"uid": uid, "days": days, "points": pts})
 }
 
 // packages 返回全部账号的积分包构成，供「积分构成」视图对比。

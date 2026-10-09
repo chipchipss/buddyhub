@@ -1,26 +1,21 @@
 /* ══════════════════════════════════════════════════════════════════
-   views/ext-segment.js · 账号 → 外部平台
-   extstore 账号的管理面：卡片（状态/余额/签到/停用/删除）+ 添加入口。
-   从 automation.js 迁来——账号管理归「账号」，任务队列归「任务」。
-   平台名与「有没有签到」都来自注册表（platforms.js）。
+   views/ext-segment.js · 外部平台（extstore）数据源
+   管理面已并入「账号」页的统一表格（rows.js 行模型 / acts.js 动作 /
+   views/account-detail.js 详情）。这里只提供：
+     1. 数据源信号 extData / loadExt
+     2. extJsonImport —— 「粘贴完整凭据 JSON」的高级入池表单，由添加向导调用
+   平台名与「有没有签到」仍来自注册表（platforms.js），这里不带任何名字表。
    ══════════════════════════════════════════════════════════════════ */
 
-import { h, icon, signal, api, toast, confirmDialog } from '../kernel.js';
-import { platforms, loadPlatforms, plat, platName, platHasCheckin } from '../platforms.js';
-import { statusOf, statusChip } from '../status.js';
-import { extAddPanel } from './ext-add.js';
+import { h, signal, api, toast } from '../kernel.js';
+import { platforms, loadPlatforms } from '../platforms.js';
 
 const ext = signal(null);
 const extMsg = signal('');
 
-// 凭据续期方式（注册表 renew 字段）：回答「我登陆了，为什么后来不能用」——
-// 自动续的到期网关自己换，需人工的到期只能再授权一次，界面上必须先说清是哪一类。
-const RENEW_WORD = { auto: '凭据到期自动续期', manual: '凭据到期需人工重新授权', static: '凭据长期有效' };
-function renewLine(provider) {
-  const p = plat(provider);
-  const w = p && RENEW_WORD[p.renew];
-  return w ? h('div', { class: 'id faint', text: w }) : null;
-}
+/** extData —— 外部平台数据源信号（{ok, accounts}）。 */
+export const extData = ext;
+export const extError = extMsg;
 
 export async function loadExt(quiet = true) {
   try {
@@ -31,129 +26,34 @@ export async function loadExt(quiet = true) {
   catch (e) { extMsg.set(e.message); if (!quiet) toast(e.message, 'fail'); }
 }
 
-async function extAct(provider, id, action, body) {
-  try {
-    const r = await api(`ext/accounts/${encodeURIComponent(provider)}/${encodeURIComponent(id)}/${action}`, {
-      method: 'POST', body: body ? JSON.stringify(body) : undefined,
-    });
-    if (action === 'checkin') {
-      const res = r.result || {};
-      // relogin = 续期能力表判死（renew.go）：不是失败，是「这条路只能你走」。
-      const bad = res.kind === 'failed' || res.kind === 'relogin';
-      toast(`[${platName(provider)}] ${res.message || res.kind || '完成'}`, bad ? 'fail' : undefined);
-    } else if (action === 'remove') toast('已删除');
-    await loadExt();
-  } catch (e) { toast(e.message, 'fail'); }
-}
-
-/** extSegment(focusProvider) —— 外部平台账号管理面。
- *  focusProvider 传入平台 id 时只显示该平台的账号，标题随平台，
- *  且隐藏「一键签到全部」（跨平台动作在无 focus 的聚合视图里）。 */
-export function extSegment(focusProvider = '') {
-  const d = ext();
-  const all = (d && d.accounts) || [];
-  const list = focusProvider ? all.filter(a => a.provider === focusProvider) : all;
-  const title = focusProvider ? platName(focusProvider) : '外部平台账号';
-  return h('section', { class: 'card' },
-    h('header', null,
-      h('h2', { text: title }),
-      h('span', { class: 'hint', text: '每日签到由「任务」排程执行' }),
-      h('span', { class: 'grow' }),
-      h('span', { class: 'hint', text: d ? `${list.length} 个账号 · ${list.filter(a => a.balance_ok).length} 个余额正常` : '' }),
-      h('button', { class: 'btn sm ghost', onclick: () => loadExt(false) }, icon('refresh'), '刷新'),
-      focusProvider ? null : h('button', {
-        class: 'btn sm primary', onclick: async ev => {
-          var __b = ev.currentTarget; if (__b) __b.disabled = true;
-          try {
-            const r = await api('ext/checkin_all', { method: 'POST' });
-            const rs = r.results || [];
-            const ok = rs.filter(x => x.kind === 'claimed').length;
-            const already = rs.filter(x => x.kind === 'already-claimed').length;
-            const failed = rs.filter(x => x.kind === 'failed').length;
-            const relogin = rs.filter(x => x.kind === 'relogin').length;
-            toast(`签到完成：成功 ${ok} · 已领过 ${already} · 失败 ${failed}${relogin ? ` · 需重登 ${relogin}` : ''}`,
-              (failed || relogin) ? 'fail' : undefined);
-            await loadExt();
-          } catch (e) { toast(e.message, 'fail'); }
-          finally { if (__b) __b.disabled = false; }
-        },
-      }, icon('check'), '一键签到全部'),
-    ),
-    h('div', { class: 'body stack' },
-      extMsg() ? h('div', { class: 'empty' }, h('div', { class: 'd', text: extMsg() }))
-        : list.length
-          ? h('div', { class: 'acct-grid' }, ...list.map(a => h('article', { class: 'acct' + (a.disabled ? ' off' : '') },
-            h('div', { class: 'top' },
-              h('div', { class: 'who' },
-                h('div', { class: 'nm', text: focusProvider ? (a.label || a.id) : `${platName(a.provider)} · ${a.label || a.id}` }),
-                h('div', { class: 'id', text: a.id }),
-                renewLine(a.provider),
-              ),
-              statusChip(statusOf(a)),
-            ),
-            h('div', { class: 'credits' },
-              h('div', { class: 'line' },
-                // 无签到的通道（Copilot / Cline / AutoClaw）按「订阅状态」呈现，
-                // 而不是硬凑一个 0 分余额——有没有签到由注册表说了算。
-                !platHasCheckin(a.provider)
-                  ? h('span', { class: 'of', style: { fontSize: '12px' }, text: a.note || '已接入' })
-                  : h('span', { class: 'n', text: a.balance_ok ? String(a.balance ?? 0) : '—' }),
-                platHasCheckin(a.provider)
-                  ? h('span', { class: 'of', text: a.balance_ok ? '分' : (a.note || '') })
-                  : null,
-              ),
-            ),
-            h('div', { class: 'acts' },
-              platHasCheckin(a.provider)
-                ? h('button', { class: 'btn', disabled: a.disabled, onclick: () => extAct(a.provider, a.id, 'checkin') }, '签到')
-                : null,
-              h('button', {
-                class: 'btn', onclick: () => extAct(a.provider, a.id, 'toggle', { disabled: !a.disabled }),
-              }, a.disabled ? '启用' : '停用'),
-              h('button', {
-                class: 'btn danger', onclick: async () => {
-                  if (await confirmDialog(`确定删除 ${platName(a.provider)} 账号 ${a.id}？`, { ok: '删除' })) {
-                    await extAct(a.provider, a.id, 'remove');
-                  }
-                },
-              }, '删除'),
-            ),
-          )))
-          : h('div', { class: 'empty' }, icon('accounts'),
-            h('div', { class: 't', text: focusProvider ? `还没有 ${platName(focusProvider)} 账号` : '还没有外部账号' }),
-            h('div', { class: 'd', text: '点右上角「添加账号」，或在下方表单直接添加' })),
-
-      // 逐字段添加（每个平台按自己的凭据形态出表单）；focus 时锁定该平台
-      extAddPanel(loadExt, focusProvider ? { lockProvider: focusProvider } : {}),
-
-      h('details', { style: { marginTop: '6px' } },
-        h('summary', { class: 'muted', style: { cursor: 'pointer', fontSize: '12.5px' }, text: '高级：粘贴完整凭据 JSON' }),
-        h('div', { class: 'row wrap', style: { marginTop: '10px' } },
-          h('select', { class: 'input', id: 'ext-provider', style: { width: 'auto' } },
-            ...platformsList().map(p => h('option', { value: p.id, text: p.name }))),
-          h('input', { class: 'input', id: 'ext-id', placeholder: '账号 ID', style: { flex: '1', minWidth: '140px' } }),
-          h('input', { class: 'input', id: 'ext-cred', placeholder: '凭据 JSON', style: { flex: '2', minWidth: '200px', fontFamily: 'var(--mono)', fontSize: '11.5px' } }),
-          h('button', {
-            class: 'btn sm primary', onclick: async () => {
-              const provider = document.getElementById('ext-provider').value;
-              const id = document.getElementById('ext-id').value.trim();
-              const raw = document.getElementById('ext-cred').value.trim();
-              if (!id) { toast('请填写账号 ID', 'fail'); return; }
-              let cred;
-              try { cred = JSON.parse(raw); } catch { toast('凭据不是合法 JSON', 'fail'); return; }
-              try {
-                await api('ext/accounts', { method: 'POST', body: JSON.stringify({ provider, id, cred }) });
-                toast('账号已添加');
-                document.getElementById('ext-id').value = '';
-                document.getElementById('ext-cred').value = '';
-                await loadExt();
-              } catch (e) { toast(e.message, 'fail'); }
-            },
-          }, '添加'),
-        ),
-      ),
-    ),
+/** extJsonImport(onAdded) —— 高级入口：直接粘贴客户端导出的凭据 JSON。
+ *  与逐字段表单（views/ext-add.js）互为补充：客户端能整包导出时用这个更快。 */
+export function extJsonImport(onAdded) {
+  const providerSel = h('select', { class: 'input', style: { width: 'auto' } },
+    ...platforms.peek().filter(p => p.login).map(p => h('option', { value: p.id, text: p.name })));
+  const idInput = h('input', { class: 'input', placeholder: '账号 ID', style: { flex: '1', minWidth: '140px' } });
+  const credInput = h('input', {
+    class: 'input', placeholder: '凭据 JSON',
+    style: { flex: '2', minWidth: '200px', fontFamily: 'var(--mono)', fontSize: '11.5px' },
+  });
+  return h('div', { class: 'row wrap', style: { gap: '8px' } },
+    providerSel, idInput, credInput,
+    h('button', {
+      class: 'btn sm primary', onclick: async ev => {
+        const id = idInput.value.trim();
+        if (!id) { toast('请填写账号 ID', 'fail'); return; }
+        let cred;
+        try { cred = JSON.parse(credInput.value.trim()); } catch { toast('凭据不是合法 JSON', 'fail'); return; }
+        ev.currentTarget.disabled = true;
+        try {
+          await api('ext/accounts', { method: 'POST', body: JSON.stringify({ provider: providerSel.value, id, cred }) });
+          toast('账号已添加');
+          idInput.value = ''; credInput.value = '';
+          await loadExt();
+          await onAdded?.();
+        } catch (e) { toast(e.message, 'fail'); }
+        finally { ev.currentTarget.disabled = false; }
+      },
+    }, '添加'),
   );
 }
-
-const platformsList = () => platforms.peek().filter(p => p.login);

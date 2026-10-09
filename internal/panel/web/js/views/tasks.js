@@ -6,7 +6,7 @@
    ══════════════════════════════════════════════════════════════════ */
 
 import { h, icon, signal, api, toast, confirmDialog } from '../kernel.js';
-import { defineView, parseHash, setHashSeg } from '../shell.js';
+import { defineView, parseHash, setHashTab } from '../shell.js';
 import { refreshOverview } from '../store.js';
 import { openVouchers } from '../drawers.js';
 import { platName } from '../platforms.js';
@@ -14,14 +14,15 @@ import { platName } from '../platforms.js';
 const SEGS = ['tencent', 'loomy', 'sched'];
 const seg = signal('tencent');
 
-// hash 子状态：#tasks?seg=loomy —— 深链/刷新/后退都落在同一段
+// 页内子状态：#automation?seg=tasks&tab=loomy —— 深链/刷新/后退都落在同一段
+// （seg 选「任务 / 执行记录」这一页内分段，tab 选任务工作台内部的视图）
 export function syncSegFromHash() {
-  const v = parseHash().seg;
+  const v = parseHash().tab;
   if (SEGS.includes(v)) seg.set(v);
 }
 function setSeg(v) {
   seg.set(v);
-  setHashSeg('tasks', v);
+  setHashTab('automation', v);
   if (v === 'loomy') { loadLoomy(); loadCredits(); }
   if (v === 'sched') loadReport();
 }
@@ -355,9 +356,10 @@ function schedSeg() {
 
 export default defineView({
   id: 'tasks',
+  page: 'automation',
+  tab: '任务',
   title: '任务',
   icon: 'automation',
-  group: '自动化',
   keywords: '任务 签到 loomy 队列 自动化 排程 台账',
   sub() {
     const q = queue();

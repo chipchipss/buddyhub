@@ -89,10 +89,11 @@ function syncBox() {
 
 export default defineView({
   id: 'logs',
-  title: '运行日志',
+  page: 'automation',
+  tab: '执行记录',
+  title: '执行记录',
   icon: 'logs',
-  group: '网关',
-  keywords: '日志 log 运行 输出',
+  keywords: '日志 log 运行 输出 执行记录',
   sub() {
     const list = entries();
     const counts = {};

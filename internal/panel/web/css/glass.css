@@ -263,6 +263,8 @@
 /* 幽灵按钮：无底无框，只有 hover 时的一层薄玻璃 */
 .btn.ghost { background: transparent; border-color: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
 .btn.ghost:hover { background: var(--glass); }
+/* 选中态（详情抽屉的子页签）：玻璃变实、描边加重，与 .seg button.on 同一语言 */
+.btn.on { background: var(--glass-3); border-color: var(--edge-2); font-weight: 600; }
 /* 危险动作：单色下用「描边加重 + 常驻细流光」区分，而非红色 */
 .btn.danger { color: var(--fg-2); }
 .btn.danger:hover { color: var(--fg); border-color: var(--edge-2); background: var(--glass-2); }
@@ -366,6 +368,10 @@ input[type="checkbox"] { width: auto; accent-color: var(--fg-2); }
   background: var(--glass-3); border-color: var(--edge-2);
   box-shadow: inset 0 1px 0 var(--hi), var(--shadow-sm);
 }
+/* 页顶分段条：分段名可能超出宽度（手机上五个字×四个段），让它自己横滑 */
+.seg.page-tabs { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.seg.page-tabs::-webkit-scrollbar { display: none; }
+.seg.page-tabs button { flex: none; }
 
 /* 标签（单色：描边深浅 + 点形区分）*/
 .chip {
@@ -454,6 +460,32 @@ input[type="checkbox"] { width: auto; accent-color: var(--fg-2); }
 }
 .sheet h2 { font-size: var(--fs-title); letter-spacing: var(--ls-title); font-weight: 650; }
 .sheet .hint { font-size: 12.5px; color: var(--fg-3); margin-top: 6px; line-height: var(--lh-body); }
+
+/* ── 上下文菜单（⋯ 的落点）──────────────────────────────────────
+   锚定在触发按钮下方，实底而非玻璃：菜单只有几行，读清楚比融入页面重要。
+   进出无动画——它是被点击直接召唤出来的，动画只会让它显得慢。 */
+.menu-wrap { position: fixed; inset: 0; z-index: 65; }
+.menu {
+  position: absolute;
+  min-width: 186px; padding: 5px;
+  background: var(--sheet);
+  -webkit-backdrop-filter: var(--blur-strong); backdrop-filter: var(--blur-strong);
+  border: 1px solid var(--edge-2);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-pop), inset 0 1px 0 var(--hi);
+  display: flex; flex-direction: column; gap: 1px;
+}
+.menu-item {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 11px; border-radius: var(--r-xs);
+  background: none; border: none; cursor: pointer;
+  color: var(--fg-2); font-size: 12.5px; text-align: left; white-space: nowrap;
+  transition: color var(--dur-press) var(--ease-out), background var(--dur-press) var(--ease-out);
+}
+.menu-item:hover { color: var(--fg); background: var(--glass-2); }
+.menu-item:disabled { opacity: .42; cursor: default; }
+.menu-item.danger { color: var(--fg-3); }
+.menu-item.danger:hover { color: var(--fg); background: var(--glass-2); }
 
 /* ── Toast ────────────────────────────────────────────────────── */
 #toasts {

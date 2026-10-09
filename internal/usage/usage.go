@@ -530,6 +530,66 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	return snap
 }
 
+// DailySeries 单个账号最近 days 天的日粒度用量，供面板账号详情抽屉画「近 7 天曲线」。
+//
+// 为什么另走一个方法：Snapshot 的时序是**全池**口径（账号详情要看的是这一个号），
+// 而桶本身已按 (scope, realm, uid, model) 分片，按 uid 过滤再按天累加即可，
+// add/finish 与 Snapshot 完全同一条路径——两处口径不会漂。
+//
+// 输出恒为 days 个点（缺日期补 0），横轴连续：曲线缺一天会被读成「那天出问题了」。
+// 窗口只含日桶与小时桶（小时桶归到它所在的那一天），不受 Snapshot 的 hours 窗口影响。
+func (r *Recorder) DailySeries(uid string, days int) []Point {
+	if r == nil || uid == "" {
+		return nil
+	}
+	if days <= 0 {
+		days = 7
+	}
+	if days > 90 {
+		days = 90
+	}
+
+	keys := make([]string, days)
+	aggs := make([]*aggAcc, days)
+	at := map[string]int{}
+	now := time.Now()
+	for i := 0; i < days; i++ {
+		keys[i] = now.AddDate(0, 0, i-days+1).Format(dayLayout)
+		aggs[i] = &aggAcc{}
+		at[keys[i]] = i
+	}
+
+	r.mu.Lock()
+	bs := make([]bucket, 0, 64)
+	for _, b := range r.buckets {
+		if b.UID != uid {
+			continue
+		}
+		bs = append(bs, *b)
+	}
+	r.mu.Unlock()
+
+	for _, b := range bs {
+		// "d:2026-10-09" / "h:2026-10-09T14" → 前缀剥掉后前 10 位都是日期。
+		s := b.Scope
+		if i := strings.IndexByte(s, ':'); i >= 0 {
+			s = s[i+1:]
+		}
+		if len(s) < len(dayLayout) {
+			continue
+		}
+		if i, ok := at[s[:len(dayLayout)]]; ok {
+			aggs[i].add(&b)
+		}
+	}
+
+	out := make([]Point, days)
+	for i := range out {
+		out[i] = Point{T: keys[i], Scope: "day", Agg: aggs[i].finish()}
+	}
+	return out
+}
+
 func keyed(m map[string]*aggAcc, label func(string) (string, string)) []KeyedAgg {
 	out := make([]KeyedAgg, 0, len(m))
 	for k, v := range m {
