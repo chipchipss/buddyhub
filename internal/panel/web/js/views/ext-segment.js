@@ -8,7 +8,7 @@
    ══════════════════════════════════════════════════════════════════ */
 
 import { h, signal, api, toast } from '../kernel.js';
-import { platforms, loadPlatforms } from '../platforms.js';
+import { platforms, loadPlatforms, plat } from '../platforms.js';
 
 const ext = signal(null);
 const extMsg = signal('');
@@ -26,31 +26,38 @@ export async function loadExt(quiet = true) {
   catch (e) { extMsg.set(e.message); if (!quiet) toast(e.message, 'fail'); }
 }
 
-/** extJsonImport(onAdded) —— 高级入口：直接粘贴客户端导出的凭据 JSON。
- *  与逐字段表单（views/ext-add.js）互为补充：客户端能整包导出时用这个更快。 */
-export function extJsonImport(onAdded) {
+/** extJsonImport(onAdded, opts) —— 高级入口：直接粘贴客户端导出的凭据 JSON。
+ *  与逐字段表单（views/ext-add.js）互为补充：客户端能整包导出时用这个更快。
+ *  opts.provider —— 锁定平台（添加向导已经选好平台，这里不该再出第二个下拉；
+ *  选中一个不走外部账号表的平台只会得到一句报错，不如根本不给他这个选项）。
+ *  onAdded(ref) 落盘后调用，ref = {provider, id}。 */
+export function extJsonImport(onAdded, opts = {}) {
+  const locked = opts.provider || '';
   const providerSel = h('select', { class: 'input', style: { width: 'auto' } },
-    ...platforms.peek().filter(p => p.login).map(p => h('option', { value: p.id, text: p.name })));
+    ...platforms.peek().map(p => h('option', { value: p.id, text: p.name })));
   const idInput = h('input', { class: 'input', placeholder: '账号 ID', style: { flex: '1', minWidth: '140px' } });
   const credInput = h('input', {
     class: 'input', placeholder: '凭据 JSON',
     style: { flex: '2', minWidth: '200px', fontFamily: 'var(--mono)', fontSize: '11.5px' },
   });
   return h('div', { class: 'row wrap', style: { gap: '8px' } },
-    providerSel, idInput, credInput,
+    // 锁定平台时用一个静态标签代替下拉：向导第一步已经选好平台，多一个下拉
+    // 只是让人有机会选到一个「不走外部账号表」的平台上然后收一句报错。
+    locked ? h('span', { class: 'chip faint', text: (plat(locked) || {}).name || locked }) : providerSel,
+    idInput, credInput,
     h('button', {
       class: 'btn sm primary', onclick: async ev => {
+        const provider = locked || providerSel.value;
         const id = idInput.value.trim();
         if (!id) { toast('请填写账号 ID', 'fail'); return; }
         let cred;
         try { cred = JSON.parse(credInput.value.trim()); } catch { toast('凭据不是合法 JSON', 'fail'); return; }
         ev.currentTarget.disabled = true;
         try {
-          await api('ext/accounts', { method: 'POST', body: JSON.stringify({ provider: providerSel.value, id, cred }) });
-          toast('账号已添加');
+          await api('ext/accounts', { method: 'POST', body: JSON.stringify({ provider, id, cred }) });
           idInput.value = ''; credInput.value = '';
           await loadExt();
-          await onAdded?.();
+          await onAdded?.({ provider, id });
         } catch (e) { toast(e.message, 'fail'); }
         finally { ev.currentTarget.disabled = false; }
       },

@@ -1,34 +1,31 @@
 /* ══════════════════════════════════════════════════════════════════
-   views/ext-add.js · 外部平台「添加账号入池」
+   views/ext-add.js · 单个外部平台的「接入」节点
 
-   两条路径，优先走登录（不用去客户端里手抄 token）：
+   只做一件事：给定平台 id，画出该平台自己的入池交互（扫码 / 浏览器授权 /
+   设备码 / 短信 / 逐字段填写凭据），成功后把新账号的 {provider,id} 交给调用方。
 
-     小浣熊（商汤）  微信扫码   → 面板出二维码，手机扫码即入池
-     Qoder（阿里）   设备授权   → 浏览器完成授权，面板轮询即入池
-     GitHub Copilot  设备码     → 输入 GitHub 设备码即入池
-     LobsterAI / CodeArts       → 无登录协议，逐字段填写凭据
+   「选哪个平台、走哪种方式」是添加向导（js/addwizard.js）第二步的事，这里不再
+   自带平台下拉——原先那个下拉和向导里的清单是同一件事的两份实现，两边措辞
+   一定会漂（清单 20「两个入口合一」）。
 
-   有登录方式的平台仍保留「手动填写凭据」折叠区作为兜底。
-
-   **平台清单来自后端注册表**（js/platforms.js），这里只提供两样东西：
-     1. 每个平台的凭据字段（纯 UI 细节，按 id 索引，见 FORMS）
+   平台身份与交互种类来自后端注册表（js/platforms.js）：
+     1. 每个平台的凭据字段与操作说明（纯 UI 细节，按 id 索引，见 FORMS）
      2. 每种 login kind 对应哪套交互（见 loginSpecFor）
+   加一个平台 = 后端注册表加一行 +（若要手填凭据）这里加一条 FORMS。
 
-   加一个平台 = 后端注册表加一行 +（若需要手填凭据）这里加一条 FORMS。
-   交互种类（扫码 / 设备码 / 短信 / 手填）由注册表的 login 字段决定。
-
-   实现是命令式的：输入框非受控（值在 DOM 里），切换平台只重绘主体区，
-   不会清空已填内容；提交时按当前平台收集。
+   实现是命令式的：输入框非受控（值在 DOM 里）。向导会缓存这个节点，
+   切走再切回来还是同一棵树，所以进行中的授权轮询与已填内容都不丢。
    ══════════════════════════════════════════════════════════════════ */
 
 import { h, icon, api, toast, copyText } from '../kernel.js';
 import { qrMatrix, qrSVG } from '../qr.js';
-import { platforms, loadPlatforms, plat } from '../platforms.js';
+import { plat } from '../platforms.js';
 
 // 登录轮询定时器 + 进行中的登录状态。
 //
-// 这几个是**模块级**的，不随面板实例生死：面板会被视图的 5 秒 tick 反复重建，
-// 状态挂在实例上就会丢（用户授权完却没人接着轮询——这正是「授权后没入池」的成因）。
+// 这几个是**模块级**的，不随面板实例生死：用户点「开始授权」后要切到浏览器
+// 标签页操作几十秒，回来时页面若重新加载，挂在 DOM 闭包里的状态就没了——
+// 「授权完成了却没入池」就是这么来的。
 let loginTimer = null;
 let activeLogin = null; // { provider, d, status }
 let loginHost = null;   // 当前面板实例的展示位（重建时被新实例覆盖）
@@ -36,30 +33,28 @@ let loginStatus = null;
 let lastLoginMsg = null; // { provider, text } 终态提示，面板重建后仍保留
 
 /* 短信登录的 device_id：必须与发码那一步是同一个（上游把设备和登录会话绑定），
-   而两步之间用户要等短信、往往隔了几十秒——期间面板会被视图的 5 秒 tick 重建，
-   挂在 DOM 闭包里的 device_id 就没了，点「登录并入池」只会得到「请先点发送验证码」。
-   所以按平台存在模块级，面板重建后仍能取回。 */
+   而两步之间用户要等短信、往往隔了几十秒——期间页面可能重新加载，
+   device_id 若在 DOM 闭包里就没了，点「登录并入池」只会得到「请先点发送验证码」。
+   所以按平台存在模块级。 */
 const smsDevice = new Map(); // provider → device_id
-
-/** stopExtAddTimers() —— 放弃进行中的登录（抽屉关闭时调用）。
- *  注意不要在面板重建时调用，那会把用户正在做的授权掐死。 */
-export function stopExtAddTimers() {
-  clearLoginTimer();
-  activeLogin = null;
-  lastLoginMsg = null;
-}
 
 // clearLoginTimer 只停定时器，不动登录状态（被新会话顶掉时用）。
 function clearLoginTimer() {
   if (loginTimer) { clearTimeout(loginTimer); loginTimer = null; }
 }
 
-/* ── 未完成登录的持久化 ─────────────────────────────────────────
-   用户点「开始授权」后要去另一个标签页（有时是同一个）完成授权，回来时
-   页面可能已经重新加载——模块级状态一并丢失，轮询停摆，界面就**一直停在
-   「等待授权」**。把会话存进 localStorage，回来时自动续上。
+// stopExtAddTimers 只在**用户重新发起一条登录**时调用：作废上一条会话的轮询。
+// 不导出——抽屉关闭、面板重建都不该掐死用户正在做的授权（网关侧已自驱入池，
+// 前端轮询只是把结果接回来展示）。
+function stopExtAddTimers() {
+  clearLoginTimer();
+  activeLogin = null;
+  lastLoginMsg = null;
+}
 
-   只存到会话自身过期为止（服务端 TTL 10–15 分钟），过期即丢。 */
+/* ── 未完成登录的持久化 ─────────────────────────────────────────
+   会话存进 localStorage，页面重新加载后自动续上轮询；只存到会话自身
+   过期为止（服务端 TTL 10–15 分钟），过期即丢。 */
 const LS_LOGIN = 'buddyhub.login';
 
 function saveLogin(provider, d) {
@@ -81,9 +76,9 @@ function clearLogin() {
   try { localStorage.removeItem(LS_LOGIN); } catch { /* 私密模式 */ }
 }
 
-// 本抽屉里用**通用表单**处理的平台（有专属面板的三个——腾讯 / Loomy / Z.AI
-// ——不在这里，它们各有自己的分段）。
-// 只列字段与提示：展示名、入池方式、有无签到都由后端注册表下发。
+/* ── 凭据字段与操作说明 ─────────────────────────────────────────
+   steps 是给「人」看的第几步做什么（清单 24：抓包、F12 这类操作说明放进
+   对应步骤里）；fig 选哪张示意图（见 addwizard.js 的 figFor）。 */
 const FORMS = {
   traework: {
     fields: [
@@ -91,7 +86,12 @@ const FORMS = {
       { k: 'refresh_token', label: 'Refresh Token' },
       { k: 'device_id', label: 'Device ID' },
     ],
-    tip: '从 TraeWork 客户端 storage.json 的「iCubeAuthInfo://icube.cloudide」条目里取；access_token 必填。',
+    fig: 'file',
+    steps: [
+      '打开 TraeWork 客户端的数据目录，找到 storage.json。',
+      '定位「iCubeAuthInfo://icube.cloudide」条目，复制里面的 access_token（必填）。',
+      '有 refresh_token / device_id 就一并填上，能少一次重新登录。',
+    ],
   },
   lobsterai: {
     fields: [
@@ -100,14 +100,22 @@ const FORMS = {
       { k: 'refresh_token', label: 'Refresh Token' },
       { k: 'first_key_from', label: 'First Key From' },
     ],
-    tip: '从有道 LobsterAI 客户端的本地凭据复制；access_token 与 uuid 必填。',
+    fig: 'file',
+    steps: [
+      '打开有道 LobsterAI 客户端的本地凭据文件。',
+      '复制 access_token 与 uuid（两个都必填），其余可选。',
+    ],
   },
   raccoon: {
     fields: [
       { k: 'access_token', label: 'Access Token', required: true },
       { k: 'refresh_token', label: 'Refresh Token' },
     ],
-    tip: '推荐直接扫码；也可从客户端本地凭据复制 access_token 手工填写。',
+    fig: 'file',
+    steps: [
+      '推荐直接扫码登录，不用手抄凭据。',
+      '非要手工填：从小浣熊客户端本地凭据里复制 access_token（必填）。',
+    ],
   },
   qoder: {
     fields: [
@@ -116,7 +124,12 @@ const FORMS = {
       { k: 'refresh_token', label: 'Refresh Token' },
       { k: 'security_oauth_token', label: 'Security OAuth Token' },
     ],
-    tip: '推荐直接授权登录；手工填写时 machine_id 必填（缺失会被上游拒绝）。',
+    fig: 'file',
+    steps: [
+      '推荐直接授权登录，不用手抄凭据。',
+      '手工填写时 machine_id 必填——缺了会被上游拒绝。',
+      '值取自 Qoder 客户端的本地凭据与机器标识文件。',
+    ],
   },
   codearts: {
     fields: [
@@ -124,14 +137,26 @@ const FORMS = {
       { k: 'secret_access_key', label: 'Secret Access Key', required: true },
       { k: 'security_token', label: 'Security Token（仅临时 AK/SK 需要）' },
     ],
-    tip: '华为云 AK/SK：永久密钥留空 Security Token 即可；临时 STS 凭据才需要填（几小时就过期，不建议入池）。',
+    fig: 'console',
+    steps: [
+      '在华为云控制台「我的凭证 → API 密钥」里新建或查看永久 AK/SK。',
+      'Access Key ID 与 Secret Access Key 都填上；Security Token 留空。',
+      '不建议入池临时 STS 凭据——几小时就过期，到期只能重新抓。',
+    ],
   },
   ima: {
     fields: [
       { k: 'cookie', label: 'x-ima-cookie（完整值）', required: true },
       { k: 'user_id', label: 'IMA-UID（可选，展示用）' },
     ],
-    tip: '打开 ima.qq.com 并登录 → F12 → Network → 随便发一条消息 → 找 /cgi-bin/assistant/qa 请求 → 复制请求头 x-ima-cookie 的完整值粘贴到这里（须含 IMA-TOKEN）。',
+    fig: 'devtools',
+    steps: [
+      '浏览器打开 ima.qq.com 并登录。',
+      '按 F12 打开开发者工具，切到 Network（网络）面板。',
+      '在 ima 里随便发一条消息。',
+      '点中那条 /cgi-bin/assistant/qa 请求，在 Request Headers 里找到 x-ima-cookie。',
+      '把它的完整值（含 IMA-TOKEN）粘贴到下面的输入框。',
+    ],
   },
   marvis: {
     fields: [
@@ -140,9 +165,27 @@ const FORMS = {
       { k: 'device_guid', label: 'Ual-Access-Guid（设备 GUID）', required: true },
       { k: 'login_type', label: 'Ual-Access-Login-Type（如 6）' },
     ],
-    tip: '从已登录的 Marvis 客户端抓包：Fiddler/mitmproxy 代理后随便发一条消息，复制请求头 Ual-Access-Access-Token / Ual-Access-Openid / Ual-Access-Guid 三个值。token 过期需重新抓。',
+    fig: 'proxy',
+    steps: [
+      '用 Fiddler / mitmproxy 之类的代理接住 Marvis 客户端的流量。',
+      '在已登录的 Marvis 里随便发一条消息。',
+      '找到那条请求的请求头，复制 Ual-Access-Access-Token、Ual-Access-Openid、Ual-Access-Guid 三个值。',
+      'token 过期后自动续不了，要重新抓一次。',
+    ],
   },
 };
+
+/** hasCredFields(id) —— 该平台有没有「逐字段粘贴凭据」这条路径。
+ *  添加向导据此决定第二步列几种接入方式。 */
+export function hasCredFields(id) {
+  return !!(FORMS[id] && FORMS[id].fields && FORMS[id].fields.length);
+}
+
+/** credHelp(id) —— 该平台的凭据字段 + 操作说明（向导的「完成接入」步用）。 */
+export function credHelp(id) {
+  const f = FORMS[id] || { fields: [], steps: [] };
+  return { fields: f.fields || [], steps: f.steps || [], fig: f.fig || '' };
+}
 
 // 注册表 login kind → 交互描述。返回 null 表示「只需手填凭据」。
 function loginSpecFor(p) {
@@ -158,66 +201,30 @@ function loginSpecFor(p) {
   }
 }
 
-// 合成某平台的完整规格：注册表给身份与入池方式，FORMS 给字段。
-function specFor(id) {
-  const p = plat(id) || { id, name: id, note: '' };
-  const f = FORMS[id] || { fields: [] };
-  return {
-    name: p.name,
-    note: p.note || '',
-    login: loginSpecFor(p),
-    fields: f.fields || [],
-    tip: f.tip || p.note || '',
-  };
-}
-
-// 本抽屉处理的平台：注册表里有入池方式、且不是那三个专属面板的。
-const BESPOKE = new Set(['workbuddy', 'loomy', 'zai']);
-function genericPlatforms() {
-  return platforms.peek().filter(p => p.login && !BESPOKE.has(p.id));
-}
-
-/** extAddPanel(onAdded, opts) —— 返回一个命令式的添加面板节点。
- *  opts.flat = true 时平铺（抽屉内嵌用），否则收进 <details>。
+/** extAddPanel(onAdded, opts) —— 单个平台的接入节点。
+ *  opts.lockProvider（必填）平台 id；opts.only = 'login' | 'creds' 只显示一条路径。
+ *  onAdded(ref) 在账号确定落盘后调用，ref = {provider, id, label}。
  *
- *  注意：**不要**在构造时清掉轮询定时器。这个面板会被视图的 5 秒 tick
- *  （loadExt → 重渲染）反复重建，一清就等于把用户正在进行的扫码/授权登录掐死——
- *  实测小浣熊扫码快所以能成，Qoder / Copilot 要在浏览器里操作更久，必死。
- *  定时器只在用户显式放弃（关闭抽屉 / 重新发起）时才停。 */
+ *  注意：**不要**在构造时清掉轮询定时器。这个节点会被抽屉缓存复用，也可能在
+ *  面板重建时重新构造一次，一清就等于把用户正在进行的扫码/授权掐死——
+ *  实测小浣熊扫码快所以能成，Qoder / Copilot 要在浏览器里操作更久，必死。 */
 export function extAddPanel(onAdded, opts = {}) {
-  // opts.lockProvider：锁定单一平台（聚焦视图用）——不出现平台选择器，
-  // 直接渲染该平台的登录/凭据表单。
-  let provider = opts.lockProvider || '';
+  const provider = opts.lockProvider;
+  const p = plat(provider) || { id: provider, name: provider };
+  const spec = loginSpecFor(p);
+  const only = opts.only || '';
 
-  const bodyBox = h('div', { class: 'stack', style: { gap: '10px', marginTop: '10px' } });
   const tipEl = h('div', { class: 'muted', style: { fontSize: '11.5px' } });
   const inputs = new Map();
 
-  const providerSel = h('select', {
-    class: 'input', style: { width: 'auto' },
-    onchange: ev => { provider = ev.target.value; paint(); },
-  });
-
-  // 平台清单是异步拉的：到位后重建下拉并选中第一个（保持当前选择若还在）。
-  function fillProviders() {
-    if (opts.lockProvider) return plat(opts.lockProvider) != null;
-    const list = genericPlatforms();
-    if (!list.length) return false;
-    const keep = list.some(p => p.id === provider) ? provider : list[0].id;
-    providerSel.replaceChildren(...list.map(p => h('option', { value: p.id, text: p.name })));
-    provider = keep;
-    providerSel.value = keep;
-    return true;
-  }
-
-  /* ── 手工填写凭据（所有平台的兜底路径） ─────────────────────── */
+  /* ── 手工填写凭据（所有可手填平台的兜底路径） ─────────────────── */
 
   function credForm() {
     const idInput = h('input', {
       class: 'input', placeholder: '账号标识（昵称 / uid，用于列表区分）',
       style: { flex: '1', minWidth: '180px' },
     });
-    const rows = specFor(provider).fields.map(f => {
+    const rows = (FORMS[provider]?.fields || []).map(f => {
       const input = h('input', {
         class: 'input', placeholder: f.label + (f.required ? '（必填）' : '（可选）'),
         style: { fontFamily: 'var(--mono)', fontSize: '12px' },
@@ -231,7 +238,7 @@ export function extAddPanel(onAdded, opts = {}) {
         const id = idInput.value.trim();
         if (!id) { toast('请填写账号标识', 'fail'); idInput.focus(); return; }
         const cred = {};
-        for (const f of specFor(provider).fields) {
+        for (const f of FORMS[provider]?.fields || []) {
           const v = (inputs.get(f.k)?.value || '').trim();
           if (!v) {
             if (f.required) { toast(`「${f.label}」必填`, 'fail'); inputs.get(f.k)?.focus(); return; }
@@ -242,10 +249,9 @@ export function extAddPanel(onAdded, opts = {}) {
         ev.currentTarget.disabled = true;
         try {
           await api('ext/accounts', { method: 'POST', body: JSON.stringify({ provider, id, cred }) });
-          toast('账号已添加');
           idInput.value = '';
           for (const el of inputs.values()) el.value = '';
-          await onAdded?.();
+          await onAdded?.({ provider, id });
         } catch (e) { toast(e.message, 'fail'); }
         finally { ev.currentTarget.disabled = false; }
       },
@@ -257,9 +263,9 @@ export function extAddPanel(onAdded, opts = {}) {
     );
   }
 
-  /* ── 登录入池（扫码 / 设备授权 / 设备码） ───────────────────── */
+  /* ── 登录入池（扫码 / 设备授权 / 设备码 / 短信） ──────────────── */
 
-  function loginPanel(spec) {
+  function loginPanel() {
     const host = h('div', { class: 'stack', style: { gap: '10px' } });
     const statusEl = h('div', { class: 'muted', style: { fontSize: '12px' } });
     const startBtn = h('button', { class: 'btn primary' }, icon('key'), spec.button);
@@ -272,14 +278,13 @@ export function extAddPanel(onAdded, opts = {}) {
       return h('div', { class: 'stack', style: { gap: '10px' } }, host, statusEl);
     }
 
-    // 把本实例登记为「进行中登录的展示位」：面板被 tick 重建后，新实例接手继续显示。
+    // 把本实例登记为「进行中登录的展示位」：面板被重建后，新实例接手继续显示。
     loginHost = host;
     loginStatus = statusEl;
 
     // 恢复未完成的登录：用户点「开始授权」后往往要切到另一个标签页（甚至
     // 同一个标签页）去完成授权，回来时页面可能已经重新加载——模块级状态
-    // 一并没了，轮询也就停了，表现就是**一直停在「等待授权」**。
-    // 会话存在 localStorage 里，回来时自动续上。
+    // 一并没了，轮询也就停了，表现是**一直停在「等待授权」**。
     if (!loginTimer) {
       const saved = loadSavedLogin();
       if (saved && saved.provider === provider) {
@@ -297,7 +302,7 @@ export function extAddPanel(onAdded, opts = {}) {
         activeLogin = { provider, d, status: '等待完成授权…' };
         saveLogin(provider, d);
         paintActiveLogin(spec);
-        // paste 型（微信回调落在上游域名上，网关截不到）不轮询，
+        // paste 型（微信回调落在上游域名，网关截不到）不轮询，
         // 等用户把 code 贴回来再提交——见 renderChallenge 的 paste 分支。
         if (spec.kind !== 'paste') startPolling(spec, d);
       } catch (e) {
@@ -312,7 +317,7 @@ export function extAddPanel(onAdded, opts = {}) {
   }
 
   // 轮询循环与面板实例解耦：面板被重建也不影响它跑完。
-  function startPolling(spec, d) {
+  function startPolling(s, d) {
     const baseEvery = Math.max(2, d.interval || 2) * 1000;
     const deadline = Date.now() + (d.expires_in || 600) * 1000;
 
@@ -322,7 +327,7 @@ export function extAddPanel(onAdded, opts = {}) {
       if (Date.now() > deadline) {
         stopExtAddTimers();
         clearLogin();
-        paintActiveLogin(spec);
+        paintActiveLogin(s);
         setLoginStatus('登录已超时，请重新发起。');
         return;
       }
@@ -337,7 +342,7 @@ export function extAddPanel(onAdded, opts = {}) {
         // 把原因显示出来，而不是当成网络抖动重试三次才告诉用户。
         stopExtAddTimers();
         clearLogin();
-        paintActiveLogin(spec);
+        paintActiveLogin(s);
         setLoginStatus(e.message);
         toast(e.message, 'fail');
         return;
@@ -351,10 +356,10 @@ export function extAddPanel(onAdded, opts = {}) {
       }
       stopExtAddTimers();
       clearLogin();
-      paintActiveLogin(spec);
-      setLoginStatus(`已入池：${(r.account || {}).label || (r.account || {}).id || ''}`);
-      toast(`${specFor(provider).name} 账号已入池`);
-      await onAdded?.();
+      paintActiveLogin(s);
+      const acct = r.account || {};
+      setLoginStatus(`已入池：${acct.label || acct.id || ''}`);
+      await onAdded?.({ provider: acct.provider || provider, id: acct.id, label: acct.label });
     };
     loginTimer = setTimeout(tick, baseEvery);
   }
@@ -367,22 +372,22 @@ export function extAddPanel(onAdded, opts = {}) {
   }
 
   // 按进行中的登录状态重绘展示区；无进行中的登录则清空。
-  function paintActiveLogin(spec) {
+  function paintActiveLogin(s) {
     if (!loginHost || !loginHost.isConnected) return;
     const st = activeLogin;
     if (!st || st.provider !== provider) {
       loginHost.replaceChildren();
       const kept = lastLoginMsg && lastLoginMsg.provider === provider ? lastLoginMsg.text : '';
-      setLoginStatus(kept || spec.hint);
+      setLoginStatus(kept || s.hint);
       return;
     }
-    renderChallenge(loginHost, spec, st.d);
+    renderChallenge(loginHost, s, st.d);
     setLoginStatus(st.status);
   }
 
   // 按登录方式渲染「待用户完成的那一步」
-  function renderChallenge(host, spec, d) {
-    if (spec.kind === 'qr') {
+  function renderChallenge(host, s, d) {
+    if (s.kind === 'qr') {
       // 离线生成二维码（CSP 下不引外链服务）。
       // 编码器上限 106 字节（版本 5 / ECC L），超了只能退化成可复制的链接。
       let svg = null;
@@ -400,7 +405,7 @@ export function extAddPanel(onAdded, opts = {}) {
         h('div', { class: 'url-box', text: d.qr_url }),
         h('div', { class: 'row' },
           h('button', {
-            class: 'btn sm', onclick: async ev => {
+            class: 'btn sm', onclick: async () => {
               try { await copyText(d.qr_url); toast('链接已复制'); }
               catch { toast('复制失败，请手动选择', 'fail'); }
             },
@@ -409,7 +414,7 @@ export function extAddPanel(onAdded, opts = {}) {
       );
       return;
     }
-    if (spec.kind === 'code') {
+    if (s.kind === 'code') {
       host.replaceChildren(
         h('div', { style: { font: '600 26px var(--mono)', letterSpacing: '3px', userSelect: 'all' }, text: d.user_code || '' }),
         h('a', { class: 'link', href: d.verification_uri || 'https://github.com/login/device',
@@ -417,7 +422,7 @@ export function extAddPanel(onAdded, opts = {}) {
       );
       return;
     }
-    if (spec.kind === 'paste') {
+    if (s.kind === 'paste') {
       // 微信把 code 回给腾讯自己的域名，网关截不到 —— 出二维码让用户扫，
       // 扫完把跳转后地址里的 code 贴回来。
       let svg = null;
@@ -439,9 +444,9 @@ export function extAddPanel(onAdded, opts = {}) {
           stopExtAddTimers();
           clearLogin();
           host.replaceChildren();
-          setLoginStatus(`已入池：${(r.account || {}).label || (r.account || {}).id || ''}`);
-          toast(`${spec.name} 账号已入池`);
-          await onAdded?.();
+          const acct = r.account || {};
+          setLoginStatus(`已入池：${acct.label || acct.id || ''}`);
+          await onAdded?.({ provider: acct.provider || provider, id: acct.id, label: acct.label });
         } catch (e) { toast(e.message, 'fail'); }
         finally { goBtn.disabled = false; }
       };
@@ -459,8 +464,8 @@ export function extAddPanel(onAdded, opts = {}) {
       );
       return;
     }
-    if (spec.kind === 'sms') {
-      // 恢复上次的填写：面板被 tick 重建后（等短信的几十秒里必然发生），
+    if (s.kind === 'sms') {
+      // 恢复上次的填写：等短信的几十秒里页面可能重新加载，
       // 号码/验证码/device_id 都要还在，否则用户得从头再来一遍。
       const saved = smsDevice.get(provider) || {};
       const phone = h('input', { class: 'input', placeholder: '手机号（国内版）', style: { flex: '1', minWidth: '160px' } });
@@ -498,8 +503,8 @@ export function extAddPanel(onAdded, opts = {}) {
             body: JSON.stringify({ phone: p, code: code.value.trim(), device_id: deviceId, region: 'cn' }),
           });
           smsDevice.delete(provider); // 登录成功，这一轮的状态作废
-          toast('已入池：' + ((r.account || {}).label || ''));
-          await onAdded?.();
+          const acct = r.account || {};
+          await onAdded?.({ provider: acct.provider || provider, id: acct.id, label: acct.label });
         } catch (e) { toast(e.message, 'fail'); }
         finally { loginBtn.disabled = false; }
       };
@@ -523,49 +528,25 @@ export function extAddPanel(onAdded, opts = {}) {
     );
   }
 
-  /* ── 平台切换：重绘主体区 ───────────────────────────────────── */
+  /* ── 组装：only 决定只出哪一条路径 ───────────────────────────── */
 
-  function paint() {
-    inputs.clear();
-    const spec = specFor(provider);
-    if (spec.login) {
-      // 有登录方式：登录为主；无凭据字段的平台（Copilot）不出口填表单。
-      const parts = [loginPanel(spec.login)];
-      if (spec.fields && spec.fields.length) {
-        parts.push(h('details', null,
-          h('summary', { class: 'muted', style: { cursor: 'pointer', fontSize: '12px' }, text: '或手动填写凭据' }),
-          h('div', { style: { marginTop: '10px' } }, credForm()),
-        ));
-      }
-      bodyBox.replaceChildren(...parts);
-    } else {
-      loginHost = null;
-      loginStatus = null;
-      bodyBox.replaceChildren(credForm());
-    }
-    tipEl.textContent = spec.tip;
+  const showLogin = spec && only !== 'creds';
+  const showCreds = hasCredFields(provider) && only !== 'login';
+  const parts = [];
+  // 只出登录、或只出凭据：向导第二步已经选好走哪条路。
+  // 没出登录面板时不用去清 loginHost——paintActiveLogin 认 isConnected，
+  // 挂在废弃节点上的旧展示位本来就写不进去。
+  if (showLogin) parts.push(loginPanel());
+  if (showCreds) {
+    parts.push(credForm());
+    tipEl.textContent = '账号标识只是列表里显示的名字，不影响登录。';
+  }
+  if (!parts.length) {
+    parts.push(h('div', { class: 'muted', style: { fontSize: '12.5px' },
+      text: '该平台没有可从面板发起的接入方式，请在配置页填写。' }));
   }
 
-  // 首次：注册表已在缓存里就直接渲染；否则先出加载态，拉回来再重绘
-  if (fillProviders()) {
-    paint();
-  } else {
-    bodyBox.replaceChildren(h('div', { class: 'busy', text: '读取平台列表' }));
-    loadPlatforms().then(() => { if (fillProviders()) paint(); });
-  }
-
-  const inner = h('div', { class: 'stack' },
-    opts.lockProvider ? null : h('div', { class: 'row wrap', style: { gap: '8px' } }, providerSel),
-    bodyBox,
-    tipEl,
-  );
-
-  if (opts.flat) return h('div', { class: 'glass-flat', style: { padding: '12px 14px' } }, inner);
-  return h('details', { class: 'glass-flat', style: { padding: '12px 14px', marginTop: '10px' } },
-    h('summary', { style: { cursor: 'pointer', fontSize: '12.5px', fontWeight: '550' },
-      text: '添加外部平台账号（扫码 / 授权 / 逐字段填写）' }),
-    h('div', { style: { marginTop: '12px' } }, inner),
-  );
+  return h('div', { class: 'glass-flat stack', style: { padding: '12px 14px', gap: '10px' } }, ...parts, tipEl);
 }
 
 // 上游轮询状态的中文说明（小浣熊会回 logging 等中间态）

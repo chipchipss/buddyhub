@@ -149,6 +149,72 @@
 .addrow.back:hover { color: var(--fg-2); }
 .addrow.back .nm { font-weight: 500; font-size: 12.5px; }
 
+/* ── 添加账号向导（清单 20–24）────────────────────────────────
+   抽屉里只挂一次骨架，切步骤换的是 .wiz-stage 的内容，所以进度条、
+   说明、表单是三块各自稳定的宿主。 */
+.wiz-steps { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.wiz-step {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 11px; border-radius: var(--pill);
+  font: 500 11.5px/1.6 var(--sans); letter-spacing: var(--ls-label);
+  color: var(--fg-3); background: none;
+  border: 1px solid var(--edge); cursor: pointer;
+  transition: color var(--t), background var(--t), border-color var(--t);
+}
+@media (hover: hover) and (pointer: fine) {
+  .wiz-step:not(:disabled):hover { color: var(--fg-2); border-color: var(--edge-2); }
+}
+.wiz-step:disabled { cursor: default; }
+/* 已完成 = 淡下去但仍可读；当前 = 实心（玻璃上的选中态一贯做法） */
+.wiz-step.ok { color: var(--fg-2); border-style: dashed; }
+.wiz-step.on { color: var(--fg); background: var(--glass-2); border-color: var(--edge-2); }
+.wiz-sep { width: 12px; height: 1px; background: var(--edge-2); flex: none; }
+
+/* 当前步骤的一句人话说明（清单 24：不说 extstore / provider） */
+.wiz-hint { font-size: 12px; color: var(--fg-2); line-height: 1.5; }
+/* 高度下限：切步骤时抽屉不塌陷，等待态与表单同宽 */
+.wiz-stage { min-height: 88px; }
+
+/* 厂商分组头（清单 21）：分组来自注册表的 vendor，前端不带归类表 */
+.wiz-vendor {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 12px 4px 3px;
+  font: 500 10.5px/1 var(--sans); letter-spacing: var(--ls-micro);
+  color: var(--fg-3);
+}
+.wiz-vendor .n { font-family: var(--mono); font-size: 10px; color: var(--fg-3); }
+.wiz-vendor:first-child { padding-top: 2px; }
+
+/* 接入方式行：说明第二行整行排布，别和「推荐」角标挤在同一行 */
+.addrow.wiz-way { flex-wrap: wrap; row-gap: 3px; }
+.addrow.wiz-way .wiz-way-hint {
+  flex: 1 0 100%; font-size: 11.5px; color: var(--fg-3); line-height: 1.45;
+}
+
+/* 「这些值从哪里复制」：操作说明收进对应步骤（清单 24） */
+.wiz-help {
+  border: 1px solid var(--edge); border-radius: var(--r-sm);
+  padding: 9px 12px; background: var(--glass);
+}
+.wiz-help summary {
+  cursor: pointer; list-style: none;
+  font-size: 12px; font-weight: 600; color: var(--fg-2);
+}
+.wiz-help summary::-webkit-details-marker { display: none; }
+.wiz-help[open] summary { color: var(--fg); margin-bottom: 6px; }
+.wiz-help ol { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
+.wiz-help li { font-size: 12px; color: var(--fg-2); line-height: 1.5; }
+.wiz-help li::marker { font-family: var(--mono); font-size: 11px; color: var(--fg-3); }
+
+/* 示意图：CSP 下不引外链图片，SVG 现画的方块图 */
+.wiz-fig { margin-top: 10px; }
+.wiz-fig .cap { margin-top: 6px; font-size: 11.5px; color: var(--fg-3); line-height: 1.45; }
+.wiz-picto { display: block; width: 100%; max-width: 340px; height: auto; }
+.p-box { fill: var(--glass-2); stroke: var(--edge-2); stroke-width: 1; }
+.p-box.hl { fill: var(--glass-3); stroke: var(--fg-3); }
+.p-t { font: 9.5px var(--sans); fill: var(--fg-2); }
+.p-arrow { fill: none; stroke: var(--fg-3); stroke-width: 1; stroke-linecap: round; }
+
 /* ── 账号卡网格 ───────────────────────────────────────────────── */
 .acct-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 12px; }
 .acct {

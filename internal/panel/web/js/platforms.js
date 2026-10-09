@@ -11,7 +11,7 @@
 
 import { signal, api } from './kernel.js';
 
-// 全部平台（{id,name,group,prefix,login,checkin,note}）
+// 全部平台（{id,name,group,vendor,prefix,login,alias_of,checkin,renew,note}）
 export const platforms = signal([]);
 let loading = null;
 
@@ -57,10 +57,4 @@ export function platWithPrefix() {
 export function platHasCheckin(id) {
   const p = plat(id);
   return !!(p && p.checkin);
-}
-
-/** 该平台是否支持通过「添加账号」入池（有 login 方式）。 */
-export function platHasLogin(id) {
-  const p = plat(id);
-  return !!(p && p.login);
 }

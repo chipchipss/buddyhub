@@ -4,7 +4,7 @@
    在 rows.js，动作在 acts.js，详情在 views/account-detail.js）。
    这个文件只剩三件 Z.AI 独有的事：
      1. 数据源信号 loadZai / zaiData —— 表格和抽屉读同一份，不各存一份
-     2. 入池表单 zaiAddForm —— 由「添加账号」向导按平台调用
+     2. 入池表单 zaiAddForm(onAdded, {way}) —— 由添加向导按接入方式调用
      3. OAuth 免密登录的轮询收尾（页面重载后要能续上）
    ══════════════════════════════════════════════════════════════════ */
 
@@ -18,6 +18,11 @@ const oauth = signal(null);   // { url, flowId, status }
 
 /** zaiData —— Z.AI 数据源信号（{configured, accounts, captcha, message}）。 */
 export const zaiData = zai;
+
+/** zaiLastAdded —— 最近一次通过 OAuth 入池的账号：{ref, at}。
+ *  用信号而不是回调：轮询可能在向导没开着的时候就跑完（页面重载后自动续上），
+ *  那一刻没有订阅者；向导回来时按时间戳判断这条是不是自己等的那一次。 */
+export const zaiLastAdded = signal(null);
 
 /* 进行中的 OAuth 流程 id 落 localStorage（loginflow.js 统一件）。
    用户在智谱页面登录期间如果刷新/切走了面板，模块状态会丢——服务端那条流程
@@ -57,6 +62,7 @@ function pollOAuth(flowId) {
         stopOAuthPoll();
         clearOAuthFlow();
         oauth.set(null);
+        zaiLastAdded.set({ ref: { provider: 'zai', id: p.id, label: p.name }, at: Date.now() });
         toast(p.message || '账号已入池');
         await loadZai();
       } catch (e) {
@@ -92,10 +98,18 @@ export async function loadZai(quiet = true) {
   }
 }
 
-/** zaiAddForm(onAdded) —— Z.AI / 智谱的「添加账号入池」表单（可独立嵌入抽屉）。
- *  整块命令式管理：输入框是非受控的（值在 DOM 里），provider/OAuth 的局部刷新
- *  走订阅式重绘——避免响应式重渲染把正在输入的名称/密钥清空。 */
-export function zaiAddForm(onAdded) {
+/** zaiAddForm(onAdded, opts) —— Z.AI / 智谱的「添加账号入池」表单。
+ *  opts.way = 'oauth' | 'secret'（缺省 = 两种都出）。添加向导的第二步已经选好
+ *  接入方式，所以这里只画那一种：一屏一条主路径（清单 49）。
+ *  onAdded(ref) 在账号落盘后调用，ref = {provider:'zai', id}。
+ *
+ *  整块命令式管理：输入框是非受控的（值在 DOM 里），局部状态走订阅式重绘——
+ *  避免响应式重渲染把正在输入的名称/密钥清空。 */
+export function zaiAddForm(onAdded, opts = {}) {
+  const way = opts.way || '';
+  const showOAuth = way !== 'secret';
+  const showSecret = way !== 'oauth';
+
   const nameInput = h('input', {
     class: 'input', placeholder: '账号名称（如：主号）', style: { flex: '1', minWidth: '150px' },
   });
@@ -116,17 +130,16 @@ export function zaiAddForm(onAdded) {
     onclick: async ev => {
       const secret = secretInput.value.trim();
       if (!secret) { toast('请粘贴 JWT 或 API Key', 'fail'); return; }
+      const label = nameInput.value.trim();
       ev.currentTarget.disabled = true;
       try {
         const r = await api('zai/accounts', {
           method: 'POST',
-          body: JSON.stringify({ name: nameInput.value.trim(), secret, provider: addProvider.peek() }),
+          body: JSON.stringify({ name: label, secret, provider: addProvider.peek() }),
         });
-        const kind = r.mode === 'jwt' ? 'Plan JWT' : 'API Key';
-        toast('已入池（识别为 ' + kind + '）');
         nameInput.value = ''; secretInput.value = '';
         await loadZai();
-        await onAdded?.();
+        await onAdded?.({ provider: 'zai', id: r.id, label, mode: r.mode });
       } catch (e) { toast(e.message, 'fail'); }
       finally { ev.currentTarget.disabled = false; }
     },
@@ -160,6 +173,19 @@ export function zaiAddForm(onAdded) {
   // 打开表单时若已有进行中的授权，先把状态画出来（等挂载完再画，isConnected 才为真）
   setTimeout(paintFlow, 0);
 
+  // 授权完成的回执：轮询可能是在这一屏没开着的时候跑完的，所以订阅信号，
+  // 并按时间戳只认「这个节点建立之后」的那一次。
+  if (showOAuth) {
+    const since = Date.now();
+    let settled = false;
+    const off = zaiLastAdded.subscribe(v => {
+      if (settled || !v || v.at < since) return;
+      settled = true;
+      off();
+      onAdded?.(v.ref);
+    });
+  }
+
   const oauthBtn = h('button', {
     class: 'btn primary',
     onclick: () => { startOAuth(nameInput.value.trim()); paintFlow(); },
@@ -175,23 +201,31 @@ export function zaiAddForm(onAdded) {
   // 选择器是非受控的：换了平台要自己重画一遍，否则说明文字与 OAuth 按钮不跟着变
   providerSel.addEventListener('change', () => { addProvider.set(providerSel.value); paintProvider(); });
   paintProvider();
-  return h('div', { class: 'glass-flat', style: { padding: '14px' } },
-    h('div', { class: 'row wrap', style: { gap: '8px' } }, providerSel, nameInput),
-    h('div', { class: 'stack', style: { marginTop: '12px' } },
+
+  const parts = [];
+  if (showSecret) {
+    parts.push(h('div', { class: 'row wrap', style: { gap: '8px' } }, providerSel, nameInput));
+  } else {
+    parts.push(h('div', { class: 'row wrap', style: { gap: '8px' } }, nameInput));
+  }
+  if (showOAuth) {
+    parts.push(h('div', { class: 'stack', style: { marginTop: '12px', gap: '8px' } },
       h('div', { class: 'row wrap', style: { gap: '8px' } }, oauthBtn,
         h('span', { class: 'muted', style: { fontSize: '11.5px', alignSelf: 'center' },
           text: '浏览器登录 → 自动入池（同时兑换回退 Key）' })),
       h('div', { class: 'muted', style: { fontSize: '11.5px' },
         text: '登录在智谱自己的页面上完成。若该页面收不到短信验证码，' +
-          '可直接用下方的 Coding Plan JWT 或 API Key 入池——功能完全一样。' }),
-      flowBox,
-      secretInput,
-      hintEl,
-      h('div', { class: 'row', style: { marginTop: '4px' } }, submitBtn),
-    ),
-  );
+          '可改用「粘贴 JWT 或 API Key」那一种方式——功能完全一样。' }),
+      flowBox));
+  }
+  if (showSecret) {
+    parts.push(h('div', { class: 'stack', style: { marginTop: '12px', gap: '8px' } },
+      secretInput, hintEl,
+      h('div', { class: 'row' }, submitBtn)));
+  }
+  return h('div', { class: 'glass-flat', style: { padding: '14px' } }, ...parts);
 }
 
-// 模块加载即尝试续上未完成的 OAuth 轮询（与 drawers.js 的腾讯授权同口径）：
+// 模块加载即尝试续上未完成的 OAuth 轮询（与 addwizard.js 的腾讯授权同口径）：
 // 用户在智谱页面登录期间刷新了面板，回来时账号仍应自动入池，而不是没人接着轮询。
 resumeOAuth();

@@ -13,14 +13,13 @@
    ══════════════════════════════════════════════════════════════════ */
 
 import { h, icon, signal, api, toast, openMenu, confirmDialog } from '../kernel.js';
-import { defineView, parseHash, setHashTab, patchHash, doRefreshAll } from '../shell.js';
+import { defineView, parseHash, setHashTab, patchHash, doRefreshAll, openAddAccount } from '../shell.js';
 import { overview, refreshOverview } from '../store.js';
 import { loadPlatforms } from '../platforms.js';
 import { buildRows, platformsOf, matches, bulkKind } from '../rows.js';
 import { statusChip } from '../status.js';
 import { run, inverseOf } from '../acts.js';
 import { begin, report, finish } from '../jobs.js';
-import { openAddAccount } from '../drawers.js';
 import { loadZai, zaiData } from './zai-segment.js';
 import { loadExt, extData } from './ext-segment.js';
 import { openAccountDetail } from './account-detail.js';

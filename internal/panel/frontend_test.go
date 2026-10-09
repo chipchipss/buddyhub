@@ -2,6 +2,7 @@ package panel
 
 import (
 	"bytes"
+	"encoding/json"
 	"io/fs"
 	"net/http/httptest"
 	"os"
@@ -185,24 +186,28 @@ const domStub = `class El {
   setAttributeNS(a, k, v) { this.setAttribute(k, v); }
   addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
   removeEventListener() {}
-  appendChild(c) { this.children.push(c); c.parentNode = this; c.isConnected = this.isConnected; return c; }
+  // 真实 DOM：节点一旦离开文档，整棵子树的 isConnected 都是 false。抽屉换内容
+  // （openAccountDetail 覆盖向导那一屏）就是这样把上一屏判成「已废弃」的——
+  // 只标自己等于让桩里的废弃表单永远「还在」，视图复用判定测不出来。
+  appendChild(c) { this.children.push(c); c.parentNode = this; setConn(c, this.isConnected); return c; }
   // 真实 DOM 的 append/replaceChildren 只接受 Node 或字符串：传 null 不会报错，
   // 而是渲染出一个字面的 "null" 文本节点（2026-10-09 浏览器实测踩过）。
   // 桩以前把 null 悄悄滤掉，于是这类缺陷在测试里永远是绿的——现在照浏览器画。
   _node(c) { return (c && c.tagName) ? c : globalThis.document.createTextNode(String(c)); }
   append(...cs) { for (const c of cs) this.appendChild(this._node(c)); }
-  prepend(...cs) { this.children.unshift(...cs); }
+  prepend(...cs) { for (const c of cs.map(x => this._node(x))) { this.children.unshift(c); c.parentNode = this; setConn(c, this.isConnected); } }
   before() {} after() {}
-  remove() { this.isConnected = false; const p = this.parentNode;
+  remove() { setConn(this, false); const p = this.parentNode;
     if (p) { const i = p.children.indexOf(this); if (i >= 0) p.children.splice(i, 1); } }
   replaceWith(n) { const p = this.parentNode; if (!p) return;
-    const i = p.children.indexOf(this); if (i >= 0) { p.children[i] = n; n.parentNode = p; }
-    this.isConnected = false; }
+    const i = p.children.indexOf(this); if (i >= 0) { p.children[i] = n; n.parentNode = p; setConn(n, p.isConnected); }
+    setConn(this, false); }
   insertBefore(c) { return this.appendChild(c); }
-  // 被换下去的节点要断开（视图靠 isConnected 拒绝写进废弃容器，抽屉的 loader 也靠它）
+  // 被换下去的节点要整棵断开（视图靠 isConnected 拒绝写进废弃容器，抽屉的 loader
+  // 与向导的「宿主还在不在屏上」判定也靠它）；新上来的继承父节点的连通性。
   replaceChildren(...cs) { const next = cs.map(c => this._node(c));
-    for (const old of this.children) if (!next.includes(old)) old.isConnected = false;
-    this.children = next; for (const c of this.children) { c.parentNode = this; c.isConnected = true; } }
+    for (const old of this.children) if (!next.includes(old)) setConn(old, false);
+    this.children = next; for (const c of this.children) { c.parentNode = this; setConn(c, this.isConnected); } }
   focus() {}
   get firstChild() { return this.children[0] ?? null; }
   get lastChild() { return this.children[this.children.length - 1] ?? null; }
@@ -250,10 +255,20 @@ function qsel(root, sel) {
   return cur[0] || null;
 }
 globalThis.Node = El; globalThis.Element = El; globalThis.HTMLElement = El;
+// 真实 DOM：节点离开文档，整棵子树的 isConnected 都是 false；重新挂回文档，
+// 子树一起回来。视图（抽屉的 loader、向导的「宿主还在不在屏上」判定）全靠这条
+// 拒绝往废弃容器里写——桩只标直接子节点的话，那些守卫在测试里永远为真，
+// 「切走再切回来还是同一棵树」这类不变量就根本测不到。
+function setConn(n, v) {
+  if (!n || typeof n !== 'object') return;
+  n.isConnected = v;
+  for (const c of n.children || []) setConn(c, v);
+}
 // html/head/body 真的连起来：抽屉、菜单、toast 都 append 到 body，
 // 而 loadTasks 这类「按选择器回找自己那一点」的写法必须能找到才测得准。
 const htmlEl = new El('html'), headEl = new El('head'), bodyEl = new El('body');
 htmlEl.append(headEl, bodyEl);
+setConn(htmlEl, true);   // 真实 DOM：documentElement 一造出来就连着文档
 globalThis.document = {
   createElement: t => new El(t), createElementNS: (ns, t) => new El(t),
   createDocumentFragment: () => new El('#fragment'),
@@ -323,188 +338,384 @@ const fire = (el, type, ev) => { const f = el['on' + type] || (el.listeners[type
   return f(Object.assign({ currentTarget: el, target: el, preventDefault() {}, stopPropagation() {} }, ev || {})); };
 `
 
-// TestAddPanelsRender 「添加账号」各平台表单必须真的渲染出对应字段。
+// wizardBoot 是「添加账号向导」两个渲染测试共用的脚手架：真实注册表 + fetch 桩
+// + 只走公开入口（openAddAccount 与真实点击）的导航助手。
 //
-// 为什么需要：这几个面板是命令式的（切换平台只重绘字段区，不重建整棵子树），
-// 所以语法检查与顶层求值冒烟都看不见它们——字段漏一个、设备流分支抛异常、
-// 或平台切换后字段不刷新，Go 侧测试全绿而用户看到的是空表单。无 node 时跳过。
-func TestAddPanelsRender(t *testing.T) {
+// 平台清单直接序列化后端 platforms.go 那张表，测试里不手抄第二份——手抄一份就
+// 等于「加平台漏改测试」，而漏改的测试比没有测试更危险（它照样绿）。
+func wizardBoot(t *testing.T) string {
+	t.Helper()
+	reg, err := json.Marshal(platforms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return `const problems = [];
+const bad = m => problems.push(m);
+` + domStub + `
+// 后端注册表是平台身份的唯一事实源（js/platforms.js 从 GET /panel/api/platforms 拿）。
+const PLATFORMS = ` + string(reg) + `;
+
+// fetch 桩：按 URL 片段给响应（DATA 由各场景自己填），并记下调用过哪些路径。
+const CALLS = [];
+const DATA = {};
+globalThis.fetch = async (url, opts) => {
+  const u = String(url);
+  CALLS.push(u);
+  if (u.includes('/api/platforms')) {
+    return { ok: true, status: 200, json: async () => ({ ok: true, platforms: PLATFORMS }) };
+  }
+  for (const frag of Object.keys(DATA)) {
+    if (u.includes(frag)) {
+      const v = DATA[frag];
+      return { ok: true, status: 200, json: async () => (typeof v === 'function' ? v(u, opts) : v) };
+    }
+  }
+  return { ok: true, status: 200, json: async () => ({ ok: true }) };
+};
+
+const { openAddAccount } = await import('./addwizard.js');
+const { credHelp, hasCredFields } = await import('./views/ext-add.js');
+
+// 向导的界面全在那只抽屉里。测试只读界面、只点按钮，不去戳模块内部状态——
+// 测的是用户看到的东西，不是实现。
+const drawerEl = () => qsel(document.body, '.drawer');
+const stage = () => findByClass(drawerEl(), 'wiz-stage');
+const stepBtns = () => findAll(drawerEl(), 'wiz-step');
+const hintText = () => ((findByClass(drawerEl(), 'wiz-hint') || {}).textContent) || '';
+const wayRows = () => findAll(stage(), 'wiz-way');
+const addRows = () => findAll(stage(), 'addrow');
+const shape = () => walk(stage());
+const words = () => walk(stage()).buttons;
+const tick = (ms = 5) => new Promise(r => setTimeout(r, ms));
+const rowWith = (rows, kw) => rows.find(r => r.textContent.includes(kw));
+async function openWizard(provider) { await openAddAccount(provider); await tick(); }
+async function click(el, label) {
+  if (!el) { bad('点不到「' + label + '」'); return; }
+  await fire(el, 'click');
+  await tick();
+}
+// 向导第一步能列出来的平台（注册表的 login 字段说了算：''/config 不从这条路径入池，
+// alias_of 是同一个平台的另一种落库身份，不单列）。
+const addable = () => PLATFORMS.filter(p => p.login && p.login !== 'config' && !p.alias_of);
+`
+}
+
+// TestAddWizardSteps 「添加账号」向导的分步界面必须真的能点完、每步画对。
+//
+// 为什么需要：向导是命令式建树的（切步骤只换 stage 内容、节点按 (平台,方式) 缓存），
+// 语法检查与顶层求值冒烟都只证明「能 import」，不证明「点下去出的是什么」——
+// 方式列表漏一条、切回来看不到自己填的东西、操作说明没跟着方式走，
+// 都是 Go 侧全绿而用户第一天就撞的错。无 node 时跳过。
+func TestAddWizardSteps(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not installed; render check skipped")
 	}
 	dir := copyModules(t)
 
-	harness := domStub + `
-// 平台注册表：面板所有平台清单都从它来（js/platforms.js），测试里模拟后端下发。
-const PLATFORMS = [
-  { id: 'lobsterai', name: 'LobsterAI（有道）', group: 'points', login: 'manual', checkin: true },
-  { id: 'raccoon', name: '小浣熊（商汤）', group: 'points', login: 'qr', checkin: true },
-  { id: 'qoder', name: 'Qoder（阿里）', group: 'gateway', prefix: 'qoder:', login: 'device', checkin: true },
-  { id: 'codearts', name: 'CodeArts（华为云）', group: 'points', login: 'manual', checkin: true },
-  { id: 'copilot', name: 'GitHub Copilot', group: 'gateway', prefix: 'copilot:', login: 'code' },
-  { id: 'cline', name: 'Cline', group: 'gateway', prefix: 'cline:', login: 'code' },
-  { id: 'autoclaw', name: 'AutoClaw（智谱）', group: 'gateway', prefix: 'autoclaw:', login: 'sms' },
-  { id: 'qclaw', name: 'QClaw（腾讯）', group: 'gateway', prefix: 'qclaw:', login: 'paste' },
-  { id: 'trae', name: 'Trae（字节）', group: 'gateway', prefix: 'trae:', login: 'callback' },
-  { id: 'accio', name: 'Accio（阿里）', group: 'gateway', prefix: 'accio:', login: 'callback' },
-  { id: 'traework', name: 'TraeWork（字节）', group: 'gateway', prefix: 'traework:', login: 'manual', checkin: true },
-];
+	harness := wizardBoot(t) + `
+/* ── 1. 第一步：搜索 + 厂商分组，且不列「不从添加账号入池」的通道 ── */
+await openWizard();
+if (!stage()) bad('向导没挂出 .wiz-stage');
+if (findAll(document.body, 'drawer').length !== 1) bad('抽屉挂了不止一只（清单 20：入口只有一个）');
+if (stepBtns().length !== 3) bad('还没选平台时进度该是 3 步，实为 ' + stepBtns().length);
+const shownTexts = addRows().map(r => r.textContent);
+for (const p of PLATFORMS) {
+  const shown = shownTexts.some(t => t.startsWith(p.name));
+  const should = !!p.login && p.login !== 'config' && !p.alias_of;
+  if (shown !== should) bad(p.id + '：向导清单出现=' + shown + '，按注册表规则应为 ' + should);
+}
+if (!shownTexts.some(t => t.includes('批量 JSON 导入'))) bad('批量 JSON 导入没进清单（老用户靠它整包入池）');
 
-// fetch 桩必须**先**装好再拉注册表，否则会挂在前面那个永不 resolve 的空桩上
-globalThis.fetch = async url => {
-  if (String(url).includes('/api/platforms')) {
-    return { ok: true, status: 200, json: async () => ({ ok: true, platforms: PLATFORMS }) };
-  }
-  return { ok: true, status: 200, json: async () => ({}) };
-};
-
-const { extAddPanel } = await import('./views/ext-add.js');
-const { zaiAddForm } = await import('./views/zai-segment.js');
-const { loadPlatforms } = await import('./platforms.js');
-await loadPlatforms(); // 先把注册表灌进缓存，面板首次渲染就是完整的
-
-// 每个平台的凭据字段数（账号标识输入框另计）。
-// 有登录方式的平台把凭据表单收进折叠区，字段仍然要渲染出来（手工兜底路径）。
-const WANT = {
-  lobsterai: { fields: 4, login: null },
-  raccoon: { fields: 2, login: '微信扫码登录' },
-  qoder: { fields: 4, login: '浏览器授权登录' },
-  codearts: { fields: 3, login: null },
-  traework: { fields: 3, login: null },
-  copilot: { fields: 0, login: '开始授权' },
-  cline: { fields: 0, login: '开始授权' },
-  // 短信登录没有「发起」按钮，直接出表单（发码 → 校验两段同步调用），
-  // 输入框是「手机号 + 验证码」两个，不走「标识框 + N 个字段」那套。
-  autoclaw: { fields: 0, login: '发送验证码', inputs: 2 },
-  // 扫码回填：点「微信扫码登录」才出二维码与回填框（发起前只有一个按钮）
-  qclaw: { fields: 0, login: '微信扫码登录' },
-  // 本机回调复用「浏览器授权」交互（发起前只有一个按钮）
-  trae: { fields: 0, login: '浏览器授权登录' },
-  accio: { fields: 0, login: '浏览器授权登录' },
-};
-const problems = [];
-for (const [provider, want] of Object.entries(WANT)) {
-  const panel = extAddPanel(() => {}, { flat: true });
-  const sel = panel.children[0].children[0].children[0];
-  if (!sel || (sel.tagName || '').toLowerCase() !== 'select') { problems.push(provider + ': 未找到平台选择器'); continue; }
-  sel.value = provider;
-  for (const f of sel.listeners.change || []) f({ target: sel });
-  const got = walk(panel);
-
-  // Copilot 没有可手填的凭据字段，不该出现空表单；inputs 可显式覆盖
-  const wantInputs = want.inputs != null ? want.inputs : (want.fields === 0 ? 0 : want.fields + 1);
-  if (got.inputs !== wantInputs) problems.push(provider + ': 输入框 ' + got.inputs + ' 个，期望 ' + wantInputs);
-
-  if (want.login) {
-    if (!has(got.buttons, want.login)) problems.push(provider + ': 缺「' + want.login + '」按钮');
-  }
-  // 有凭据字段就必须有手工添加入口；没有字段就不该有
-  if (want.fields > 0 && !has(got.buttons, '添加')) problems.push(provider + ': 缺手工「添加」按钮');
-  if (want.fields === 0 && has(got.buttons, '添加')) problems.push(provider + ': 无凭据字段却出现「添加」按钮');
+const heads = findAll(stage(), 'wiz-vendor');
+if (!heads.length) bad('第一步没有厂商分组表头');
+const headName = hd => ((hd.children[0] || {}).textContent) || '';
+for (const hd of heads) {
+  const v = headName(hd);
+  const n = Number(((hd.children[1] || {}).textContent) || '-1');
+  const want = addable().filter(p => (p.vendor || '其他') === v).length + (v === '工具' ? 1 : 0);
+  if (n !== want) bad('厂商「' + v + '」表头计数 ' + n + '，清单里实际 ' + want);
+}
+for (const v of new Set(addable().map(p => p.vendor || '其他'))) {
+  if (!heads.some(hd => headName(hd) === v)) bad('缺厂商分组表头：' + v);
 }
 
-const zai = walk(zaiAddForm(() => {}));
-if (zai.inputs !== 2) problems.push('zai: 输入框 ' + zai.inputs + ' 个，期望 2');
-if (!has(zai.buttons, '入池')) problems.push('zai: 缺「入池」按钮');
-if (!has(zai.buttons, 'OAuth')) problems.push('zai: 缺「OAuth 免密登录」按钮');
-
-/* ── 二维码必须是真的 SVG 元素，不是标记字符串 ──────────────────
-   h() 把字符串当文本节点，传标记进去会把 "<svg ...>" 原样显示出来。 */
-const { qrMatrix, qrSVG } = await import('./qr.js');
-const qrText = 'https://xiaohuanxiong.com/login/mp?code=abc';
-const qrM = qrMatrix(qrText);
-const svg = qrSVG(qrM, 160);
-if (typeof svg === 'string') problems.push('qrSVG 返回字符串——h() 会当成文本节点，二维码不显示');
+const q = document.getElementById('add-q');
+if (!q) bad('第一步没有搜索框（平台已上到二十个，一屏清单等于没有清单）');
 else {
-  if ((svg.tagName || '').toLowerCase() !== 'svg') problems.push('qrSVG 未返回 svg 元素');
-  const paths = (svg.children || []).filter(c => (c.tagName || '').toLowerCase() === 'path');
-  if (!paths.length) problems.push('qrSVG 没有深色模块 path');
-  else if (!paths[0].props.d || paths[0].props.d.length < 20) problems.push('qrSVG 的 path d 为空');
-  const wantVB = '0 0 ' + (qrM.length + 8) + ' ' + (qrM.length + 8);
-  if (svg.props['viewBox'] !== wantVB) problems.push('qrSVG viewBox = ' + svg.props['viewBox'] + '，期望 ' + wantVB);
+  q.value = '华为';
+  fire(q, 'input');
+  const only = addRows().map(r => r.textContent);
+  if (only.length !== 1 || !only[0].includes('CodeArts')) bad('搜「华为」应只剩 CodeArts，实为 ' + only.join(' / '));
+  q.value = '扫码';
+  fire(q, 'input');
+  if (!addRows().some(r => r.textContent.includes('QClaw'))) bad('按接入方式搜（扫码）搜不到 QClaw');
+  q.value = 'zzzz-not-a-platform';
+  fire(q, 'input');
+  if (!findByClass(stage(), 'empty')) bad('搜不到时没有空状态');
+  fire(q, 'keydown', { key: 'Escape' });
+  if (q.value !== '') bad('Escape 没清空搜索框');
+  if (addRows().length !== shownTexts.length) bad('Escape 后清单没收回全量');
 }
 
-/* ── 驱动一次真实登录：点按钮 → 挑战物必须渲染出来 ──────────────
-   登录面板是命令式的，只有走一遍点击才覆盖到 renderChallenge。 */
-globalThis.fetch = async url => {
-  if (String(url).includes('/api/platforms')) {
-    return { ok: true, status: 200, json: async () => ({ ok: true, platforms: PLATFORMS }) };
-  }
-  return { ok: true, status: 200,
-    json: async () => ({ ok: true, mode: 'qr', session: 's1',
-      qr_url: 'https://xiaohuanxiong.com/login/mp?code=abc&appname=x', expires_in: 600 }) };
-};
+/* ── 2. 逐平台：接入方式列表 → 点进去把表单画对 ──────────────── */
+const LOGIN_NAME = { oauth: '浏览器授权登录', device: '浏览器授权登录', callback: '浏览器授权登录',
+  qr: '扫码登录', code: '设备码授权', sms: '手机号验证码登录', paste: '扫码后粘贴回调链接' };
+const LOGIN_BTN = { qr: '微信扫码登录', device: '浏览器授权登录', callback: '浏览器授权登录',
+  code: '开始授权', sms: '发送验证码', paste: '微信扫码登录' };
+const CREDS_NAME = '粘贴客户端凭据', JSON_NAME = '粘贴完整凭据 JSON';
+const BESPOKE = ['workbuddy', 'loomy', 'zai'];
 
-for (const [provider, btnText, wantCls] of [['raccoon', '微信扫码登录', 'qr']]) {
-  const panel = extAddPanel(() => {}, { flat: true });
-  const sel = panel.children[0].children[0].children[0];
-  sel.value = provider;
-  for (const f of sel.listeners.change || []) f({ target: sel });
-  const btn = findButton(panel, btnText);
-  if (!btn) { problems.push(provider + ': 找不到「' + btnText + '」按钮'); continue; }
-  // 两种绑定方式都要认：h(..., {onclick}) 走 addEventListener，btn.onclick= 是属性赋值
-  const click = btn.onclick || (btn.listeners.click || [])[0];
-  if (typeof click !== 'function') { problems.push(provider + ': 登录按钮没绑点击'); continue; }
-  await click({ currentTarget: btn });
-  const box = findByClass(panel, wantCls);
-  if (!box) { problems.push(provider + ': 点登录后没渲染出 .' + wantCls); continue; }
-  const inner = (box.children || [])[0];
-  if (!inner || (inner.tagName || '').toLowerCase() !== 'svg') {
-    problems.push(provider + ': .' + wantCls + ' 里不是 svg 元素');
+// 手填那条（逐字段或整包 JSON）——两种形态的字段数与说明都得对着。
+function checkHand(p) {
+  const g = shape();
+  if (!g.inputs && !g.buttons.length) { bad(p.id + '：表单是空的（用户看到白板）'); return; }
+  if (hasCredFields(p.id)) {
+    const want = credHelp(p.id).fields.length + 1;
+    if (g.inputs !== want) bad(p.id + '：凭据表单 ' + g.inputs + ' 个输入框，期望 ' + want + '（账号标识 + 凭据字段）');
+    if (!g.buttons.includes('添加')) bad(p.id + '：凭据表单缺「添加」按钮：' + g.buttons.join('/'));
+    const help = findByClass(stage(), 'wiz-help');
+    if (!help) { bad(p.id + '：操作说明没放进这一步（清单 24）'); return; }
+    if (!help.textContent.includes('这些值从哪里复制')) bad(p.id + '：说明的标题不说人话：' + help.textContent.slice(0, 24));
+    const n = help.querySelectorAll('li').length;
+    const wantSteps = credHelp(p.id).steps.length;
+    if (n !== wantSteps) bad(p.id + '：操作说明 ' + n + ' 条，字段表里写的是 ' + wantSteps + ' 条');
+    const fig = findByClass(help, 'wiz-fig');
+    if (credHelp(p.id).fig && !fig) bad(p.id + '：该配的示意图没画出来');
+    if (fig && !qsel(fig, 'svg')) bad(p.id + '：示意图不是现画的 SVG（CSP 下引不了外链图片）');
+    return;
   }
+  if (g.inputs !== 2) bad(p.id + '：整包 JSON 那条该有「账号 ID + 凭据 JSON」两个输入框，实为 ' + g.inputs);
+  if (qsel(stage(), 'select')) bad(p.id + '：整包 JSON 那条又给了一个平台下拉（第一步已经选好平台）');
 }
-const { stopExtAddTimers } = await import('./views/ext-add.js');
-stopExtAddTimers();
 
-/* ── 面板被 tick 重建后，登录轮询必须继续 ──────────────────────
-   自动化视图每 5s 重渲染一次，会重建 extAddPanel。早先的实现在构造时清掉
-   轮询定时器，于是「授权完成却没人接着轮询」——用户看到的就是授权后没入池。
-   实测小浣熊扫码快能成，Qoder / Copilot 要在浏览器里操作更久，必死。 */
-let pollCount = 0, addedCount = 0;
-globalThis.fetch = async url => {
-  if (String(url).includes('/api/platforms')) {
-    return { ok: true, status: 200, json: async () => ({ ok: true, platforms: PLATFORMS }) };
+for (const p of addable()) {
+  if (BESPOKE.includes(p.id)) continue;      // 下面单独走：它们的方式清单不是通用 kind 派生的
+  await openWizard(p.id);
+  const ways = wayRows();
+  const hasLoginWay = !!LOGIN_NAME[p.login];
+  if (!hasLoginWay) {
+    // 只有一条路（逐字段/整包凭据）时不必再问第二步：进度 3 步，直接就是表单
+    if (ways.length) bad(p.id + '：单一接入方式不该问第二步：' + ways.map(w => w.textContent).join(' / '));
+    if (stepBtns().length !== 3) bad(p.id + '：单方式平台的进度应 3 步，实为 ' + stepBtns().length);
+    checkHand(p);
+    continue;
   }
-  if (String(url).includes('/login/start')) {
-    return { ok: true, status: 200, json: async () => ({ ok: true, mode: 'device', session: 'sess-A',
-      auth_url: 'https://qoder.com/device/selectAccounts?x=1', expires_in: 600 }) };
+  if (ways.length !== 2) {
+    bad(p.id + '：接入方式应列 2 种，实为 ' + ways.length + '：' + ways.map(w => w.textContent).join(' / '));
+    continue;
   }
-  pollCount++;
-  return { ok: true, status: 200, json: async () => ({ ok: true, done: true,
-    account: { id: 'q-1', label: 'Qoder q-1' } }) };
-};
+  if (stepBtns().length !== 4) bad(p.id + '：两种方式的进度应 4 步，实为 ' + stepBtns().length);
 
-const p1 = extAddPanel(() => { addedCount++; }, { flat: true });
-const sel1 = p1.children[0].children[0].children[0];
-sel1.value = 'qoder';
-for (const f of sel1.listeners.change || []) f({ target: sel1 });
-const lbtn = findButton(p1, '浏览器授权登录');
-await (lbtn.onclick || (lbtn.listeners.click || [])[0])({ currentTarget: lbtn });
+  if (!ways[0].textContent.includes(LOGIN_NAME[p.login])) bad(p.id + '：推荐方式措辞不对：' + ways[0].textContent);
+  if (!ways[0].textContent.includes('推荐')) bad(p.id + '：排在第一的方式没标「推荐」');
+  const wantHand = hasCredFields(p.id) ? CREDS_NAME : JSON_NAME;
+  if (!ways[1].textContent.includes(wantHand)) bad(p.id + '：手填那条措辞不对：' + ways[1].textContent);
 
-// 模拟视图 tick：重建面板（旧实现会在这里把轮询掐死）
-extAddPanel(() => { addedCount++; }, { flat: true });
+  const wh = ((findAll(ways[0], 'wiz-way-hint')[0] || {}).textContent) || '';
+  await click(ways[0], p.id + ' 的登录方式');
+  if (hintText() !== wh) bad(p.id + '：完成接入那一步的说明没跟着方式走（期望「' + wh + '」，实为「' + hintText() + '」）');
+  if (!words().some(t => t.includes(LOGIN_BTN[p.login]))) bad(p.id + '：登录表单缺「' + LOGIN_BTN[p.login] + '」按钮：' + words().join('/'));
+  if (findByClass(stage(), 'wiz-help')) bad(p.id + '：扫码/授权这条不需要「值从哪里复制」的说明');
+  await click(stepBtns()[1], p.id + ' 回到第二步');
+  await click(wayRows()[1], p.id + ' 的手填方式');
+  checkHand(p);
+}
 
-await new Promise(r => setTimeout(r, 2600));
-stopExtAddTimers();
-if (pollCount === 0) problems.push('面板重建后轮询停了——登录永远不会完成（账号不会入池）');
-if (addedCount === 0) problems.push('轮询成功后没回调 onAdded，账号列表不会刷新');
+/* ── 3. 三个有专属交互的平台：方式清单是它们自己的真路径 ─────── */
+await openWizard('loomy');
+const LOOMY = ['自动检测本机客户端', '手机号 + 密码', '手机号 + 短信验证码', '手动粘贴 Session Token'];
+const lw = wayRows();
+if (lw.length !== 4) bad('Loomy 应给 4 种接入方式，实为 ' + lw.length);
+LOOMY.forEach((n, i) => {
+  if (!lw[i] || !lw[i].textContent.includes(n)) bad('Loomy 第 ' + (i + 1) + ' 种方式应为「' + n + '」：' + (lw[i] ? lw[i].textContent : '（没有这一条）'));
+});
+for (let i = 0; i < 4; i++) {
+  if (i > 0) await click(stepBtns()[1], '回到 Loomy 第二步');
+  await click(wayRows()[i], 'Loomy 第 ' + (i + 1) + ' 种方式');
+  const g = shape(), w = g.buttons;
+  if (i === 0 && !w.includes('开始检测')) bad('Loomy 本机检测那条没有「开始检测」：' + w.join('/'));
+  if (i === 1 && (g.inputs !== 2 || !w.includes('登录并入池'))) bad('Loomy 密码那条要有手机号 + 密码两个输入框与「登录并入池」');
+  if (i === 2 && (g.inputs !== 2 || !w.includes('发送验证码') || !w.includes('登录并入池'))) bad('Loomy 短信那条要有手机号 + 验证码与发码/入池两个按钮');
+  if (i === 3 && (g.inputs !== 1 || !w.includes('验证并保存'))) bad('Loomy Token 那条应只有一个输入框与「验证并保存」：' + g.inputs + '/' + w.join('/'));
+}
+
+await openWizard('zai');
+const zw = wayRows().map(r => r.textContent);
+if (zw.length !== 2 || !zw[0].includes('OAuth 免密登录') || !zw[1].includes('粘贴 JWT 或 API Key')) bad('Z.AI 的两种方式不对：' + zw.join(' / '));
+await click(wayRows()[0], 'Z.AI OAuth 免密登录');
+if (!words().includes('OAuth 免密登录')) bad('Z.AI OAuth 那条没有 OAuth 按钮：' + words().join('/'));
+if (shape().inputs !== 1) bad('Z.AI OAuth 那条只该有「账号名称」一个输入框，实为 ' + shape().inputs);
+await click(stepBtns()[1], '回到 Z.AI 第二步');
+await click(wayRows()[1], 'Z.AI 粘贴凭据');
+if (shape().inputs !== 2 || !words().includes('入池')) bad('Z.AI 粘贴凭据那条要有名称 + 密钥两个输入框与「入池」按钮');
+
+// 腾讯只有一条路：第二步不该再问，直接给授权表单
+await openWizard('workbuddy');
+if (wayRows().length) bad('腾讯只有一种接入方式，第二步不该再问');
+if (stepBtns().length !== 3) bad('腾讯的进度步数不对：' + stepBtns().length);
+if (!words().includes('获取授权链接')) bad('腾讯那一步没有「获取授权链接」：' + words().join('/'));
+const beforeRealm = stage().textContent;
+await click(findButton(stage(), '国际版'), '国际版 Global');
+if (stage().textContent === beforeRealm) bad('切了 CN/Global 但这一屏没重画');
+if (!stage().textContent.includes('试用额度')) bad('切到国际版没说清会自动领试用额度');
+
+/* ── 4. 批量导入 + 「切走再切回来还是同一棵树」───────────────── */
+await openWizard();
+await click(rowWith(addRows(), '批量 JSON 导入'), '批量 JSON 导入');
+const fileIn = qsel(stage(), 'input');
+if (!fileIn || shape().inputs !== 1) bad('批量导入应只有一个文件输入框，实为 ' + shape().inputs);
+if (fileIn && fileIn.props.accept !== '.json') bad('批量导入的文件框没限定 .json');
+
+await openWizard('qoder');
+await click(wayRows()[1], 'Qoder 粘贴客户端凭据');
+const node1 = stage().firstElementChild;
+const idIn = qsel(node1, 'input');
+idIn.value = '主号';
+await click(findButton(drawerEl(), '上一步'), '上一步');
+await click(wayRows()[1], '再进 Qoder 粘贴凭据');
+if (stage().firstElementChild !== node1) bad('切走再切回来重建了表单——填了一半的内容与进行中的授权都会丢');
+if (qsel(node1, 'input').value !== '主号') bad('切回来看不到刚才填的账号标识');
+if (!node1.isConnected) bad('缓存的表单节点重新上屏后没回到文档里');
+if (!findButton(drawerEl(), '关闭')) bad('向导底部没有「关闭」');
 
 if (problems.length) { console.error(problems.join('\n')); process.exit(1); }
-console.log('RENDER OK');
+console.log('STEPS OK');
+setTimeout(() => process.exit(0), 50);
 `
-	hf := filepath.Join(dir, "render.mjs")
-	if err := os.WriteFile(hf, []byte(harness), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(node, hf)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
+	runNodeHarness(t, node, dir, "wizard-steps.mjs", harness, "STEPS OK", "添加向导的分步渲染不符")
+}
+
+// TestAddWizardLogin 走完一条真实接入：点授权 → 自动检测 → 入池 → 自动查余额 →
+// 直接落到那个账号的详情；以及切步骤、换屏都不能把进行中的登录轮询掐掉。
+//
+// 为什么需要：这一段全是异步回调 + 定时器，import 与静态渲染都碰不到。以前
+// 「面板重建把轮询掐了」上线过一次，表现是用户在浏览器里授权完了却没入池；
+// 而「加完号得自己回列表找」这种收尾没做，也只有真点一遍才看得见。无 node 时跳过。
+func TestAddWizardLogin(t *testing.T) {
+	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Fatalf("添加账号表单渲染失败: %v\n%s", err, out)
+		t.Skip("node not installed; render check skipped")
 	}
-	if !bytes.Contains(out, []byte("RENDER OK")) {
-		t.Fatalf("渲染检查未通过:\n%s", out)
+	dir := copyModules(t)
+
+	harness := wizardBoot(t) + `
+/* ── 1. 腾讯 OAuth：点链接 → 自动检测 → 入池 → 查余额 → 落详情 ── */
+DATA['/api/login/start'] = { ok: true, state: 'st-1', url: 'https://workbuddy.example/oauth/start?x=1' };
+DATA['/api/login/poll'] = { ok: true, done: true, uid: 'u9', nickname: '主号' };
+DATA['/api/overview'] = { ok: true, accounts: [{ uid: 'u9', nickname: '主号', credits: 100, credits_total: 200 }] };
+DATA['/api/zai/accounts'] = { ok: true, accounts: [] };
+DATA['/api/accounts/u9/balance'] = { ok: true, credits: 100 };
+await openWizard('workbuddy');
+await click(findButton(stage(), '获取授权链接'), '获取授权链接');
+await tick(20);
+const d1 = drawerEl();
+const title = ((qsel(d1, 'h2') || {}).textContent) || '';
+if (title !== '主号') bad('入池后没自动打开该账号详情：抽屉标题「' + title + '」，期望「主号」');
+if (!findByClass(d1, 'detail-foot')) bad('详情抽屉没打开（缺 .detail-foot）');
+if (!CALLS.some(c => c.includes('/api/accounts/u9/balance'))) bad('入池确认后没自动查一次余额（清单 23）');
+
+/* ── 2. 池里没有对应行（本机 Loomy）：停在「加入池中」把回执说清楚 ── */
+DATA['/api/loomy/status'] = { ok: true, has_account: true,
+  status: { userid: 'x-1', phone_masked: '138****0000', earned: 3, total: 10 } };
+await openWizard('loomy');
+await click(wayRows()[0], '自动检测本机客户端');
+await click(findButton(stage(), '开始检测'), '开始检测');
+await tick(20);
+if (!stage().textContent.includes('登录态已经可用')) bad('本机 Loomy 没落到「加入池中」回执：' + stage().textContent.slice(0, 40));
+if (!words().includes('看任务进度')) bad('本机 Loomy 的回执没给去处（应能直接去看任务进度）');
+
+/* ── 3. 扫码那条：二维码必须是真的 SVG 元素，不是标记字符串 ──────
+   h() 把字符串当文本节点，传标记进去会把 "<svg ...>" 原样显示出来。 */
+const { qrMatrix, qrSVG } = await import('./qr.js');
+const qrM = qrMatrix('https://xiaohuanxiong.com/login/mp?code=abc');
+const svg = qrSVG(qrM, 160);
+if (typeof svg === 'string') bad('qrSVG 返回字符串——h() 会当成文本节点，二维码不显示');
+else {
+  if ((svg.tagName || '').toLowerCase() !== 'svg') bad('qrSVG 未返回 svg 元素');
+  const paths = (svg.children || []).filter(c => (c.tagName || '').toLowerCase() === 'path');
+  if (!paths.length) bad('qrSVG 没有深色模块 path');
+  else if (!paths[0].props.d || paths[0].props.d.length < 20) bad('qrSVG 的 path d 为空');
+  const wantVB = '0 0 ' + (qrM.length + 8) + ' ' + (qrM.length + 8);
+  if (svg.props['viewBox'] !== wantVB) bad('qrSVG viewBox = ' + svg.props['viewBox'] + '，期望 ' + wantVB);
+}
+DATA['/api/ext/raccoon/login/start'] = { ok: true, mode: 'qr', session: 's1',
+  qr_url: 'https://xiaohuanxiong.com/login/mp?code=abc', expires_in: 600 };
+DATA['/api/ext/raccoon/login/poll'] = { ok: true, done: false, status: 'pending' };
+await openWizard('raccoon');
+await click(wayRows()[0], 'raccoon 扫码登录');
+await click(findButton(stage(), '微信扫码登录'), '微信扫码登录');
+await tick(20);
+const qrbox = findByClass(stage(), 'qr');
+if (!qrbox) bad('点扫码登录后没渲染出二维码');
+else if ((qrbox.children[0] || {}).tagName !== 'SVG') bad('二维码不是 svg 元素');
+
+/* ── 4. 切步骤 / 换屏都不能停掉进行中的授权轮询 ────────────────
+   用户在浏览器里点授权要几十秒，期间会来回切向导的步骤。早先的实现把轮询
+   挂在面板实例上，重建一次就掐死——表现是「授权完成了却没入池」。 */
+let polls = 0;
+DATA['/api/ext/qoder/login/start'] = { ok: true, mode: 'device', session: 'sess-A',
+  auth_url: 'https://qoder.example/device/authorize?x=1', expires_in: 600 };
+DATA['/api/ext/qoder/login/poll'] = () => { polls++; return { ok: true, done: true,
+  account: { provider: 'qoder', id: 'q-9', label: 'Qoder 主号' } }; };
+DATA['/api/ext/accounts'] = { ok: true, accounts: [{ provider: 'qoder', id: 'q-9', label: 'Qoder 主号' }] };
+await openWizard('qoder');
+await click(wayRows()[0], 'Qoder 浏览器授权登录');
+await click(findButton(stage(), '浏览器授权登录'), '开始授权');
+await tick(20);
+if (!stage().textContent.includes('qoder.example/device/authorize')) bad('设备授权那条没把链接画出来：' + stage().textContent.slice(0, 40));
+await click(findButton(drawerEl(), '上一步'), '上一步');
+await click(wayRows()[0], '再进 Qoder 授权方式');
+await tick(2400);
+if (polls === 0) bad('切走再切回来把登录轮询停了——授权完成也不会入池');
+const title4 = ((qsel(drawerEl(), 'h2') || {}).textContent) || '';
+if (title4 !== 'Qoder 主号') bad('轮询收到账号后没落到详情：抽屉标题「' + title4 + '」');
+
+if (problems.length) { console.error(problems.join('\n')); process.exit(1); }
+console.log('LOGIN OK');
+// 活动栏作业与登录轮询都带着无 ref 的定时器；先让 stdout 落盘再主动退出，
+// 别让一次绿测试挂成超时。
+setTimeout(() => process.exit(0), 50);
+`
+	runNodeHarness(t, node, dir, "wizard-login.mjs", harness, "LOGIN OK", "添加向导的登录收尾不符")
+}
+
+// TestAddWizardSingleEntry 「两个入口合一」（清单 20）的源码级不变量：
+// 添加账号只剩向导这一条路，旧抽屉里那份表单、ext-add 里那个平台下拉都不许复活
+// ——同一件事画两遍，措辞一定会漂，而用户会以为是两个不同的功能。
+func TestAddWizardSingleEntry(t *testing.T) {
+	// 查的是代码而不是措辞：drawers.js 的说明注释里就写着「添加账号」去哪了，
+	// 按中文搜会把这条注释当成第二个入口。真入口只看这几处引用。
+	if s := readWebJS(t, "drawers.js"); strings.Contains(s, "openAddAccount") ||
+		strings.Contains(s, "extAddPanel") || strings.Contains(s, "zaiAddForm") {
+		t.Error("drawers.js 还留着添加账号表单的引用——第二个入口没删干净")
+	}
+	if s := readWebJS(t, "views/ext-add.js"); strings.Contains(s, "h('select'") {
+		t.Error("ext-add.js 又自带平台下拉（选平台是向导第一步的事）")
+	}
+	if s := readWebJS(t, "boot.js"); !strings.Contains(s, "from './addwizard.js'") {
+		t.Error("boot.js 没把添加账号入口接到向导上")
+	}
+	// extAddPanel 是向导的内部实现，别处不该再直接拼它。
+	err := fs.WalkDir(webFS, "web/js", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || filepath.Ext(p) != ".js" {
+			return err
+		}
+		base := filepath.Base(p)
+		if base == "addwizard.js" || base == "ext-add.js" {
+			return nil
+		}
+		data, rerr := fs.ReadFile(webFS, p)
+		if rerr != nil {
+			return rerr
+		}
+		if strings.Contains(string(data), "extAddPanel(") {
+			t.Errorf("%s 绕过向导直接调用 extAddPanel", p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -625,6 +836,12 @@ overview.set(OVERVIEW);
 
 const view = (await import('./views/accounts.js')).default;
 let root = view.render();
+// 面板把视图挂在 #view 容器里，桩也要挂：不挂的话宿主永远不在文档上，而视图
+// 的 isConnected 守卫（这是 2026-10-09 冻结缺陷的修复）会正确地拒绝往没上屏的
+// 树里画——测试里表现为「什么都没渲染」，其实测的是生产不存在的一种状态。
+const viewHost = document.createElement('div');
+document.body.append(viewHost);
+viewHost.append(root);
 await tick();
 
 /* ── 1. 一张表：三个源排在一起（清单 I.3）──────────────────── */

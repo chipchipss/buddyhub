@@ -533,8 +533,9 @@ export function startShell() {
   refreshOverview();
 }
 
-/* 供视图/抽屉调用（避免循环依赖，延迟到运行时解析）*/
-export function openAddAccount() { window.__openAddAccount?.(); }
+/* 供视图/抽屉调用（避免循环依赖，延迟到运行时解析）。
+   变参转发：账号页/详情抽屉的「重新登录」要带平台 id 直接落在那一个平台上。 */
+export function openAddAccount(...args) { window.__openAddAccount?.(...args); }
 
 /* 顶栏批量刷新的备用入口（账号页工具条复用同一实现）*/
 export { doRefreshAll };

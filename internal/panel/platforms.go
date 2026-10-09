@@ -8,9 +8,9 @@ package panel
 // 多一个点了报错的按钮」成了必然。现在后端这一张表说了算，前端全部从
 // `GET /panel/api/platforms` 渲染。
 //
-// 表里只放**跨界面共用的事实**：id / 展示名 / 分组 / 模型前缀 / 入池方式 /
+// 表里只放**跨界面共用的事实**：id / 展示名 / 分组 / 厂商 / 模型前缀 / 入池方式 /
 // 有无签到。各平台登录表单的字段细节仍在前端（那是纯 UI 关切），但**平台是否
-// 存在、叫什么、能不能签到、走哪个前缀**只在这里定义一次。
+// 存在、叫什么、属于哪家、能不能签到、走哪个前缀**只在这里定义一次。
 
 import (
 	"net/http"
@@ -57,10 +57,19 @@ type Platform struct {
 	Name string `json:"name"` // 展示名
 	// Group 分组（gateway / points / local）。
 	Group string `json:"group"`
+	// Vendor 厂商。「添加账号」向导按厂商分组（清单 21），账号页的平台名也这么念。
+	// 这是平台身份的一部分，不是 UI 细节，所以只能在这里定义——前端自带一份
+	// 厂商归类，就又回到了「加一个平台漏改一处」的老问题。
+	Vendor string `json:"vendor,omitempty"`
 	// Prefix 模型名前缀（"" = 该平台不是对话上游）。
 	Prefix string `json:"prefix,omitempty"`
 	// Login 入池方式（见上面常量；"" = 不通过「添加账号」入池）。
 	Login string `json:"login,omitempty"`
+	// AliasOf 同一平台的另一种落库身份（指向主 id）。
+	// loomy 的密码/短信账号落在 extstore 里是另一个 provider id，用户在
+	// 「添加账号」里看到的仍然是同一个 Loomy。向导按主 id 列平台，别名收进
+	// 主平台的方式列表——否则列表里会出现两行「Loomy」，人就懵了。
+	AliasOf string `json:"alias_of,omitempty"`
 	// Checkin 是否有每日签到（决定外部平台页签不签到的按钮）。
 	Checkin bool `json:"checkin"`
 	// Renew 凭据续期方式（见上面常量；"" 视为 manual）。
@@ -72,49 +81,49 @@ type Platform struct {
 // platforms 注册表。**新增平台只改这一处**（外加前端那张表单字段表）。
 var platforms = []Platform{
 	// ── 对话通道 ──
-	{ID: "workbuddy", Name: "腾讯 WorkBuddy", Group: GroupGateway, Prefix: "cn:", Login: LoginOAuth,
+	{ID: "workbuddy", Name: "腾讯 WorkBuddy", Group: GroupGateway, Vendor: "腾讯", Prefix: "cn:", Login: LoginOAuth,
 		Checkin: true, Renew: RenewAuto, Note: "成长任务全自动"},
-	{ID: "loomy", Name: "Loomy（讯飞）", Group: GroupGateway, Prefix: "loomy:", Login: LoginDetect,
+	{ID: "loomy", Name: "Loomy（讯飞）", Group: GroupGateway, Vendor: "讯飞", Prefix: "loomy:", Login: LoginDetect,
 		Checkin: true, Renew: RenewAuto, Note: "客户端检测 / 手机号 / 短信"},
-	{ID: "zai", Name: "Z.AI / 智谱", Group: GroupGateway, Prefix: "zai:", Login: LoginOAuth,
+	{ID: "zai", Name: "Z.AI / 智谱", Group: GroupGateway, Vendor: "智谱", Prefix: "zai:", Login: LoginOAuth,
 		Checkin: true, Renew: RenewAuto, Note: "Coding Plan JWT + API Key 双通道"},
-	{ID: "copilot", Name: "GitHub Copilot", Group: GroupGateway, Prefix: "copilot:", Login: LoginCode,
+	{ID: "copilot", Name: "GitHub Copilot", Group: GroupGateway, Vendor: "GitHub", Prefix: "copilot:", Login: LoginCode,
 		Renew: RenewAuto, Note: "设备码授权"},
-	{ID: "cline", Name: "Cline", Group: GroupGateway, Prefix: "cline:", Login: LoginCode,
+	{ID: "cline", Name: "Cline", Group: GroupGateway, Vendor: "Cline", Prefix: "cline:", Login: LoginCode,
 		Renew: RenewAuto, Note: "含免费池，无需订阅"},
-	{ID: "autoclaw", Name: "AutoClaw（智谱）", Group: GroupGateway, Prefix: "autoclaw:", Login: LoginSMS,
+	{ID: "autoclaw", Name: "AutoClaw（智谱）", Group: GroupGateway, Vendor: "智谱", Prefix: "autoclaw:", Login: LoginSMS,
 		Checkin: true, Renew: RenewAuto, Note: "手机号登录（国内版）"},
-	{ID: "qoder", Name: "Qoder（阿里）", Group: GroupGateway, Prefix: "qoder:", Login: LoginDevice,
+	{ID: "qoder", Name: "Qoder（阿里）", Group: GroupGateway, Vendor: "阿里", Prefix: "qoder:", Login: LoginDevice,
 		Checkin: true, Renew: RenewAuto, Note: "设备授权登录"},
-	{ID: "qclaw", Name: "QClaw（腾讯）", Group: GroupGateway, Prefix: "qclaw:", Login: LoginQR,
+	{ID: "qclaw", Name: "QClaw（腾讯）", Group: GroupGateway, Vendor: "腾讯", Prefix: "qclaw:", Login: LoginQR,
 		Renew: RenewManual, Note: "微信扫码登录（上游已宣布停运）"},
-	{ID: "trae", Name: "Trae（字节）", Group: GroupGateway, Prefix: "trae:", Login: LoginCallback,
+	{ID: "trae", Name: "Trae（字节）", Group: GroupGateway, Vendor: "字节", Prefix: "trae:", Login: LoginCallback,
 		Renew: RenewAuto, Note: "浏览器授权（本机回调）"},
-	{ID: "accio", Name: "Accio（阿里）", Group: GroupGateway, Prefix: "accio:", Login: LoginCallback,
+	{ID: "accio", Name: "Accio（阿里）", Group: GroupGateway, Vendor: "阿里", Prefix: "accio:", Login: LoginCallback,
 		Renew: RenewAuto, Note: "浏览器授权（本机回调）"},
-	{ID: "traework", Name: "TraeWork（字节）", Group: GroupGateway, Prefix: "traework:", Login: LoginManual,
+	{ID: "traework", Name: "TraeWork（字节）", Group: GroupGateway, Vendor: "字节", Prefix: "traework:", Login: LoginManual,
 		Checkin: true, Renew: RenewManual, Note: "粘贴客户端凭据（含每日签到）"},
-	{ID: "raccoon", Name: "小浣熊（商汤）", Group: GroupGateway, Prefix: "raccoon:", Login: LoginQR,
+	{ID: "raccoon", Name: "小浣熊（商汤）", Group: GroupGateway, Vendor: "商汤", Prefix: "raccoon:", Login: LoginQR,
 		Checkin: true, Renew: RenewAuto, Note: "微信扫码登录（OpenAI 兼容直连）"},
 
-	{ID: "codearts", Name: "CodeArts（华为云）", Group: GroupGateway, Prefix: "codearts:", Login: LoginManual,
+	{ID: "codearts", Name: "CodeArts（华为云）", Group: GroupGateway, Vendor: "华为云", Prefix: "codearts:", Login: LoginManual,
 		Checkin: true, Renew: RenewStatic, Note: "永久 AK/SK（建议）"},
-	{ID: "ima", Name: "ima（腾讯知识管家）", Group: GroupGateway, Prefix: "ima:", Login: LoginManual,
+	{ID: "ima", Name: "ima（腾讯知识管家）", Group: GroupGateway, Vendor: "腾讯", Prefix: "ima:", Login: LoginManual,
 		Renew: RenewAuto, Note: "浏览器 F12 复制 x-ima-cookie"},
-	{ID: "marvis", Name: "Marvis（马维斯）", Group: GroupGateway, Prefix: "marvis:", Login: LoginManual,
+	{ID: "marvis", Name: "Marvis（马维斯）", Group: GroupGateway, Vendor: "腾讯", Prefix: "marvis:", Login: LoginManual,
 		Renew: RenewManual, Note: "从已登录客户端抓包：mv_ token / openid / device_guid"},
 
 	// ── 积分 / 签到平台（无对话 API）──
-	{ID: "loomy-cli", Name: "Loomy（讯飞，密钥/短信）", Group: GroupPoints, Login: LoginManual,
-		Checkin: true, Renew: RenewAuto, Note: "区别于上面的 loomy：密码/短信登录的账号落 extstore"},
-	{ID: "lobsterai", Name: "LobsterAI（有道）", Group: GroupPoints, Login: LoginManual,
+	{ID: "loomy-cli", Name: "Loomy（讯飞，密钥/短信）", Group: GroupPoints, Vendor: "讯飞", Login: LoginManual,
+		AliasOf: "loomy", Checkin: true, Renew: RenewAuto, Note: "区别于上面的 loomy：密码/短信登录的账号落 extstore"},
+	{ID: "lobsterai", Name: "LobsterAI（有道）", Group: GroupPoints, Vendor: "有道", Login: LoginManual,
 		Checkin: true, Renew: RenewManual, Note: "从客户端凭据文件复制"},
 
 	// 本机凭据 / 配置页填写的通道：同样是可调用的对话通道，只是不从
 	// 「添加账号」入池（Login 字段说明了这一点）。
-	{ID: "codex", Name: "Codex（ChatGPT 订阅）", Group: GroupGateway, Prefix: "codex:", Login: LoginNone,
+	{ID: "codex", Name: "Codex（ChatGPT 订阅）", Group: GroupGateway, Vendor: "OpenAI", Prefix: "codex:", Login: LoginNone,
 		Renew: RenewAuto, Note: "本机 ~/.codex 凭据"},
-	{ID: "free", Name: "免费 Key 池", Group: GroupGateway, Prefix: "free:", Login: LoginConfig,
+	{ID: "free", Name: "免费 Key 池", Group: GroupGateway, Vendor: "多家", Prefix: "free:", Login: LoginConfig,
 		Renew: RenewStatic, Note: "groq / 智谱 / llm7 / openrouter"},
 }
 

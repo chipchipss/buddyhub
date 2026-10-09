@@ -6,7 +6,7 @@
 import { h, icon, setKey, getKey, setUnauthorizedHandler, api, toast, materialize } from './kernel.js';
 import { startShell } from './shell.js';
 import { overview, refreshOverview } from './store.js';
-import { openAddAccount } from './drawers.js';
+import { openAddAccount } from './addwizard.js';
 
 // 视图注册（import 即注册，顺序决定侧栏顺序）
 import './views/overview.js';
