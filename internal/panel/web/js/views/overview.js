@@ -46,6 +46,23 @@ function tile(value, key, quiet) {
   );
 }
 
+function statusStrip() {
+  const d = overview();
+  const credits = acctsCredit(d);
+  const totals = d ? (d.accounts || []).reduce((a, s) => a + (s.credits_total || 0), 0) : 0;
+  return h('div', { class: 'row wrap', style: { gap: '7px', fontSize: '12px', color: 'var(--fg-2)' } },
+    h('span', { class: 'chip faint' }, '账号 ', h('b', { text: d ? `${d.healthy}/${d.total}` : '—' })),
+    h('span', { class: 'chip faint' }, '积分 ', h('b', { text: totals > 0 ? `${credits}/${totals}` : String(credits) })),
+    overview()?.sticky_sessions != null ? h('span', { class: 'chip faint' }, '粘性会话 ', h('b', { text: String(overview().sticky_sessions) })) : null,
+    d ? h('span', { class: 'chip faint mono', text: `v${d.version}` }) : null,
+    d ? h('span', { class: 'chip faint mono', text: `运行 ${Math.floor((d.uptime_sec || 0) / 3600)} 时` }) : null,
+  );
+}
+
+function acctsCredit(d) {
+  return d ? (d.accounts || []).reduce((a, s) => a + (s.credits || 0), 0) : 0;
+}
+
 function healthRow(accts) {
   const total = accts.length;
   const healthy = accts.filter(a => !a.disabled && !cooling(a)).length;
@@ -128,6 +145,7 @@ export default defineView({
     const accts = d ? (d.accounts || []) : [];
 
     return h('div', { class: 'view stack' },
+      statusStrip(),   // 清单 48：状态栏信息手机上也看得见（桌面状态栏之外的一处补充）
       d ? healthRow(accts) : h('div', { class: 'tiles' }, tile('—', '账号总数'), tile('—', '可用'), tile('—', '冷却中'), tile('—', '已禁用'), tile('—', '积分'), tile('—', '粘性会话')),
 
       h('section', { class: 'card' },

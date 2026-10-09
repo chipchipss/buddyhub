@@ -636,10 +636,14 @@ export function closeMenu() {
   armFlush();    // 菜单开着时挂起的重绘，此刻补落地
 }
 
-/** openMenu(anchor, items) —— items: [{label, onclick, danger?, tip?, disabled?}] */
+/** openMenu(anchor, items) —— items: [{label, onclick, danger?, tip?, disabled?}]
+ *  手机窄屏（清单 46）菜单改为从底部升起的 sheet：锚点定位在触屏上既难按准，
+ *  也常被键盘/边缘裁掉；底部弹层是拇指活动区的正中。CSS 负责两种形态。 */
 export function openMenu(anchor, items) {
   closeMenu();
-  const panel = h('div', { class: 'menu', role: 'menu' },
+  const mobile = window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
+  const panel = h('div', { class: 'menu' + (mobile ? ' sheet-menu' : ''), role: 'menu' },
+    mobile ? h('div', { class: 'sheet-menu-grip' }) : null,
     ...items.map(it => h('button', {
       class: 'menu-item' + (it.danger ? ' danger' : ''),
       role: 'menuitem',
@@ -649,11 +653,19 @@ export function openMenu(anchor, items) {
     }, h('span', { text: it.label }))),
   );
   const wrap = h('div', {
-    class: 'menu-wrap',
+    class: 'menu-wrap' + (mobile ? ' on' : ''),
     onpointerdown: ev => { if (ev.target === wrap) closeMenu(); },
   }, panel);
   document.body.append(wrap);
   menuEl = wrap;
+
+  if (mobile) {
+    // 底部弹出层：不做锚点定位；Escape/点外面即关
+    const onKey = ev => { if (ev.key === 'Escape') { ev.stopPropagation(); closeMenu(); } };
+    document.addEventListener('keydown', onKey, true);
+    menuOff = () => document.removeEventListener('keydown', onKey, true);
+    return;
+  }
 
   const r = anchor.getBoundingClientRect();
   const pw = panel.offsetWidth || 186, ph = panel.offsetHeight;

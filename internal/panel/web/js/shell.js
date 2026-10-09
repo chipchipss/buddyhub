@@ -141,6 +141,26 @@ function syncRailActive() {
   }
 }
 
+/* ── 底部 tab 栏（手机，清单 45）────────────────────────────────
+   桌面侧栏照旧；窄屏 CSS 把 .rail 整个藏掉、露出这条。挂在 .app 网格
+   第二行，随 viewId 换选中态。 */
+function buildTabbar() {
+  const bar = h('nav', { class: 'tabbar', 'aria-label': '页面导航' });
+  const sync = () => {
+    const cur = viewId.peek();
+    for (const b of bar.children) b.classList.toggle('on', b.dataset.view === cur);
+  };
+  for (const pg of pages.values()) {
+    bar.append(h('button', {
+      dataset: { view: pg.id },
+      onclick: () => navigate(pg.id),
+    }, icon(pg.icon || 'overview'), h('span', { text: pg.title })));
+  }
+  viewId.subscribe(sync);
+  sync();
+  return bar;
+}
+
 /* ── 顶栏 ─────────────────────────────────────────────────────── */
 /* 顶栏只留搜索 + 当前页的主操作（清单 12）：
    「刷新余额」原先在顶栏、批量操作、命令面板出现三次，这里收掉；
@@ -497,6 +517,7 @@ export function startShell() {
       h('main', { class: 'content', id: 'content' }),
     ),
     statusbarEl,
+    buildTabbar(),   // 手机端底部导航；桌面由 CSS 隐藏
   );
   document.body.append(app);
   // 活动栏挂在 shell 上：换页、换分段都不能把正在跑的作业弄丢（清单 14）

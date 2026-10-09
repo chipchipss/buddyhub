@@ -126,6 +126,28 @@
   .input.search { min-width: 0; width: 100%; }
   .searchwrap { flex: 1; }
 }
+/* 手机（清单 46）：行变卡片——每行一块可分离的面，操作收在底部弹出层 */
+@media (max-width: 640px) {
+  .acctrow {
+    position: relative;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "name acts" "st st" "bal bal";
+    background: var(--glass);
+    border: 1px solid var(--edge);
+    border-radius: var(--r);
+    margin-bottom: 8px; padding: 12px 14px;
+    border-bottom: 1px solid var(--edge);   /* 覆盖列表行分隔线 */
+    box-shadow: var(--shadow-sm);
+  }
+  .acctrow.on { border-color: var(--edge-2); background: var(--glass-2); }
+  .acctrow:last-child { border-bottom: 1px solid var(--edge); }
+  .acctrow .cbx { position: absolute; opacity: 0; pointer-events: none; }  /* 卡片上多选交给批量条，勾选框本身没地方放 */
+  .acctrow .name { grid-area: name; }
+  .acctrow .st { grid-area: st; }
+  .acctrow .bal { grid-area: bal; }
+  .acctrow .bal .meter { max-width: 100%; }
+  .cell.acts { grid-area: acts; }
+}
 
 /* ── 添加账号：平台选择列表（先选平台，再出表单）────────────── */
 .addlist { display: flex; flex-direction: column; gap: 2px; }

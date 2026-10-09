@@ -15,6 +15,7 @@
 .rail { grid-row: 1 / 3; min-height: 0; padding: 12px 0 12px 12px; }
 .stage { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .statusbar { grid-column: 2; }
+.tabbar { display: none; }   /* 手机端底部导航（清单 45）：桌面永远不出现 */
 
 /* ── 玻璃基元 ─────────────────────────────────────────────────── */
 .glass {
@@ -465,6 +466,23 @@ input[type="checkbox"] { width: auto; accent-color: var(--fg-2); }
    锚定在触发按钮下方，实底而非玻璃：菜单只有几行，读清楚比融入页面重要。
    进出无动画——它是被点击直接召唤出来的，动画只会让它显得慢。 */
 .menu-wrap { position: fixed; inset: 0; z-index: 65; }
+/* 手机（清单 46）：⋯ 菜单从底部升起成 sheet，锚点定位在触屏上既难按准
+   也常被边缘裁掉。.sheet-menu 覆盖掉锚点定位样式，整宽贴底。 */
+@media (max-width: 640px) {
+  .menu-wrap.on { background: rgba(0, 0, 0, .35); }
+  .menu.sheet-menu {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    width: auto; min-width: 0;
+    padding: 8px 10px calc(10px + env(safe-area-inset-bottom));
+    border-radius: 18px 18px 0 0;
+    border-left: none; border-right: none; border-bottom: none;
+  }
+  .menu.sheet-menu .sheet-menu-grip {
+    width: 34px; height: 4px; border-radius: 2px;
+    background: var(--edge-2); margin: 2px auto 8px;
+  }
+  .menu.sheet-menu .menu-item { padding: 12px 14px; font-size: 14px; }
+}
 .menu {
   position: absolute;
   min-width: 186px; padding: 5px;
@@ -641,39 +659,39 @@ input[type="checkbox"] { width: auto; accent-color: var(--fg-2); }
 .meter > i { display: block; height: 100%; background: var(--fg); border-radius: 3px; transition: width var(--t-slow); }
 .meter.thin { height: 3px; }
 
-/* ── 窄屏：侧栏收成顶部横条 ─────────────────────────────────────
-   手机上纵向空间最贵，把导航压成一条可横滑的玻璃条，
-   内容区拿回全部高度。 */
+/* ── 窄屏：侧栏收成顶部横条 → 底部 tab 栏（清单 45）─────────────
+   手机上拇指能到的是屏幕下缘，顶部横滑条反而够不着、还会被键盘顶走。
+   导航压成固定在底部的 5 个一级页 tab；状态栏整条撤掉（清单 48），
+   同样的信息在首页卡片里。 */
 @media (max-width: 900px) {
   .app {
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr) auto;
   }
-  .rail {
-    grid-row: 1; grid-column: 1;
-    min-width: 0;      /* grid 项的 min-width:auto 让 1fr 列无法收缩到内容宽以下 */
-    padding: max(8px, env(safe-area-inset-top)) 8px 0;
-    position: sticky; top: 0; z-index: 20;
+  .rail { display: none; }              /* 顶部导航条整体退场 */
+  .tabbar {
+    grid-row: 2; grid-column: 1;
+    display: flex; align-items: stretch;
+    padding: 5px 8px max(5px, env(safe-area-inset-bottom));
+    background: var(--sheet);
+    -webkit-backdrop-filter: var(--blur-strong); backdrop-filter: var(--blur-strong);
+    border-top: 1px solid var(--edge);
+    z-index: 25;
   }
-  .stage { grid-row: 2; min-width: 0; }
-  .rail-inner { flex-direction: row; align-items: center; }
-  .brand { padding: 8px 6px 8px 12px; }
-  .brand-text { display: none; }
-  .navlist { display: flex; overflow-x: auto; overflow-y: hidden; padding: 6px;
-    min-width: 0;      /* flex 项的 min-width:auto 会拒绝收缩，把整行撑爆视口 */
-    scrollbar-width: none; }
-  .navlist::-webkit-scrollbar { display: none; }
-  .navgroup { display: none; }
-  .navitem { padding: 8px 13px; flex: none; }
-  .navitem .kbd { display: none; }
-  .rail-foot { display: none; }
-  .stage { grid-row: 2; }
-  .statusbar {
-    grid-row: 3; grid-column: 1;
-    margin: 0 8px max(8px, env(safe-area-inset-bottom)) 8px;
+  .tabbar button {
+    flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
+    padding: 6px 2px; background: none; border: none; border-radius: var(--r-sm);
+    color: var(--fg-3); font: 500 10.5px/1.2 var(--sans); cursor: pointer;
+    -webkit-tap-highlight-color: transparent; touch-action: manipulation;
   }
-  .statusbar .mono { display: none; }
-  .content { padding: 4px 10px 24px; }
+  .tabbar button svg { width: 19px; height: 19px; }
+  .tabbar button.on { color: var(--fg); background: var(--glass-3); }
+  .tabbar button:active { transform: scale(.96); }
+  .statusbar { display: none; }         /* 清单 48：手机上收进首页 */
+  /* 清单 47：手机上没有 ⌘K，搜索入口要看得见、按得到 */
+  .topbar .btn.icon.ghost { width: 40px; height: 40px; }
+  .topbar .btn.icon.ghost svg { width: 19px; height: 19px; }
+  .stage { grid-row: 1; grid-column: 1; min-width: 0; }
   .topbar { padding: 10px 12px; }
   .topbar h1 { font-size: 16px; }
   /* 输入框 ≥16px：iOS 在聚焦小于 16px 的输入框时会自动放大整页 */
