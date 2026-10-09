@@ -449,3 +449,32 @@ details.adv[open] > summary::before { content: '⨼ '; }
   background: var(--fg); margin-right: 6px; vertical-align: 2px;
 }
 .savebar .note.dirty { color: var(--fg); }
+
+/* ── 日志页：五路筛选工具条 / 折叠 / 追新条（清单 40–42）──────────
+   级别行的红：本仓库令牌表刻意单色（tokens.css 头注——状态靠「形」而非
+   「色」，危险既有表达是描边/字重加重而非红色），不新造彩色令牌；
+   错误行 = .ln.strong 再加重字重，是全页对比度与分量的最高一档。 */
+.logbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 16px 0; }
+.fchips + .fchips { margin-top: 2px; }
+.card > .fchips { padding: 10px 16px 0; }
+.logbox .ln.strong { font-weight: 600; }
+/* 行内账号名可点：下划线而非变色——单色系统里「可点」靠形状宣告 */
+.logbox .ln-a {
+  font: inherit; color: var(--fg); background: none; border: none; padding: 0;
+  cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
+  text-decoration-color: var(--edge-2);
+}
+.logbox .ln-a:hover { text-decoration-color: var(--fg); }
+.logbox .ln-x {
+  font: 11px var(--mono); color: var(--fg-3); background: none;
+  border: 1px solid var(--edge); border-radius: var(--pill);
+  padding: 0 8px; margin-left: 6px; cursor: pointer; vertical-align: 1px;
+  transition: color var(--t), border-color var(--t);
+}
+.logbox .ln-x:hover { color: var(--fg-2); border-color: var(--edge-2); }
+/* 追新条（清单 42）：吸底悬浮在日志区下缘，往上翻期间新行只进这里计数 */
+.newlogbar { display: flex; justify-content: center; padding: 0 16px 14px; }
+.newlogbar .btn {
+  box-shadow: var(--shadow-sm); border-radius: var(--pill);
+  background: var(--sheet); border-color: var(--edge-2);
+}

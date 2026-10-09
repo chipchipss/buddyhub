@@ -1164,6 +1164,196 @@ setTimeout(() => process.exit(0), 50);
 	runNodeHarness(t, node, dir, "keys-page.mjs", harness, "KEYS OK", "密钥页的范围单选/一次性卡片不符")
 }
 
+// TestLogsPageRender 执行记录页（清单 40 / 41 / 42）必须画对：五路筛选合成
+// （频道+级别+全文+账号+平台）、错误行走统一分级、长行折叠且展开态扛得过
+// 增量追加与重建、行内账号可跳详情、往上翻后新行只计数并在点「↓ N 条新日志」
+// 后才上屏、「自动滚动」开关不复存在。
+//
+// 为什么需要：日志框是跨渲染复用的命令式增量更新——语法检查与 import 冒烟都
+// 看不见「第 N 次 tick 之后屏上是什么」；把展开态错记到 DOM 节点上、把锚点
+// 追加算错一条、筛选少 AND 一路，都是编译绿而用户翻日志时才发现的错。无 node 时跳过。
+func TestLogsPageRender(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; render check skipped")
+	}
+	dir := copyModules(t)
+
+	harness := wizardBoot(t) + `
+const view = (await import('./views/logs.js')).default;
+
+/* ── fixture：条目形态照后端 ring.go（ts/ch/text，没有结构化账号列）── */
+const A_UID = 'uid-alice-0123456789';           // 前 8 字 = uid-alic，池行写法
+const mk = (min, ch, text) => ({ ts: '2026-10-08T10:' + String(min).padStart(2, '0') + ':00Z', ch, text });
+let LOG = [
+  mk(1, 'task', 'checkin 爱丽丝(uid-alic) 登录失败 error'),
+  mk(2, 'task', 'checkin 爱丽丝(uid-alic) 进入冷却'),
+  mk(3, 'task', 'checkin 爱丽丝(uid-alic) 成功 +50分'),
+  mk(4, 'chat', 'chat uid=' + A_UID + ' model=glm 200'),
+  mk(5, 'sys',  'panel 启动完成'),
+  mk(6, 'sys',  'error: 上游返回体 ' + 'x'.repeat(300) + 'TAILMARK'),
+  mk(7, 'task', 'qoder 签到 acct=q-9 成功'),
+];
+let EXTRA = 0;
+DATA['/api/logs'] = () => ({ ok: true, entries: LOG });
+DATA['/api/overview'] = () => ({ ok: true, accounts: [{ uid: A_UID, nickname: '爱丽丝', credits: 10, credits_total: 100 }] });
+DATA['/api/zai/accounts'] = { ok: true, configured: true, accounts: [] };
+DATA['/api/ext/accounts'] = () => ({ ok: true, accounts: [{ provider: 'qoder', id: 'q-9', label: 'Qoder 主号' }] });
+DATA['/api/usage/series'] = { ok: true, uid: A_UID, days: 7, points: [] };
+
+const mount = document.createElement('div');
+document.body.append(mount);
+let root = null;
+const paint = () => { root = view.render(); mount.replaceChildren(root); };
+const box = () => findByClass(mount, 'logbox');
+const lines = () => findAll(box(), 'ln');
+const lineWith = kw => lines().find(l => l.textContent.includes(kw));
+const btns = () => walk(mount).buttons;
+const segWith = kw => findAll(mount, 'seg').find(s => s.textContent.includes(kw));
+const segBtn = (kw, label) => { const s = segWith(kw); return s ? s.children.find(c => c.textContent.trim() === label) : null; };
+const chipWith = kw => findAll(mount, 'fchip').find(c => c.textContent.includes(kw));
+const qin = () => findByClass(mount, 'search');
+// 信号驱动的部分测试里只能手动补一帧：渲染 → 微任务 syncBox → 再渲染
+const settle = async (n = 2) => { for (let i = 0; i < n; i++) { paint(); await tick(10); } };
+
+paint();                          // 第一帧：拉日志 + 注册表 + 三个账号源
+await tick(60);
+await settle(3);
+
+/* ── 1. 自动滚动开关已消失；行样式与级别同源（统一分级器）──────── */
+if (btns().some(b => b.includes('自动滚动'))) bad('清单 42：「自动滚动」开关没删掉：' + btns().join('/'));
+if (lines().length !== 7) bad('初始应有 7 行，实有 ' + lines().length);
+const errLn = lineWith('登录失败');
+if (!errLn) bad('看不到那条失败行');
+// 本仓库令牌表刻意单色（tokens.css：状态靠「形」而非「色」，没有红色令牌可指认），
+// 「标红」落成的就是这条统一分级 class——样式与筛选共用同一个 levelOf，测它。
+else if (!String(errLn.className).split(' ').includes('strong')) bad('错误行没走统一分级的强调态（.strong）：' + errLn.className);
+const warnLn = lineWith('进入冷却');
+if (!warnLn || !String(warnLn.className).split(' ').includes('dim')) bad('冷却行没标成警示态（.dim）');
+
+/* ── 2. 五路合成：频道 AND 级别 AND 全文 AND 账号 ──────────────── */
+await click(segBtn('对话', '任务'), '频道=任务');          await settle();
+if (lines().length !== 4) bad('频道=任务应筛出 4 行，实有 ' + lines().length);
+await click(segBtn('只看错误', '只看错误'), '级别=错误');  await settle();
+if (lines().length !== 1 || !lines()[0].textContent.includes('登录失败')) {
+  bad('频道+级别合成后应只剩登录失败那行：' + lines().map(l => l.textContent.trim()).join(' / '));
+}
+qin().value = '登录'; fire(qin(), 'input');
+await tick(10);                                             // oninput 自己排了增量同步
+await settle();
+if (lines().length !== 1) bad('叠加全文搜索后应仍是 1 行');
+const ac = chipWith('爱丽丝');
+if (!ac) bad('账号筛选没给「爱丽丝」（她的 uid 明明在行里）：' + findAll(mount, 'fchip').map(c => c.textContent).join('/'));
+else { await click(ac, '账号=爱丽丝'); await settle(); }
+if (lines().length !== 1) bad('四路合成后应剩 1 行，实有 ' + lines().length);
+if (!root.textContent.includes('命中 1 / 7 条')) bad('结果计数不对：' + ((findByClass(root, 'muted') || {}).textContent || ''));
+
+/* ── 3. 空状态点名是哪几路排除了全部 ──────────────────────────── */
+qin().value = 'zzz没有这个词'; fire(qin(), 'input');
+await tick(10);
+const em = findByClass(box(), 'empty');
+if (!em) bad('筛到零结果时没有空状态');
+else {
+  const et = em.textContent;
+  for (const k of ['搜索', '只看错误', '频道', '爱丽丝']) {
+    if (!et.includes(k)) bad('空状态没说清是哪一路排除了全部（缺「' + k + '」）：' + et.slice(0, 80));
+  }
+  const cb = findButton(em, '清除筛选');
+  if (!cb) bad('空状态没给「清除筛选」出口');
+  else { await click(cb, '清除筛选'); await settle(); }
+}
+if (lines().length !== 7) bad('清除筛选后应回到 7 行，实有 ' + lines().length);
+
+/* ── 4. 平台 chip 只给出现过的，并能筛 ────────────────────────── */
+const pc = chipWith('Qoder');
+if (!pc) bad('平台筛选没给 Qoder（acct=q-9 明明出现过）：' + findAll(mount, 'fchip').map(c => c.textContent).join('/'));
+else { await click(pc, '平台=Qoder'); await settle(); }
+if (lines().length !== 1 || !lines()[0].textContent.includes('acct=q-9')) {
+  bad('按平台筛选后应只剩 qoder 那行，实有 ' + lines().map(l => l.textContent.trim()).join(' / '));
+}
+await click(chipWith('Qoder'), '再点取消平台筛选'); await settle();
+if (lines().length !== 7) bad('取消平台筛选后没回到 7 行');
+
+/* ── 5. 长行折叠：展开后扛得过增量追加，也扛得过整体重建 ──────── */
+const longLn = lineWith('上游返回体');
+if (!longLn) bad('找不到那条超长行');
+else {
+  if (longLn.textContent.includes('TAILMARK')) bad('长行没默认折叠（240 字阈值形同虚设）');
+  if (!longLn.textContent.includes('error:')) bad('折叠保留的该是行首：' + longLn.textContent.slice(0, 40));
+  const xb = findButton(longLn, '展开');
+  if (!xb) bad('折叠行上没有「展开」入口：' + walk(longLn).buttons.join('/'));
+  else {
+    await click(xb, '展开');
+    if (!longLn.textContent.includes('TAILMARK')) bad('展开后没给出完整长行');
+    if (!findButton(longLn, '收起')) bad('展开后没给「收起」');
+  }
+}
+LOG.push(mk(8, 'sys', 'keepalive 心跳 ' + (++EXTRA)));       // 5 秒 tick：走追加路
+view.tick(); await tick(20);
+await settle();
+if (!lineWith('上游返回体') || !lineWith('上游返回体').textContent.includes('TAILMARK')) {
+  bad('展开态没扛过增量追加——折叠态必须记在条目指纹上而不是 DOM 节点上');
+}
+await click(segBtn('对话', '任务'), '频道=任务'); await settle();   // 强制整表重建
+await click(segBtn('对话', '全部'), '频道=全部'); await settle();
+const long2 = lineWith('上游返回体');
+if (!long2 || !long2.textContent.includes('TAILMARK')) bad('展开态没扛过整体重建');
+
+/* ── 6. 行内账号名可点 → 详情抽屉；认不出账号的行不给死目标 ──── */
+const chatLn = lineWith('model=glm 200');
+const aBtn = chatLn && findByClass(chatLn, 'ln-a');
+if (!aBtn) bad('行内 uid 没变成可点的账号名');
+else {
+  await click(aBtn, '账号跳转');
+  const dr = drawerEl();
+  const dt = dr ? (((qsel(dr, 'h2') || {}).textContent) || '') : '';
+  if (dt !== '爱丽丝') bad('点行内账号没打开「爱丽丝」的详情抽屉，抽屉标题：「' + dt + '」');
+}
+if (findByClass(lineWith('panel 启动完成'), 'ln-a')) bad('认不出账号的行也给了可点目标（死链接）');
+
+/* ── 7. 往上翻：新行不上屏只计数；点「↓ N 条新日志」才补 ─────── */
+const b = box();
+b.scrollHeight = 600; b.clientHeight = 300;
+b.scrollTop = 0; fire(b, 'scroll');
+LOG.push(mk(9, 'sys', 'balance 查询 ' + (++EXTRA)));
+view.tick(); await tick(20);
+await settle(3);
+// 此刻 LOG 有 9 条（第 5 节追加过一条），屏上该停在 8 行
+if (lines().length !== 8) bad('往上翻时新行不该上屏（应还是 8 行），实有 ' + lines().length);
+const bar = findByClass(mount, 'newlogbar');
+if (!bar) bad('往上翻后没有「↓ N 条新日志」的追新条');
+else if (!bar.textContent.includes('↓ 1 条新日志')) bad('追新条计数不对：' + bar.textContent);
+await click(findButton(bar, '条新日志'), '追新');
+if (lines().length !== 9) bad('点追新条没把欠着的行补上屏，实有 ' + lines().length);
+if (b.scrollTop !== 600) bad('补行后没跳到最新（scrollTop=' + b.scrollTop + '）');
+await settle();
+if (findByClass(mount, 'newlogbar')) bad('补完后追新条没收起');
+
+/* ── 8. 滚回底部：恢复贴底、清零，之后的新行直接上屏 ─────────── */
+b.scrollTop = 0; fire(b, 'scroll');
+LOG.push(mk(10, 'sys', 'activity 领奖 ' + (++EXTRA)));
+view.tick(); await tick(20);
+await settle(3);
+if (!findByClass(mount, 'newlogbar')) bad('又往上翻时新行该只计数，没出追新条');
+b.scrollTop = 600; fire(b, 'scroll');        // 滚回底部 = 立刻补行并清零
+await tick(10);
+paint(); await tick(10);
+if (findByClass(mount, 'newlogbar')) bad('滚回底部后追新条没消失（计数没清零）');
+if (lines().length !== 10) bad('滚回底部没把欠着的行补上屏，实有 ' + lines().length);
+LOG.push(mk(11, 'sys', 'panel 巡检 ' + (++EXTRA)));
+view.tick(); await tick(20);
+await settle();
+if (findByClass(mount, 'newlogbar')) bad('贴底时新行该直接上屏，不该再出计数条');
+if (!lines().some(l => l.textContent.includes('panel 巡检'))) bad('贴底时新行没自动上屏');
+
+if (problems.length) { console.error(problems.join('\n')); process.exit(1); }
+console.log('LOGS OK');
+// 抽屉弹簧与追新计时都带着无 ref 的定时器；先落 stdout 再主动退出。
+setTimeout(() => process.exit(0), 50);
+`
+	runNodeHarness(t, node, dir, "logs-page.mjs", harness, "LOGS OK", "执行记录页的筛选/折叠/追新不符")
+}
+
 // TestAddWizardSingleEntry 「两个入口合一」（清单 20）的源码级不变量：
 // 添加账号只剩向导这一条路，旧抽屉里那份表单、ext-add 里那个平台下拉都不许复活
 // ——同一件事画两遍，措辞一定会漂，而用户会以为是两个不同的功能。
