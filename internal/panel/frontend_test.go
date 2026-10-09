@@ -680,6 +680,152 @@ setTimeout(() => process.exit(0), 50);
 	runNodeHarness(t, node, dir, "wizard-login.mjs", harness, "LOGIN OK", "添加向导的登录收尾不符")
 }
 
+// TestTasksPageRender 「任务」页这一屏必须画对（清单 25 / 26 / 27 / 29）：
+// 两条动作合一成「检查并执行」，确认框里说的是将要做什么而不是「确定吗」，
+// 并发档位带着「同时跑」的说明，排程开口是时间线而不是空白台账，季节性文案消失。
+//
+// 为什么需要：这一页全是命令式建树 + 异步队列，语法检查与 import 冒烟都只证明
+// 「能加载」；把两个按钮合并成一个时漏掉某条路径、确认框回退成通用文案、时间线
+// 拿不到 next_fire 时整格空白，都是编译绿而用户第一天就看见的错。无 node 时跳过。
+func TestTasksPageRender(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; render check skipped")
+	}
+	dir := copyModules(t)
+
+	harness := wizardBoot(t) + `
+const view = (await import('./views/tasks.js')).default;
+// 平台名来自后端注册表（boot.js 在真实面板里负责先加载它），不加载就只能显示裸 id
+const { loadPlatforms } = await import('./platforms.js');
+await loadPlatforms();
+const pageEl = () => document.body;
+const allTxt = () => document.body.textContent;
+const btnTxts = () => walk(document.body).buttons;
+const hasTxt = s => allTxt().includes(s);
+
+/* ── 1. 待办那一屏：一条动作、一个说明清楚的并发档 ────────────── */
+DATA['/api/tasks/queue'] = { ok: true, started: false };
+DATA['/api/loomy/status'] = { ok: true, has_account: false };
+DATA['/api/task_report'] = { ok: true, day_done: 0, rounds: [], pending: [] };
+let root = view.render();
+document.body.append(root);
+await tick();
+
+if (!hasTxt('检查并执行')) bad('没有「检查并执行」（清单 25：扫描与执行合一）：' + btnTxts().join('/'));
+for (const dead of ['扫描待办', '执行全部待办']) {
+  if (btnTxts().some(b => b.includes(dead))) bad('旧的两条动作还留着按钮：' + dead);
+}
+if (hasTxt('开学季')) bad('页面上还有季节性文案「开学季」（清单 29）');
+const tabBar = findAll(document.body, 'seg')[0];
+const tabs = tabBar ? walk(tabBar).buttons : [];
+if (tabs.join('/') !== '今日待办/排程台账') bad('任务页还按平台分 tab（清单 28），实为：' + tabs.join('/'));
+if (!hasTxt('同时跑')) bad('并发档没标「同时跑」（清单 26：并发是实现词）');
+if (hasTxt('并发')) bad('界面上还在用「并发」这个词：' + allTxt().slice(0, 60));
+const concWrap = findAll(document.body, 'seg').find(s => s.textContent.includes('同时跑'));
+const concOpts = concWrap ? walk(concWrap).buttons : [];
+if (concOpts.join('/') !== '1/2/3') bad('并发档应只剩 1/2/3 三个数字，实为 ' + concOpts.join('/'));
+
+/* ── 2. 点「检查并执行」：先扫、把清单给人看过、确认后才排队 ───── */
+let scans = 0;
+DATA['/api/tasks/scan_all'] = () => {
+  scans++;
+  return { ok: true,
+    accounts: [
+      { uid: 'u1', nickname: '甲', growth: [
+        { task_code: 'chat_5', title: '对话 5 次', target: 5, current: 0 },
+        { task_code: 'first_buddy', title: '首次对话' }] },
+      { uid: 'u2', nickname: '乙', growth: [{ task_code: 'chat_5', title: '对话 5 次', target: 5, current: 2 }] },
+    ],
+    ext: [{ provider: 'raccoon', id: 'r1', label: '小浣熊' }] };
+};
+let runs = 0, runBody = '';
+DATA['/api/tasks/run_queue'] = (u, o) => { runs++; runBody = String((o && o.body) || ''); return { ok: true, started: true, total: 4, seq: 7 }; };
+
+root = view.render();
+document.body.append(root);
+// 「检查并执行」的处理器会停在 confirm 那一步等用户回话，所以不能用会 await
+// 处理器的 click 助手（那是等一个永远不 resolve 的 promise）——直接触发，再等宏任务。
+const goBtn = findButton(root, '检查并执行');
+if (!goBtn) bad('点不到「检查并执行」按钮：' + btnTxts().join('/'));
+else fire(goBtn, 'click');   // 不 await：处理器正等着确认框回话，await 会永远挂着
+await tick(40);
+if (scans !== 1) bad('点一次「检查并执行」应扫一次，实为 ' + scans);
+const sheet = findByClass(document.body, 'sheet');
+if (!sheet) bad('检查完没把清单交给用户确认（没有确认框）');
+else {
+  const msg = ((findByClass(sheet, 'hint') || {}).textContent) || '';
+  if (!msg.includes('共 4 项待办')) bad('确认框没说清共几项：' + msg);
+  if (!msg.includes('成长任务 3 项')) bad('确认框没按类型报数（成长）：' + msg);
+  if (!msg.includes('外部平台签到/领奖 1 项')) bad('确认框没按类型报数（签到）：' + msg);
+  if (!msg.includes('同时跑 1 个')) bad('确认框没说什么并发：' + msg);
+  if (msg.includes('确定吗')) bad('确认框回退成了通用措辞：' + msg);
+
+  /* 清单 28：待办清单的主轴是任务类型，不是平台 —— 确认之前就该按类型分组画出来 */
+  const g1 = view.render();
+  document.body.append(g1);
+  const heads = findAll(g1, 'qgroup').map(gr => ((findByClass(gr, 'nm') || {}).textContent) || '');
+  if (!heads.includes('成长任务')) bad('待办没按任务类型分组（缺「成长任务」那一组）：' + heads.join(' / '));
+  if (!heads.includes('每日签到 / 领奖')) bad('待办没按任务类型分组（缺「每日签到」那一组）：' + heads.join(' / '));
+  if (heads.some(hh => hh === '甲' || hh === '乙')) bad('还在按账号/平台分组：' + heads.join(' / '));
+  const rowTxt = findAll(g1, 'qrow').map(r => r.textContent);
+  if (!rowTxt.some(t => t.includes('甲'))) bad('行上没有账号名（分组换成类型后，账号只能靠标签认）：' + rowTxt[0]);
+  if (!rowTxt.some(t => t.includes('小浣熊'))) bad('外部平台那行没带账号标签：' + rowTxt.join('/'));
+  const chips = findAll(g1, 'chip').map(c => c.textContent);
+  if (!chips.includes('全部平台')) bad('平台筛选没出现（有两个以上平台时该给筛选条）：' + chips.join('/'));
+  // 只点筛选条上那些带 click 的 chip（行内的平台标签是同一形状，但没有处理器）
+  const fChip = findAll(g1, 'chip').find(c => (c.listeners.click || []).length && c.textContent.includes('小浣熊'));
+  if (!fChip) bad('平台筛选条里没有「小浣熊」这一档');
+  else {
+    fire(fChip, 'click');
+    await tick();
+    const g2 = view.render();
+    document.body.append(g2);
+    const h2 = findAll(g2, 'qgroup').map(gr => ((findByClass(gr, 'nm') || {}).textContent) || '');
+    if (h2.includes('成长任务')) bad('筛到小浣熊后还留着成长任务那一组（平台筛选没生效）：' + h2.join('/'));
+    if (!h2.includes('每日签到 / 领奖')) bad('筛到小浣熊后签到组没了：' + h2.join('/'));
+  }
+
+  await click(findButton(sheet, '排队执行'), '排队执行');
+  await tick(30);
+}
+if (runs !== 1) bad('确认后没把队列发出去（run_queue 调用 ' + runs + ' 次）');
+if (!/"concurrency":1/.test(runBody)) bad('执行请求没带并发档：' + runBody);
+if (findAll(document.body, 'sheet').length > 1) bad('一次动作问了不止一遍（叠了第二个确认框）');
+if (!hasTxt('券码')) bad('活动券码入口丢了');
+
+/* ── 3. 排程那一屏：开口是时间线，没台账也不空白 ──────────────── */
+const NEXT = Date.now() + 3600 * 1000;
+DATA['/api/task_report'] = { ok: true, day_done: 3, next_fire: NEXT, next_kinds: ['签到', '成长任务'],
+  rounds: [], pending: [{ task: 'chat_5', uids: ['u1'], tries: 1, next_at: '12:00' }] };
+location.hash = '#tasks?tab=sched';
+root = view.render();
+document.body.append(root);
+await click(findButton(root, '刷新'), '刷新台账');   // 台账数据是异步回来的，先让它落进信号
+await tick(20);
+root = view.render();
+document.body.append(root);
+const schedTxt = () => root.textContent;
+for (const k of ['今天', '现在', '下一次']) if (!schedTxt().includes(k)) bad('排程时间线缺「' + k + '」那一格：' + schedTxt().slice(0, 80));
+if (!schedTxt().includes('待补跑')) bad('待补跑（退避重试）的条目没画出来');
+if (schedTxt().includes('暂无台账')) bad('有台账数据却还显示「暂无台账」');
+
+DATA['/api/task_report'] = { ok: true, day_done: 0, rounds: [], pending: [] };
+await click(findButton(root, '刷新'), '刷新空台账');
+await tick(20);
+location.hash = '#tasks?tab=sched';
+root = view.render();
+document.body.append(root);
+if (!root.textContent.includes('未排程')) bad('排程没启用时「下一次」那一格什么都没写（清单 27 要的是不空白）：' + root.textContent.slice(0, 60));
+if (root.textContent.includes('暂无台账') === false && !root.textContent.includes('今天')) bad('排程一屏开口不是时间线');
+
+if (problems.length) { console.error(problems.join('\n')); process.exit(1); }
+console.log('TASKS OK');
+setTimeout(() => process.exit(0), 50);
+`
+	runNodeHarness(t, node, dir, "tasks-page.mjs", harness, "TASKS OK", "任务页的合一动作与时间线不符")
+}
+
 // TestAddWizardSingleEntry 「两个入口合一」（清单 20）的源码级不变量：
 // 添加账号只剩向导这一条路，旧抽屉里那份表单、ext-add 里那个平台下拉都不许复活
 // ——同一件事画两遍，措辞一定会漂，而用户会以为是两个不同的功能。

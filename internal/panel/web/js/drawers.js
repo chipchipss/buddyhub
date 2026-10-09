@@ -1,6 +1,6 @@
 /* ══════════════════════════════════════════════════════════════════
    drawers.js · 通用抽屉件
-   开学季券码（含离线二维码）。
+   活动券码抽屉（含离线二维码）。
 
    「添加账号」不在这里了 —— 它是四步向导，有自己的状态机与进度，
    见 addwizard.js（清单 20：两个入口合一）。
@@ -14,7 +14,7 @@ import { qrMatrix, qrSVG } from './qr.js';
 export function openVouchers() {
   const body = h('div', { class: 'stack' }, h('div', { class: 'busy', text: '查询券码' }));
   openDrawer({
-    title: '开学季 · 我的券码',
+    title: '活动券码',
     hint: '抽奖抽中的第三方券（KFC / 瑞幸 / 酷狗等），到对应 App 或小程序兑换',
     body,
     footer: h('div', { class: 'row', style: { width: '100%' } },

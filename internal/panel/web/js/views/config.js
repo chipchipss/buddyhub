@@ -31,7 +31,7 @@ const FIELDS = [
     { n: 'balance_refresh_enabled', p: ['schedule', 'balance_refresh_enabled'], l: '后台刷新余额', sw: true },
     { n: 'balance_refresh_minutes', p: ['schedule', 'balance_refresh_minutes'], l: '刷新间隔（分钟）', type: 'number', min: 1, ph: '5' },
     { n: 'growth_enabled', p: ['schedule', 'growth_enabled'], l: '成长任务自动执行', sw: true },
-    { n: 'growth_hours', p: ['schedule', 'growth_hours'], l: '执行时点（小时）', ph: '1', hours: true, tip: '每日到点自动「扫描 + 执行全部待办」' },
+    { n: 'growth_hours', p: ['schedule', 'growth_hours'], l: '执行时点（小时）', ph: '1', hours: true, tip: '每日到点自动「检查并执行」待办' },
   ] },
   { group: '账号池与流量治理', cols: 3, items: [
     { n: 'max_in_flight', p: ['pool', 'max_in_flight'], l: '单账号最大在途', type: 'number', min: 0, ph: '3', tip: '0 = 不限制' },
