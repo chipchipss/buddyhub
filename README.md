@@ -761,25 +761,25 @@ docker compose restart          # 重启
 docker compose down             # 停止并移除容器（数据在 ./auths 与 ./data，不受影响）
 ```
 
-#### 本机要和默认不一样：写 override，不要在部署机上背一个本地 commit
+#### 本机要和默认不一样：端口绑定走 `.env`，追加型差异才写 override
 
-想改端口绑定（比如只绑回环：`127.0.0.1:7863:7863`）、挂外部网络、换卷路径，都在**同目录**建
-`docker-compose.override.yml` —— `docker compose` 会自动读它，而它已被 `.gitignore` 排除，
-所以部署机可以永远保持 `git reset --hard origin/main` 一句流，没有本地 commit，也就没有
-「上游改了 compose 我 cherry-pick 必冲突」这回事。
+**端口绑定地址一律走 `.env`**（compose base 已把它参数化，见 `docker-compose.yml` 的
+`ports:` 行）。原因：`ports` 这类列表在 override 下是 **union 合并**——override 里写
+`127.0.0.1:7863:7863` **摘不掉** base 的 `0.0.0.0:7863` 条目，结果是两条并存、端口照样
+暴露到公网（compose 5.5.1 实测如此）。想「只绑回环」，在 `.env` 里写一行即可（`.env`
+已被 `.gitignore` 收编，README 有提）：
 
-```yaml
-# docker-compose.override.yml —— 本机专属，不进 git
-services:
-  buddyhub:
-    ports:
-      - "127.0.0.1:7863:7863"
+```dotenv
+BUDYHUB_BIND=127.0.0.1
 ```
 
-> **别凭记忆猜 compose 的合并语义**：`ports` / `volumes` 这类列表字段在 override 下究竟是整段
-> 替换还是按 target 归并合并，版本之间变过。用渲染结果自查，一秒出真相：
-> `docker compose config | grep -A4 'ports:'` —— 看到几条、绑到哪个地址，就是实际生效的。
-> 想要**确定只有一条**，就在 override 里把整个 `ports` 列表重写完整（而不是只加一条）。
+不写这行就是默认 `0.0.0.0`，与历史上裸写 `7863:7863` 完全等效。改完自查渲染结果：
+`docker compose config | grep -A4 'ports:'` —— 看到几条、绑到哪个地址，就是实际生效的。
+
+挂外部网络、换卷路径这类**追加型**差异仍然用 `docker-compose.override.yml`（compose
+自动读它，它也被 `.gitignore` 排除）——union 语义对追加正好是想要的效果。部署机可以永远
+保持 `git reset --hard origin/main` 一句流，没有本地 commit，也就没有「上游改了 compose
+我 cherry-pick 必冲突」这回事。
 
 ### 方式二：Windows 单文件运行（无需 Docker）
 
@@ -1436,7 +1436,7 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 ### 2. 网络暴露与日志敏感度
 
-- **默认监听 `:7863`（所有网卡）**，compose 暴露 `0.0.0.0:7863`，**无内置 TLS**；公网部署必须设置 `api_key`，建议前置反代 / 内网
+- **默认监听 `:7863`（所有网卡）**，compose 暴露 `0.0.0.0:7863`（`.env` 写 `BUDYHUB_BIND=127.0.0.1` 可改回环，见「方式一」小节），**无内置 TLS**；公网部署必须设置 `api_key`，建议前置反代 / 内网
 - **`api_key` 为空 = 不鉴权**（不是「随机密钥」）：`api_key` 与 `api_keys` 都留空且监听地址是公网可达时，
   任何能连到该端口的人都能调用池里全部账号，网关启动会打一条 warn 提醒；要么设密钥，要么改监听 `127.0.0.1:7863`。
   从 `config.example.json` 复制出来的 `test_key` 是公开仓库里看得到的占位符，首启会自动换成随机 `sk-…` 并写回配置文件

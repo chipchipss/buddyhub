@@ -13,8 +13,10 @@ services:
     user: "${PUID:-10001}:${PGID:-10001}"
     environment:
       - TZ=Asia/Shanghai
+    # 端口绑定地址可参数化：.env 写 BUDYHUB_BIND=127.0.0.1 即只绑回环。
+    # 默认 0.0.0.0 ≡ 裸写 "7863:7863"，存量部署零感知。
     ports:
-      - "7863:7863"
+      - "${BUDYHUB_BIND:-0.0.0.0}:7863:7863"
     volumes:
       - ./auths:/app/auths
       - ./data:/app/data
