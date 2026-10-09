@@ -160,7 +160,7 @@ const FORMS = {
   },
   marvis: {
     fields: [
-      { k: 'access_token', label: 'Ual-Access-Access-Token（mv_ token）', required: true },
+      { k: 'access_token', label: 'Ual-Access-Access-Token', required: true },
       { k: 'openid', label: 'Ual-Access-Openid', required: true },
       { k: 'device_guid', label: 'Ual-Access-Guid（设备 GUID）', required: true },
       { k: 'login_type', label: 'Ual-Access-Login-Type（如 6）' },
@@ -523,7 +523,7 @@ export function extAddPanel(onAdded, opts = {}) {
     host.replaceChildren(
       h('div', { class: 'url-box', text: url }),
       h('div', { class: 'row wrap', style: { gap: '8px' } },
-        h('button', { class: 'btn sm primary', onclick: () => window.open(url, '_blank') }, '在浏览器打开'),
+        h('button', { class: 'btn sm', onclick: () => window.open(url, '_blank') }, '在浏览器打开'),
       ),
     );
   }

@@ -473,7 +473,7 @@ function tasksPane() {
       }, '全部接受'),
       h('button', { class: 'btn sm ghost', onclick: () => loadTasks(false) }, '重新查询'),
       h('button', {
-        class: 'btn sm primary', onclick: async ev => {
+        class: 'btn sm', onclick: async ev => {
           if (!await confirmDialog('将依次执行：补报对话事件、领取 Buddy、glm-5.2 对话、尝试上报。过程约 1-2 分钟（含真实对话）。', { ok: '开始执行' })) return;
           ev.currentTarget.disabled = true;
           try {

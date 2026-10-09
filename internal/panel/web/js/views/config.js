@@ -485,6 +485,15 @@ function appearance() {
   );
 }
 
+/* 清单 51：命令面板搜配置项。navigate('config', section) 用 group 名当段 id。 */
+export function paletteItems() {
+  return FIELDS.flatMap(g => g.items.map(it => ({
+    label: it.l + ' · ' + g.group,
+    section: g.group,
+    keywords: (it.l + ' ' + it.n + ' ' + it.p.join('.') + ' ' + (it.tip || '') + ' ' + g.group).toLowerCase(),
+  })));
+}
+
 export default defineView({
   id: 'config',
   page: 'settings',
@@ -523,7 +532,7 @@ export default defineView({
 
     barEl = h('span', { class: 'note' });
     const restartBtn = justSaved.peek().length
-      ? h('button', { class: 'btn primary', type: 'button', onclick: doRestart }, icon('refresh'), '立即重启')
+      ? h('button', { class: 'btn', type: 'button', onclick: doRestart }, icon('refresh'), '立即重启')
       : null;
 
     const form = h('form', { class: 'view stack', onsubmit: save },

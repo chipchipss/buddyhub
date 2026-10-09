@@ -161,7 +161,7 @@ export function zaiAddForm(onAdded, opts = {}) {
                 try { await copyText(f.url); toast('链接已复制'); } catch { toast('复制失败', 'fail'); }
               },
             }, icon('copy'), '复制链接'),
-            h('button', { class: 'btn sm primary', onclick: () => window.open(f.url, '_blank') }, '在浏览器打开'),
+            h('button', { class: 'btn sm', onclick: () => window.open(f.url, '_blank') }, '在浏览器打开'),
             h('button', { class: 'btn sm ghost', onclick: () => { stopOAuthPoll(); oauth.set(null); paintFlow(); } }, '取消'),
           ),
           h('div', { class: 'busy', text: f.status }),

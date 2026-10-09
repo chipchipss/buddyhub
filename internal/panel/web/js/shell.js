@@ -5,9 +5,10 @@
    视图只需实现 render()，返回一个 DOM 节点；依赖的信号变化时框架自动重建。
    ══════════════════════════════════════════════════════════════════ */
 
-import { h, icon, signal, effect, api, toast, closeDrawer, ensureLayers } from './kernel.js';
+import { h, icon, signal, effect, api, toast, closeDrawer, openDrawer, ensureLayers } from './kernel.js';
 import { overview, viewId, applyTheme, theme, toggleTheme, refreshOverview, lastSync } from './store.js';
 import { mountActivityBar } from './jobs.js';
+import { openAccountDetail } from './views/account-detail.js';
 
 /* ── 导航模型：一级页 + 页内分段 ─────────────────────────────────
    面板原先 8 个导航并列，混了对象（账号/密钥/模型）、动作（任务/日志）、
@@ -400,9 +401,9 @@ function renderRoute() {
 
 /* ── 命令面板（⌘K）────────────────────────────────────────────── */
 let paletteEl = null, paletteInput = null, paletteResults = null;
-let paletteItems = [], paletteSel = 0;
+let paletteItems = [], paletteSel = 0, paletteSeq = 0;
 
-function paletteCommands() {
+async function paletteCommands() {
   const cmds = [];
   for (const pg of pages.values()) {
     if (pg.sections.length > 1) {
@@ -440,6 +441,42 @@ function paletteCommands() {
   for (const [label, ic, run] of acts) {
     cmds.push({ label, kind: '动作', icon: ic, keywords: label.toLowerCase(), run });
   }
+  /* 清单 51：面板不止搜页面名——账号、模型、配置项也搜得到、跳得过去。
+     账号来自三源行模型，模型来自已加载的清单（没加载过就不给假数据），
+     配置项来自配置页的 FIELDS 表（懒加载：首次搜配置才 import）。 */
+  try {
+    const { buildRows } = await import('./rows.js');
+    const { overview } = await import('./store.js');
+    const { zaiData } = await import('./views/zai-segment.js');
+    const { extData } = await import('./views/ext-segment.js');
+    for (const r of buildRows(overview()?.accounts, zaiData()?.accounts, extData()?.accounts)) {
+      cmds.push({
+        label: r.name, kind: '账号', icon: 'accounts',
+        keywords: (r.name + ' ' + r.id + ' ' + r.platformLabel).toLowerCase(),
+        run: () => { navigate('accounts'); openAccountDetail(r); },
+      });
+    }
+  } catch { /* rows 不可用时面板退回只搜页面与动作 */ }
+  try {
+    const mod = await import('./views/models.js');
+    if (typeof mod.paletteItems === 'function') {
+      for (const m of mod.paletteItems()) {
+        cmds.push({
+          label: m.label, kind: '模型', icon: 'models',
+          keywords: m.keywords,
+          run: () => { navigate('models'); navigator.clipboard?.writeText(m.id).catch(() => {}); toast('已复制 ' + m.id); },
+        });
+      }
+    }
+  } catch { /* 同上 */ }
+  try {
+    const cfg = await import('./views/config.js');
+    if (typeof cfg.paletteItems === 'function') {
+      for (const f of cfg.paletteItems()) {
+        cmds.push({ label: f.label, kind: '配置', icon: 'config', keywords: f.keywords, run: () => navigate('config', f.section) });
+      }
+    }
+  } catch { /* 同上 */ }
   return cmds;
 }
 
@@ -480,10 +517,13 @@ function buildPalette() {
 
 function renderPalette(q) {
   const query = q.trim().toLowerCase();
-  const all = paletteCommands();
-  paletteItems = query ? all.filter(c => c.keywords.includes(query) || c.label.toLowerCase().includes(query)) : all;
-  paletteSel = 0;
-  paintPalette();
+  const seq = ++paletteSeq;
+  paletteCommands().then(all => {
+    if (seq !== paletteSeq) return; // 输入还在变：旧结果作废，避免慢 import 的结果覆盖新词
+    paletteItems = query ? all.filter(c => c.keywords.includes(query) || c.label.toLowerCase().includes(query)) : all;
+    paletteSel = 0;
+    paintPalette();
+  });
 }
 
 function paintPalette() {
@@ -491,13 +531,20 @@ function paintPalette() {
     paletteResults.replaceChildren(h('div', { class: 'empty', text: '没有匹配项' }));
     return;
   }
-  paletteResults.replaceChildren(...paletteItems.map((c, i) =>
-    h('div', {
+  const parts = [];
+  let lastKind = '';
+  paletteItems.forEach((c, i) => {
+    if (c.kind !== lastKind) { // 清单 51：按类别给标题行，账号/模型/配置不再混成一锅
+      lastKind = c.kind;
+      parts.push(h('div', { class: 'group', text: c.kind }));
+    }
+    parts.push(h('div', {
       class: 'item' + (i === paletteSel ? ' sel' : ''),
       onmouseenter: () => { paletteSel = i; paintPalette(); },
       onclick: () => { closePalette(); c.run(); },
-    }, icon(c.icon), h('span', { text: c.label }), h('span', { class: 'kind', text: c.kind })),
-  ));
+    }, icon(c.icon), h('span', { text: c.label }), h('span', { class: 'kind', text: c.kind })));
+  });
+  paletteResults.replaceChildren(...parts);
 }
 
 /* ── 启动壳层 ─────────────────────────────────────────────────── */
@@ -534,11 +581,50 @@ export function startShell() {
   // 返回/前进：pushState 不触发 hashchange，得单独接 popstate。
   addEventListener('popstate', applyHash);
 
+  /* 清单 52：键盘直达。g 是前缀键（g a→账号、g g→总览…），j/k 在列表页滚动，
+     / 开面板，? 弹快捷键表。输入框聚焦时全部让路。 */
+  let gPending = false;
   addEventListener('keydown', ev => {
     const meta = ev.metaKey || ev.ctrlKey;
     if (meta && ev.key.toLowerCase() === 'k') { ev.preventDefault(); openPalette(); return; }
-    if (ev.key === 'Escape') { closePalette(); closeDrawer(); }
+    if (ev.key === 'Escape') { closePalette(); closeDrawer(); gPending = false; return; }
+    if (ev.altKey || meta || ev.ctrlKey) return;
+    const t = ev.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable || t.tagName === 'SELECT')) { gPending = false; return; }
+    if (gPending) {
+      gPending = false;
+      const dest = { a: 'accounts', g: 'overview', t: 'tasks', k: 'keys', l: 'logs', m: 'gateway', c: 'settings' }[ev.key.toLowerCase()];
+      if (dest) { ev.preventDefault(); navigate(dest); return; }
+      return;
+    }
+    const k = ev.key.toLowerCase();
+    if (k === 'g') { gPending = true; return; }
+    if (k === '/') { ev.preventDefault(); openPalette(); return; }
+    if (k === '?') { ev.preventDefault(); openShortcutSheet(); return; }
+    if (k === 'j' || k === 'k') {
+      // 真正的滚动容器是 .content（.view 可能 overflow:hidden），回退到整页
+      const scroller = document.querySelector('.content') || document.querySelector('.view') || document.scrollingElement;
+      const step = (scroller.clientHeight || 600) * 0.75 * (k === 'j' ? 1 : -1);
+      scroller.scrollBy({ top: step, behavior: 'smooth' });
+    }
   });
+
+  // 清单 52：? 的快捷键表（轻量 sheet，复用 drawer 容器样式）
+  function openShortcutSheet() {
+    const rows = [
+      ['g 然后 a / g / t / k / l / m / c', '跳到 账号 / 总览 / 任务 / 密钥 / 日志 / 网关 / 设置'],
+      ['j / k', '当前页向下 / 向上滚动一大段'],
+      ['/ 或 Ctrl+K', '打开搜索与命令面板'],
+      ['?', '这张快捷键表'],
+      ['Esc', '关闭面板、抽屉或弹出层'],
+    ];
+    openDrawer({ title: '键盘快捷键', body: h('div', { class: 'stack' },
+      ...rows.map(([k, d]) => h('div', { class: 'row', style: { gap: '14px', alignItems: 'baseline' } },
+        h('code', { class: 'url-box', style: { padding: '2px 8px', fontSize: '12px', whiteSpace: 'nowrap' }, text: k }),
+        h('span', { style: { fontSize: '13px' }, text: d }))),
+      h('div', { class: 'muted', style: { fontSize: '12px' }, text: '在输入框打字时快捷键全部失效，放心搜。' })),
+    });
+  }
 
   // 轮询：只驱动当前分段自己的 tick；标签页在后台时整轮跳过——
   // 没人看的页面不该每秒打后端、更不该攒一堆挂起重绘。

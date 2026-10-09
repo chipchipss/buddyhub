@@ -21,7 +21,7 @@ import './views/logs.js';
 /* ── 密钥门 ───────────────────────────────────────────────────── */
 let gateEl = null;
 
-function openGate() {
+function openGate(reason) {
   if (gateEl) return;
   const input = h('input', {
     class: 'input', type: 'password', placeholder: 'api_key',
@@ -29,6 +29,10 @@ function openGate() {
     onkeydown: ev => { if (ev.key === 'Enter') submit(); },
   });
   const errLine = h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '8px', color: 'var(--fg-2)' } });
+  // 清单 54：会话过期要说清原因——记住的密钥还在，只是后端换了 key 或把这台浏览器踢掉了
+  if (reason === 'expired' && getKey()) {
+    errLine.textContent = '之前保存的密钥被服务端拒绝（可能是配置里换了 api_key）。下面重新输入一次即可，浏览器会继续记住新密钥。';
+  }
 
   const submit = async () => {
     const v = input.value.trim();
@@ -61,7 +65,7 @@ function openGate() {
   setTimeout(() => input.focus(), 50);
 }
 
-setUnauthorizedHandler(openGate);
+setUnauthorizedHandler(() => openGate('expired'));
 
 /* ── 启动 ─────────────────────────────────────────────────────── */
 window.__openAddAccount = openAddAccount;

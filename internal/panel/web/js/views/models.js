@@ -254,6 +254,17 @@ function repaint() {
   }
 }
 
+/* 清单 51：命令面板搜模型用。没加载过清单就返回空——面板不造假数据。 */
+export function paletteItems() {
+  const list = models();
+  if (!list) return [];
+  return list.map(m => ({
+    label: m.id,
+    id: m.id,
+    keywords: (m.id + ' ' + (m.name || '') + ' ' + (m.vendor || '')).toLowerCase(),
+  }));
+}
+
 export default defineView({
   id: 'models',
   page: 'gateway',

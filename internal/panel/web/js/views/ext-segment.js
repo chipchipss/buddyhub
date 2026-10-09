@@ -46,7 +46,7 @@ export function extJsonImport(onAdded, opts = {}) {
     locked ? h('span', { class: 'chip faint', text: (plat(locked) || {}).name || locked }) : providerSel,
     idInput, credInput,
     h('button', {
-      class: 'btn sm primary', onclick: async ev => {
+      class: 'btn sm', onclick: async ev => {
         const provider = locked || providerSel.value;
         const id = idInput.value.trim();
         if (!id) { toast('请填写账号 ID', 'fail'); return; }

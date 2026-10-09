@@ -272,9 +272,11 @@
 
 /* ── 卡片 ─────────────────────────────────────────────────────── */
 .card {
-  background: var(--glass);
-  -webkit-backdrop-filter: var(--blur);
-  backdrop-filter: var(--blur);
+  /* 清单 50：数据密集的列表和表格要的是「读得清」，玻璃降低存在感——
+     卡片用近实底（blur 减半），行级容器 .acctrow/.logbox 继承它就都是实底。 */
+  background: var(--canvas-2);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
   border: 1px solid var(--edge);
   border-radius: var(--r);
   box-shadow: var(--shadow), inset 0 1px 0 var(--hi);
@@ -638,6 +640,7 @@ input[type="checkbox"] { width: auto; accent-color: var(--fg-2); }
 .palette .item svg { width: 15px; height: 15px; opacity: .7; flex: none; }
 .palette .item .kind { margin-left: auto; font-size: 11px; color: var(--fg-3); font-family: var(--mono); }
 .palette .item.sel { background: var(--glass-2); color: var(--fg); }
+.palette .group { padding: 8px 14px 3px; font-size: 10.5px; letter-spacing: .08em; color: var(--fg-3); text-transform: uppercase; }
 .palette .empty { padding: 22px; text-align: center; color: var(--fg-3); font-size: 12.5px; }
 
 /* ── 空态 / 载入 ──────────────────────────────────────────────── */

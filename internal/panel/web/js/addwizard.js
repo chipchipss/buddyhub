@@ -548,7 +548,7 @@ function tencentNode(onAdded) {
               catch { toast('复制失败，请手动选择', 'fail'); }
             },
           }, icon('copy'), '复制链接'),
-          h('button', { class: 'btn sm primary', onclick: () => window.open(loginUrl.peek(), '_blank') }, '在浏览器打开'),
+          h('button', { class: 'btn sm', onclick: () => window.open(loginUrl.peek(), '_blank') }, '在浏览器打开'),
         ),
         h('div', { class: 'busy', text: '等待授权完成，自动检测中' }),
       );
@@ -773,8 +773,8 @@ function doneNode() {
     r.note ? h('div', { class: 'hint', text: r.note }) : null,
     h('div', { class: 'row wrap', style: { gap: '8px' } },
       r.provider === 'loomy'
-        ? h('button', { class: 'btn sm primary', onclick: () => { closeDrawer(); navigate('tasks'); } }, '看任务进度')
-        : h('button', { class: 'btn sm primary', onclick: () => { closeDrawer(); navigate('accounts'); } }, '打开账号页'),
+        ? h('button', { class: 'btn sm', onclick: () => { closeDrawer(); navigate('tasks'); } }, '看任务进度')
+        : h('button', { class: 'btn sm', onclick: () => { closeDrawer(); navigate('accounts'); } }, '打开账号页'),
       h('button', { class: 'btn sm ghost', onclick: () => { step.set('pick'); picked.set(''); paint(); } }, '再加一个'),
     ),
   );

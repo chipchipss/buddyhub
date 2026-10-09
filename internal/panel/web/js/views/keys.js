@@ -218,7 +218,7 @@ export default defineView({
           h('h2', { text: '生成新密钥' }),
           h('span', { class: 'hint', text: '默认全平台；要限制范围就选「指定平台」' }),
           h('span', { class: 'grow' }),
-          h('button', { class: 'btn primary', onclick: generate }, icon('plus'), '生成新 Key'),
+          h('button', { class: 'btn', onclick: generate }, icon('plus'), '生成新 Key'),
         ),
         h('div', { class: 'body stack' },
           h('div', { class: 'row wrap' },
@@ -246,7 +246,11 @@ export default defineView({
           err() ? h('div', { class: 'empty' }, h('div', { class: 'd', text: err() }))
             : !list.length ? h('div', { class: 'empty' }, icon('keys'),
               h('div', { class: 't', text: '还没有密钥' }),
-              h('div', { class: 'd', text: '上面填好名称，点「生成新 Key」。' }))
+              h('div', { class: 'd', text: '填好名称就能生成第一把。' }),
+              h('button', {
+                class: 'btn primary', style: { marginTop: '12px' },
+                onclick: () => { const n = document.getElementById('nk-name'); if (n) { n.focus(); n.scrollIntoView({ block: 'center', behavior: 'smooth' }); } },
+              }, icon('plus'), '去生成第一把'))
               : list.map(k => h('div', { class: 'keyrow' },
                 h('div', { style: { flex: '1', minWidth: '220px' } },
                   h('div', { class: 'nm' }, k.name || '未命名',
