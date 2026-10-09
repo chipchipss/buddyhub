@@ -1041,6 +1041,129 @@ setTimeout(() => process.exit(0), 50);
 	runNodeHarness(t, node, dir, "config-page.mjs", harness, "CONFIG OK", "配置页的目录/搜索/改动状态不符")
 }
 
+// TestKeysPageRender API 密钥页的三条界面约定（清单 36 / 37 / 39）：
+// 授权范围是「全平台 / 指定平台」单选 + 可搜索多选；生成后那张一次性卡片真的
+// 把完整密钥、复制、现成示例一起交出去；列表里只剩掩码。
+//
+// 为什么需要：这一页改动同时涉及「明文只出现一次」这条安全约定——它一旦回退，
+// 页面看起来完全正常，只有把鼠标移到列表上才发现所有密钥又摊在屏幕上了。
+func TestKeysPageRender(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; render check skipped")
+	}
+	dir := copyModules(t)
+
+	harness := wizardBoot(t) + `
+const view = (await import('./views/keys.js')).default;
+const FULL = 'bh-aa11bb22cc33dd44ee55ff66aa11bb22';
+let posts = [];
+DATA['/api/apikeys'] = (u, o) => {
+  const body = o && o.body ? JSON.parse(o.body) : null;
+  if (u.includes('/delete')) { posts.push(['delete', o.body]); return { ok: true }; }
+  if (o && o.method === 'POST') { posts.push(['post', o.body]); return { ok: true, key: { key: FULL, name: body.name, platforms: body.platforms, note: body.note } }; }
+  return { ok: true, keys: [{ id: 'abc123def456', name: '桌面端', masked: 'bh-aa1…bb22', platforms: ['qoder'] }] };
+};
+DATA['/api/platforms'] = { ok: true, platforms: PLATFORMS };
+const { loadPlatforms } = await import('./platforms.js');
+await loadPlatforms();
+
+const mount = document.createElement('div');
+document.body.append(mount);
+let root = null;
+const paint = () => { root = view.render(); mount.replaceChildren(root); };
+const txt = () => root.textContent;
+const btns = () => walk(root).buttons;
+
+paint();
+await tick(40);
+paint();
+await tick();
+
+const scopeDetail = () => findAll(root, 'scope-detail')[0];
+const chipsShown = () => { const d = scopeDetail(); return !!d && d.style.display !== 'none'; };
+
+/* ── 1. 授权范围：先单选，勾了「指定平台」才出现清单（清单 36）── */
+const seg = findAll(root, 'seg').map(s => walk(s).buttons.join('/'));
+if (!seg.some(s => s === '全平台/指定平台')) bad('授权范围不是「全平台 / 指定平台」单选：' + seg.join(' | '));
+if (chipsShown()) bad('默认「全平台」时就把平台清单摊开了（20 个按钮的老样子）');
+if (btns().filter(b => b === '生成新 Key').length !== 1) bad('生成按钮应当只有一个：' + btns().join('/'));
+
+const some = findAll(root, 'seg')[0].children.find(c => c.textContent.trim() === '指定平台');
+await click(some, '指定平台');
+await tick();
+if (!chipsShown()) bad('选了「指定平台」却没把可搜索的清单摊开');
+const nChips = findAll(root, 'chip').length;
+const sq = qsel(root, 'input.search');
+if (!sq) bad('平台清单没有搜索框');
+else {
+  sq.value = 'qoder';
+  await fire(sq, 'input');
+  await tick();
+  const hit = findAll(root, 'chip').map(c => c.textContent);
+  if (hit.length >= nChips) bad('搜索没缩短平台清单（' + nChips + ' → ' + hit.length + '）');
+  const one = findAll(root, 'chip').find(c => c.textContent.includes('Qoder'));
+  if (!one) bad('搜 qoder 没出现 Qoder 平台：' + hit.join('/'));
+  await click(one, '勾上 Qoder');
+  if (!txt().includes('已勾 1 个')) bad('勾选后没汇总说了勾了哪几个：' + txt().slice(-80));
+}
+
+/* ── 2. 一次性卡片（清单 37）────────────────────────────────── */
+posts = [];
+paint();                                   // 先生成这一屏的树，再往它自己的输入框里填
+document.getElementById('nk-name').value = '我的桌面端';
+await click(findButton(root, '生成新 Key'), '生成新 Key');
+await tick(40);
+if (posts.length !== 1 || posts[0][0] !== 'post') bad('点生成没发请求：' + JSON.stringify(posts));
+const sentBody = JSON.stringify(posts[0][1]);
+if (!sentBody.includes('qoder')) bad('指定平台勾选没进请求体：' + sentBody);
+paint();
+await tick();
+if (!txt().includes(FULL)) bad('一次性卡片没把完整密钥给出来（用户拿不到就用不了）');
+if (!txt().includes('只显示这一次')) bad('没说明这是只显示一次的（清单 37）');
+if (!txt().includes('curl')) bad('卡片没有现成的 curl 示例');
+if (!txt().includes('OpenAI Compatible')) bad('卡片没有客户端填写示例');
+if (!txt().includes('7863/v1')) bad('示例里没有 Base URL');
+
+/* ── 3. 列表只留掩码，删除认 id ─────────────────────────────── */
+const done = findAll(root, 'onecard')[0];
+const closeBtn = done ? findButton(done, '我已保存') : null;
+if (!closeBtn) bad('一次性卡片没有「我已保存」收口');
+else { await click(closeBtn, '我已保存'); paint(); await tick(); }
+if (txt().includes(FULL)) bad('关掉卡片后完整密钥还留在页面上');
+if (findAll(root, 'keyrow').length !== 1) bad('列表行数不对');
+const rowTxt = findAll(root, 'keyrow')[0].textContent;
+if (rowTxt.includes(FULL)) bad('列表行里还有明文密钥：' + rowTxt);
+if (!rowTxt.includes('bh-aa1…bb22')) bad('列表没显示掩码：' + rowTxt);
+if (findButton(findAll(root, 'keyrow')[0], '复制')) bad('列表里还能复制密钥（明文早已不再下发）');
+posts = [];
+const del = findButton(findAll(root, 'keyrow')[0], '删除');
+fire(del, 'click');   // 不 await：处理器停在确认框上，await 会永远挂着
+await tick(30);
+const sheet = findByClass(document.body, 'sheet');
+if (!sheet) bad('删除没有二次确认');
+else {
+  if (!sheet.textContent.includes('桌面端')) bad('确认框没说是哪一把：' + sheet.textContent.slice(0, 60));
+  await click(findButton(sheet, '删除'), '确认删除');
+  await tick(30);
+  if (!posts.some(x => x[0] === 'delete' && String(x[1]).includes('abc123def456'))) bad('删除没按 id 发出去：' + JSON.stringify(posts));
+}
+
+/* ── 4. 前缀对照表折起来（清单 39）──────────────────────────── */
+const det = findAll(root, 'adv')[0];
+if (!det) bad('调用说明没有折叠的前缀对照表（清单 39）');
+else {
+  if (det.open) bad('对照表默认就该折叠');
+  if (!det.textContent.includes('cn:') && !det.textContent.includes('前缀')) bad('折叠里没有对照内容：' + det.textContent.slice(0, 40));
+}
+
+if (problems.length) { console.error(problems.join('\n')); process.exit(1); }
+console.log('KEYS OK');
+setTimeout(() => process.exit(0), 50);
+`
+	runNodeHarness(t, node, dir, "keys-page.mjs", harness, "KEYS OK", "密钥页的范围单选/一次性卡片不符")
+}
+
 // TestAddWizardSingleEntry 「两个入口合一」（清单 20）的源码级不变量：
 // 添加账号只剩向导这一条路，旧抽屉里那份表单、ext-add 里那个平台下拉都不许复活
 // ——同一件事画两遍，措辞一定会漂，而用户会以为是两个不同的功能。

@@ -10,6 +10,7 @@ package panel
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,7 +22,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/livecfg"
 )
 
-// apiKeysPayload 单 Key 的请求/响应形状。
+// apiKeysPayload 是配置文件里一行的形状（含明文），只在本文件内部用来读配置。
 type apiKeysPayload struct {
 	Key       string   `json:"key"`
 	Name      string   `json:"name"`
@@ -30,7 +31,26 @@ type apiKeysPayload struct {
 	CreatedAt string   `json:"created_at,omitempty"`
 }
 
-// getAPIKeys GET /panel/api/apikeys —— 列出全部 Key（脱敏?不脱敏:面板本就有主 Key 权限）。
+// apiKeyRow 是**列给前端的**一行：没有明文。完整密钥只在生成那一次出现（清单 37），
+// 之后列表只给掩码；删除认 id。id 是服务端从明文算出的稳定摘要，所以旧 Key 不必
+// 迁移、配置里也不多出任何字段。
+type apiKeyRow struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Platforms []string `json:"platforms,omitempty"`
+	Note      string   `json:"note,omitempty"`
+	CreatedAt string   `json:"created_at,omitempty"`
+	Masked    string   `json:"masked"`
+}
+
+// keyID —— 一把 Key 的稳定标识（sha256 前 12 位）。不可从掩码反推，也不必入库：
+// 列表与删除都靠它，前端因此永远拿不到明文（掩码函数复用 accounts_dir.go 的 maskKey）。
+func keyID(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+// getAPIKeys GET /panel/api/apikeys —— 列出全部 Key（掩码，不回明文）。
 func (p *Panel) getAPIKeys(w http.ResponseWriter, r *http.Request) {
 	cfg, err := p.cfg.LoadConfig()
 	if err != nil {
@@ -42,10 +62,14 @@ func (p *Panel) getAPIKeys(w http.ResponseWriter, r *http.Request) {
 		APIKeys []apiKeysPayload `json:"api_keys"`
 	}
 	_ = json.Unmarshal(raw, &parsed)
-	if parsed.APIKeys == nil {
-		parsed.APIKeys = []apiKeysPayload{}
+	rows := make([]apiKeyRow, 0, len(parsed.APIKeys))
+	for _, k := range parsed.APIKeys {
+		rows = append(rows, apiKeyRow{
+			ID: keyID(k.Key), Name: k.Name, Platforms: k.Platforms,
+			Note: k.Note, CreatedAt: k.CreatedAt, Masked: maskKey(k.Key),
+		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "keys": parsed.APIKeys})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "keys": rows})
 }
 
 // postAPIKeys POST /panel/api/apikeys —— 生成一把新 Key。
@@ -94,26 +118,27 @@ func (p *Panel) postAPIKeys(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	log.Printf("panel: API Key 已生成 %s（%s，平台 %v）", entry.Key, entry.Name, entry.Platforms)
+	log.Printf("panel: API Key 已生成 %s（%s，平台 %v）——完整密钥只在这一次响应里出现", maskKey(entry.Key), entry.Name, entry.Platforms)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": entry})
 }
 
 // deleteAPIKeys POST /panel/api/apikeys/delete —— 删除指定 Key。
-// body: {key}
+// body: {id}（列表给的 id）；仍接受 {key} 以兼容旧调用方。
 func (p *Panel) deleteAPIKeys(w http.ResponseWriter, r *http.Request) {
 	var body struct {
+		ID  string `json:"id"`
 		Key string `json:"key"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Key == "" {
-		writeErr(w, http.StatusBadRequest, "key 必填")
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || (body.ID == "" && body.Key == "") {
+		writeErr(w, http.StatusBadRequest, "id 必填")
 		return
 	}
-	removed := false
+	removed := ""
 	if err := p.mutateAPIKeys(func(keys []livecfg.APIKeyEntry) []livecfg.APIKeyEntry {
 		out := keys[:0]
 		for _, k := range keys {
-			if k.Key == body.Key {
-				removed = true
+			if (body.ID != "" && keyID(k.Key) == body.ID) || (body.Key != "" && k.Key == body.Key) {
+				removed = maskKey(k.Key)
 				continue
 			}
 			out = append(out, k)
@@ -123,11 +148,12 @@ func (p *Panel) deleteAPIKeys(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if !removed {
+	if removed == "" {
 		writeErr(w, http.StatusNotFound, "key 不存在")
 		return
 	}
-	log.Printf("panel: API Key 已删除 %s", body.Key)
+	// 日志里只出现掩码：完整密钥进日志等于把它抄进另一份明文文件。
+	log.Printf("panel: API Key 已删除 %s", removed)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
