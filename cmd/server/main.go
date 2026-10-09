@@ -353,6 +353,9 @@ func main() {
 	// 生效值一律打印——上游按这些头判客户端形态，出事时需要能确认线上报的是哪个版本。
 	log.Printf("[ext-fp] %s", strings.Join(applyExtVersions(cfg), " "))
 
+	// 装配期定死的字段：配置页在用户按下保存之前就要说清「其中几项需重启」。
+	restartFields := restartRequiredFields(cfg)
+
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -382,6 +385,17 @@ func main() {
 		SaveConfig: func(raw []byte) ([]string, error) {
 			return saveConfig(raw, *cfgPath, live, p, up, sch)
 		},
+		// 配置页的「恢复默认」取 Default()，「其中 N 项需重启」取同一份
+		// restartRequiredFields 清单——两处都不另立一套说法，否则前端迟早和后端漂开。
+		ConfigDefaults: func() any {
+			d := Default()
+			if err := d.normalize(); err != nil {
+				log.Printf("config: 默认值规范化失败（回用未规范化默认）：%v", err)
+			}
+			return d
+		},
+		RestartFields: func() []string { return append([]string{}, restartFields...) },
+		Restart:       selfRestart,
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)

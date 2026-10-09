@@ -28,6 +28,9 @@ ExecStart=/usr/local/bin/buddyhub -config /etc/buddyhub/config.json
 
 # 时区：见文件头。用 TZ 而不是改机器全局时区，避免影响同机其他服务。
 Environment=TZ=Asia/Shanghai
+# 面板「立即重启」据此决定怎么重启：有监督器时只退出（Restart=always 会把它带回来），
+# 自己再 spawn 一个会和监督器拉起的第二个进程抢同一个监听端口。
+Environment=BUDYHUB_SUPERVISED=1
 
 # 网关会同时开多条上游流式连接，默认 1024 fd 容易先于带宽耗尽。
 LimitNOFILE=65536

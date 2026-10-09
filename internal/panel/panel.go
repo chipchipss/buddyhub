@@ -52,6 +52,16 @@ type Config struct {
 	// ApplyConfig 闭包完成热生效（池参数/排程/密钥/脱敏）。error 时配置不写盘。
 	SaveConfig func(raw []byte) (restartRequired []string, err error)
 
+	// ConfigDefaults 返回推荐默认配置（配置页每一项的「恢复默认」从这里取值，
+	// 前端不再自带一份默认值——那必然和 main 里的 Default() 漂开）。nil = 不提供。
+	ConfigDefaults func() any
+	// RestartFields 返回装配期定死、改动后必须重启进程的字段路径。配置页要靠它在
+	// 用户**按下保存之前**就说清「其中几项要重启」，而不是等保存完才补一句。
+	// nil = 空列表。
+	RestartFields func() []string
+	// Restart 换一个新进程接棒（配置页「立即重启」）。nil = 端点返回 501。
+	Restart func() error
+
 	// StickyCount 返回粘性会话绑定数；nil 时报告 0。
 	StickyCount func() int
 
@@ -196,6 +206,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
+	// 「立即重启」：配置页里装配期定死的那几项保存后要靠它生效。
+	p.mux.HandleFunc("POST /panel/api/restart", p.withAuth(p.restartProcess))
 	// 多 API Key 管理（生成/删除/列表；与配置页整表单解耦的原子操作）
 	p.mux.HandleFunc("GET /panel/api/accounts/dir", p.withAuth(p.accountsDir))
 	// 平台注册表（单一事实源；前端据此渲染全部平台清单，不再自带名字表）

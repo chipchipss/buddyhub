@@ -180,7 +180,12 @@ const domStub = `class El {
   setAttribute(k, v) { if (k === 'class') { this.className = v; return; } this.props[k] = String(v);
     // disabled 在真实 DOM 是布尔属性：setAttribute('disabled','') 之后 el.disabled
     // 立刻为 true（按钮点不动）。桩不镜像这一条，「转圈时禁用」就永远测不出来。
-    if (k === 'disabled') this.disabled = true; }
+    if (k === 'disabled') this.disabled = true;
+    // value / checked 同理：真实 DOM 用属性设过初值后，读 el.value / el.checked
+    // 就是那个值。h() 走的全是 setAttribute，桩不接这条，表单类界面里每个输入框
+    // 都会读成空串——「改动计数」「恢复默认」这类逻辑就全在假数据上跑。
+    if (k === 'value') this.value = String(v);
+    if (k === 'checked') this.checked = true; }
   getAttribute(k) { return this.props[k] ?? null; }
   removeAttribute(k) { delete this.props[k]; if (k === 'disabled') this.disabled = false; }
   setAttributeNS(a, k, v) { this.setAttribute(k, v); }
@@ -209,13 +214,22 @@ const domStub = `class El {
     for (const old of this.children) if (!next.includes(old)) setConn(old, false);
     this.children = next; for (const c of this.children) { c.parentNode = this; setConn(c, this.isConnected); } }
   focus() {}
+  scrollIntoView() {}   // 配置页左侧目录跳位要用；桩里点它等于什么都不做
   get firstChild() { return this.children[0] ?? null; }
   get lastChild() { return this.children[this.children.length - 1] ?? null; }
   get firstElementChild() { return this.children.find(c => !String(c.tagName).startsWith('#')) ?? null; }
   get childElementCount() { return this.children.filter(c => !String(c.tagName).startsWith('#')).length; }
   get textContent() { return this._text || this.children.map(c => c.textContent).join(''); }
   set textContent(v) { this._text = String(v); this.children = []; }
-  get value() { return this._value ?? ''; }
+  get value() {
+    // select 的 .value 在真实 DOM 里跟着选中项走（h() 只设 selected 属性，不设 value），
+    // 不镜像这条的话下拉框读回来永远是空串，配置页会把每个下拉都当成「已改动」。
+    if (this.tagName === 'SELECT') {
+      const on = (this.children || []).find(c => c.props && c.props.selected !== undefined);
+      return on ? String(on.props.value ?? on.textContent) : '';
+    }
+    return this._value ?? '';
+  }
   set value(v) { this._value = v; }
   getBoundingClientRect() { return { top: 20, left: 20, right: 60, bottom: 40, width: 40, height: 20, x: 20, y: 20 }; }
   querySelector(sel) { return qsel(this, sel); }
@@ -824,6 +838,207 @@ console.log('TASKS OK');
 setTimeout(() => process.exit(0), 50);
 `
 	runNodeHarness(t, node, dir, "tasks-page.mjs", harness, "TASKS OK", "任务页的合一动作与时间线不符")
+}
+
+// TestConfigPageRender 配置页的六条界面约定（清单 30–35）必须真的成立：
+// 目录与搜索在、开关带用途说明、时长是「数字 + 单位」、改动有状态（几项改动 /
+// 几项要重启 / 字段左边的小点）、每项能恢复默认、高级项默认折叠。
+//
+// 为什么需要：这页是声明式字段表命令式建出来的，取值逻辑（基线 vs 未保存改动）
+// 和显隐逻辑都在闭包里；编译与 import 都拦不住「搜索把没保存的输入重建没了」
+// 「需重启清单没接上，保存栏永远说保存即生效」这类错。无 node 时跳过。
+func TestConfigPageRender(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; render check skipped")
+	}
+	dir := copyModules(t)
+
+	harness := wizardBoot(t) + `
+const view = (await import('./views/config.js')).default;
+const note = () => ((findByClass(document.body, 'note') || {}).textContent) || '';
+const all = () => document.body.textContent;
+
+const CONF = {
+  listen: ':7863', api_key: '',
+  schedule: { checkin_enabled: true, checkin_hours: [9, 21], balance_refresh_minutes: 5, growth_enabled: true },
+  cooldown: { soft_rate: '600s' },
+  pool: { max_in_flight: 3, breaker_threshold: 3, breaker_cooldown: '30m' },
+  session_sticky: { ttl: '30m', enabled: true },
+  upstream: { timeout_seconds: 120, user_agent: '' },
+  prompt: { mode: 'custom' },
+  features: { sanitize_blacklist_fingerprints: true },
+};
+const DEFS = {
+  listen: ':7863', api_key: '',
+  schedule: { checkin_enabled: true, checkin_hours: [8, 22], balance_refresh_minutes: 5, growth_enabled: true },
+  cooldown: { soft_rate: '300s' },
+  pool: { max_in_flight: 3, breaker_threshold: 5, breaker_cooldown: '20m' },
+  session_sticky: { ttl: '20m', enabled: true },
+  upstream: { timeout_seconds: 90, user_agent: '' },
+  prompt: { mode: 'custom' },
+  features: { sanitize_blacklist_fingerprints: true },
+};
+const RESTART = ['listen', 'upstream.timeout_seconds', 'session_sticky.ttl'];
+let posts = 0;
+DATA['/api/config'] = (u, o) => {
+  if (o && o.method === 'POST') { posts++; return { ok: true, restart_required: ['listen'] }; }
+  return { ok: true, path: 'D:/data/config.json', config: CONF, defaults: DEFS, restart_fields: RESTART };
+};
+
+// 只挂一个宿主：多棵渲染树并存在 body 里，按 body 查元素就会查到上一棵的旧节点，
+// 断言读到的值不是刚操作的那个（2026-10-09 实测踩过：恢复默认「没生效」其实是查错树）。
+const mount = document.createElement('div');
+document.body.append(mount);
+let root = null;
+const paint = () => { root = view.render(); mount.replaceChildren(root); };
+
+view.render();                 // 第一屏只会是「读取配置」：值都在后端
+await tick(30);
+paint();
+await tick();
+
+/* ── 1. 目录 + 搜索（清单 30）────────────────────────────────── */
+if (!document.getElementById('cfg-q')) bad('没有搜索配置项的输入框（四十来项靠滚找不到）');
+const navBtns = findAll(root, 'cfg-nav')[0] ? walk(findAll(root, 'cfg-nav')[0]).buttons : [];
+if (navBtns.length < 3) bad('左侧目录没列出分组，实为 ' + navBtns.length + ' 个：' + navBtns.join('/'));
+
+/* ── 2. 高级项默认折叠（清单 35）────────────────────────────── */
+const advs = findAll(root, 'adv');
+if (!advs.length) bad('没有折叠的高级项分组（熔断/降权这类该默认收起来）');
+else if (advs.some(d => d.open)) bad('高级项默认就是展开的');
+else if (!advs.some(d => d.textContent.includes('熔断'))) bad('熔断阈值没被归进高级项：' + advs.map(d => d.textContent.slice(0, 20)).join('/'));
+
+/* ── 3. 开关带用途说明（清单 31）────────────────────────────── */
+const rows = findAll(root, 'switch-row');
+if (rows.length < 4) bad('开关行只有 ' + rows.length + ' 条');
+const noTip = rows.filter(r => {
+  const m = findAll(r, 'muted')[0];
+  return !m || !((m.textContent) || '').trim();
+});
+if (noTip.length) bad('有无小字说明的开关：' + noTip.map(r => r.textContent.slice(0, 12)).join(' / '));
+if (!rows[0].textContent.includes('要重启') && rows.some(r => r.textContent.includes('自动签到')) === false) bad('开关行措辞异常');
+
+/* ── 4. 时长＝数字 + 单位（清单 32）；需重启的字段先标出来 ────── */
+const ttlWrap = findAll(root, 'field').find(f => f.textContent.includes('会话粘性 TTL'));
+if (!ttlWrap) bad('找不到会话粘性 TTL 这一项');
+else {
+  const g = walk(ttlWrap);
+  const sel = qsel(ttlWrap, 'select');
+  if (!sel) bad('时长项没有单位下拉（还是让人手写 30m）：' + g.buttons.join('/'));
+  else {
+    const opts = (sel.children || []).map(c => c.textContent);
+    if (!opts.includes('分钟') || !opts.includes('小时')) bad('单位下拉缺档：' + opts.join('/'));
+  }
+  const num = (sel ? qsel(sel.parentNode, 'input') : null) || qsel(ttlWrap, 'input');
+  if (num && num.value !== '30') bad('30m 没拆成数字 30 + 单位 m，实为「' + (num ? num.value : '?') + '」');
+  if (!ttlWrap.textContent.includes('要重启')) bad('装配期定死的项没标「要重启」（清单 33 要说在保存之前）');
+}
+
+/* ── 5. 改动有状态：小点 + 保存栏报数（清单 33）──────────────── */
+if (note() !== '没有改动') {
+  const chs = findAll(root, 'field').filter(f => f.classList.contains('changed'))
+    .map(f => ((findByClass(f, 'label') || {}).textContent || '').slice(0, 12)
+      + '=' + JSON.stringify((qsel(f, 'input') || qsel(f, 'select') || {}).value));
+  bad('初始状态保存栏不该报改动：' + note() + ' ｜ ' + chs.join(' | '));
+}
+const listenWrap = findAll(root, 'field').find(f => f.textContent.includes('监听地址'));
+const listenIn = listenWrap && qsel(listenWrap, 'input');
+if (!listenIn) bad('找不到监听地址输入框');
+else {
+  listenIn.value = ':8080';
+  fire(listenIn, 'input');
+  await tick();
+  if (!note().includes('1 项改动')) bad('改一项后保存栏没报数：' + note());
+  if (!note().includes('要重启')) bad('改的是需重启项，保存栏没说有几项要重启：' + note());
+  if (!listenWrap.classList.contains('changed')) bad('改过的字段左边没有小点');
+  listenIn.value = ':7863';               // 改回原值
+  await fire(listenIn, 'input');
+  await tick();
+  if (note() !== '没有改动') bad('改回原值后保存栏该回到「没有改动」：' + note());
+  if (listenWrap.classList.contains('changed')) bad('改回原值后小点该消失');
+}
+
+/* ── 6. 恢复默认（清单 34）：值来自后端 defaults ─────────────── */
+const brkWrap = findAll(root, 'field').find(f => f.textContent.includes('连续失败熔断阈值'));
+const brkIn = brkWrap && qsel(brkWrap, 'input');
+if (!brkIn) bad('找不到熔断阈值输入框');
+else {
+  const rb = brkWrap ? findButton(brkWrap, '恢复默认') : null;
+  if (!rb) bad('与默认值不同的项没给「恢复默认」按钮');
+  else {
+    brkIn.value = '9';
+    fire(brkIn, 'input');
+    await tick();
+    const rb2 = findButton(findAll(root, 'field').find(f => f.textContent.includes('连续失败熔断阈值')), '恢复默认');
+    if (!rb2) bad('改成非默认值后「恢复默认」不该消失');
+    fire(rb2, 'click');
+    await tick();
+    const now = qsel(findAll(root, 'field').find(f => f.textContent.includes('连续失败熔断阈值')), 'input');
+    if (now.value !== '5') bad('恢复默认没落到后端给的默认值 5，实为「' + now.value + '」');
+  }
+}
+
+/* ── 7. 搜索就地显隐，不重建表单（没保存的输入不能被冲掉）─────── */
+const before = listenIn.value;
+const sq = document.getElementById('cfg-q');
+sq.value = '熔断';
+fire(sq, 'input');
+await tick();
+const hiddenCnt = findAll(root, 'field').filter(f => f.style.display === 'none').length;
+if (hiddenCnt === 0) bad('搜索没把不匹配的项藏起来');
+if (qsel(root, '#cfg-q') !== sq || listenIn.value !== before) bad('搜索重建了表单（没保存的输入会被冲掉）');
+const openAdv = findAll(root, 'adv').filter(d => d.open);
+if (!openAdv.some(d => d.textContent.includes('熔断'))) bad('搜到高级项时那一组该摊开，否则命中的东西藏在折叠里');
+
+/* ── 8. 保存 → 立即重启（清单 33 的后半句）──────────────────── */
+// 改的是需重启项（监听地址），保存后回执会说 listen 要重启——这时才该出现按钮。
+listenIn.value = ':9999';
+await fire(listenIn, 'input');
+await tick();
+// render() 返回的就是那只 form（qsel 只往后代找，不查自身），所以先看根。
+const form = root.tagName === 'FORM' ? root : qsel(root, 'form');
+if (!form) bad('配置页不是 form（保存按钮走的是提交语义）');
+else { await fire(form, 'submit'); await tick(40); }
+if (posts !== 1) bad('保存发了 ' + posts + ' 次请求（同一次点击发两遍就是双写）');
+paint();
+await tick();
+if (!all().includes('立即重启')) bad('改了需重启的项并保存后，没给出「立即重启」');
+const rb = findButton(root, '立即重启');
+if (rb) {
+  fire(rb, 'click');
+  await tick(30);
+  const sheet = findByClass(document.body, 'sheet');
+  if (!sheet) bad('立即重启没先说清代价（没有确认框）');
+  else {
+    if (!sheet.textContent.includes('中断')) bad('确认框没说重启会断几秒：' + sheet.textContent.slice(0, 60));
+    await click(findButton(sheet, '立即重启'), '确认重启');
+    await tick(30);
+    if (!CALLS.some(c => c.includes('/api/restart'))) bad('确认后没把重启请求发出去');
+  }
+}
+
+/* ── 9. 改的都是热生效项时，别递「立即重启」───────────────────── */
+const brk3Wrap = findAll(root, 'field').find(f => f.textContent.includes('连续失败熔断阈值'));
+const brk3 = brk3Wrap && qsel(brk3Wrap, 'input');
+if (!brk3) bad('第二轮找不到熔断阈值输入框');
+else {
+  brk3.value = '6';
+  await fire(brk3, 'input');
+  await tick();
+  if (note().includes('要重启')) bad('熔断阈值是热生效项，保存栏不该说要重启：' + note());
+  await fire(root.tagName === 'FORM' ? root : qsel(root, 'form'), 'submit');
+  await tick(40);
+  paint();
+  await tick();
+  if (findButton(root, '立即重启')) bad('改动全是热生效的，却给了「立即重启」——后端回执是全量清单，要跟本次改动求交集');
+}
+
+if (problems.length) { console.error(problems.join('\n')); process.exit(1); }
+console.log('CONFIG OK');
+setTimeout(() => process.exit(0), 50);
+`
+	runNodeHarness(t, node, dir, "config-page.mjs", harness, "CONFIG OK", "配置页的目录/搜索/改动状态不符")
 }
 
 // TestAddWizardSingleEntry 「两个入口合一」（清单 20）的源码级不变量：

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"time"
 )
 
 // getConfig 返回当前配置文件内容与路径（前端按 schema 渲染表单）。
@@ -26,7 +27,47 @@ func (p *Panel) getConfig(w http.ResponseWriter, r *http.Request) {
 		"ok":     true,
 		"path":   p.cfg.ConfigPath,
 		"config": cfg,
+		// 默认值与「哪些字段改了要重启」都由 main 注入：配置页要能在按下保存之前
+		// 就报出「3 项改动，其中 1 项需重启」，也能逐项「恢复默认」。
+		"defaults":       defaultsOf(p),
+		"restart_fields": restartFieldsOf(p),
 	})
+}
+
+func defaultsOf(p *Panel) any {
+	if p.cfg.ConfigDefaults == nil {
+		return nil
+	}
+	return p.cfg.ConfigDefaults()
+}
+
+func restartFieldsOf(p *Panel) []string {
+	if p.cfg.RestartFields == nil {
+		return []string{}
+	}
+	out := p.cfg.RestartFields()
+	if out == nil {
+		return []string{}
+	}
+	return out
+}
+
+// restartProcess 重启网关进程，让装配期定死的配置项生效。
+//
+// 先把回执写出去再动手：进程马上就没了，这条连接必然断，客户端不能等结果。
+func (p *Panel) restartProcess(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Restart == nil {
+		writeErr(w, http.StatusNotImplemented, "restart api not available")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restarting": true})
+	log.Printf("panel: 收到重启指令（来自配置页），进程即将退出")
+	go func() {
+		time.Sleep(150 * time.Millisecond) // 让上面那个回执落进 socket
+		if err := p.cfg.Restart(); err != nil {
+			log.Printf("panel: 重启失败：%v（配置已保存，需手工重启进程）", err)
+		}
+	}()
 }
 
 // saveConfig 保存配置：body 直接是配置 JSON（前端按 schema 组装完整对象）。

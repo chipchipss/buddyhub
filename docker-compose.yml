@@ -12,6 +12,9 @@ services:
     #   3) user: "0:0" 以 root 运行（省事但容器逃逸面更大，自担）
     user: "${PUID:-10001}:${PGID:-10001}"
     environment:
+      # 面板「立即重启」据此只退出、让 Docker 的重启策略再拉起容器；
+      # 容器里自行 spawn 会与策略重启出来的新容器抢端口。
+      - BUDYHUB_SUPERVISED=1
       - TZ=Asia/Shanghai
     # 端口绑定地址可参数化：.env 写 BUDYHUB_BIND=127.0.0.1 即只绑回环。
     # 默认 0.0.0.0 ≡ 裸写 "7863:7863"，存量部署零感知。

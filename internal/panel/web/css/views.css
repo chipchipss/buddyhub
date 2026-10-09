@@ -421,3 +421,31 @@
   background: var(--glass-2); border: 1px solid var(--edge);
   font: 12px var(--mono); word-break: break-all; user-select: all; color: var(--fg-2);
 }
+
+/* ── 配置页：左侧吸附目录 + 搜索 + 高级折叠 + 改动小点（清单 30/33/35）── */
+.cfg-layout { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 14px; align-items: start; }
+.cfg-nav { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 2px; }
+.cfg-nav button {
+  text-align: left; font: var(--fs-label) var(--sans); color: var(--fg-2);
+  padding: 5px 8px; border-radius: var(--r-xs); border: 1px solid transparent;
+  background: none; cursor: pointer; transition: color var(--t), background var(--t);
+}
+.cfg-nav button:hover { color: var(--fg); background: var(--glass); }
+@media (max-width: 880px) {
+  .cfg-layout { grid-template-columns: 1fr; }
+  .cfg-nav { position: static; flex-direction: row; flex-wrap: wrap; }
+}
+details.adv { border-top: 1px dashed var(--edge); padding-top: 9px; }
+details.adv > summary {
+  cursor: pointer; font: var(--fs-label) var(--sans); color: var(--fg-3);
+  list-style: none; margin-bottom: 9px;
+}
+details.adv > summary::before { content: '∘ '; }
+details.adv[open] > summary::before { content: '⨼ '; }
+/* 改过的字段左边一颗小点：不用读完整页也知道哪儿动过 */
+.field.changed > .label::before,
+.switch-row.changed > .grow .lb::before {
+  content: ''; display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--fg); margin-right: 6px; vertical-align: 2px;
+}
+.savebar .note.dirty { color: var(--fg); }
