@@ -1024,6 +1024,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if a, ok := h.cfg.Pool.Status(uid); ok && a.Realm != "" {
 				realm = a.Realm
 			}
+			attemptOK := delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens
 			h.cfg.Usage.Add(time.Now(), realm, uid, delta.Model, usage.Delta{
 				PromptTokens:     delta.PromptTokens,
 				HasPromptTokens:  delta.HasPromptTokens,
@@ -1035,7 +1036,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				HasLatency:       delta.HasLatencyMs,
 				TokensPerSecond:  delta.TokensPerSecond,
 				HasTPS:           delta.HasTokensPerSecond,
-			}, delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens)
+			}, attemptOK)
+			// 逐 Key 调用量（清单 38）：以稳定 id 记在调用方 Key 头上。
+			// 走主 Key 鉴权时 withAuth 直接透传原始请求，context 里没有条目（零值
+			// id 为空）——但主 Key 同样有「删了会不会打挂客户端」的问题，回退用它的
+			// id 计数；未配置鉴权时两边 id 都空，AddKey 自行空操作。
+			callKeyID := AuthKeyEntry(r).ID()
+			if callKeyID == "" {
+				callKeyID = livecfg.APIKeyEntry{Key: h.loadLive().APIKey}.ID()
+			}
+			h.cfg.Usage.AddKey(callKeyID, attemptOK, time.Now())
 		}
 	}
 

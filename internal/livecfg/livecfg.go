@@ -9,7 +9,9 @@
 package livecfg
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"sync/atomic"
 	"time"
 )
@@ -51,6 +53,17 @@ func (e APIKeyEntry) Match(given string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(e.Key), []byte(given)) == 1
+}
+
+// ID 该 Key 的稳定标识（明文 sha256 前 12 hex；明文为空则空串）。
+// 面板列表/删除的 row id 与用量统计的 per-Key 计数键必须同一算法算出，两边才对得上；
+// id 不可反推明文，才允许安全地出现在响应与 usage.json 里（明文从不落统计盘）。
+func (e APIKeyEntry) ID() string {
+	if e.Key == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(e.Key))
+	return hex.EncodeToString(sum[:])[:12]
 }
 
 // Holder 原子持有当前快照。

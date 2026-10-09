@@ -60,18 +60,35 @@ type bucket struct {
 	TPSN  int64   `json:"vn"` // 速率样本数
 }
 
+// KeyStat 单把 API Key 的调用量（清单 38）：删 Key 前得知道这把还有没有人用。
+// id 是 Key 明文的 sha256 前 12 hex（livecfg.APIKeyEntry.ID()），与面板列表行 id 同源；
+// 明文不进统计、也不落盘。
+//
+// 口径是「逐次尝试」，与 buckets 的 requests 同一个汇聚点（recordAttempt）：一次客户端
+// 请求若跨账号转注，会记多次——和用量页其余数字保持同一套算法，不要在这里偷偷换算。
+// 这一列回答的是「这把还有没有人用」，不是「客户端发了几个包」。
+type KeyStat struct {
+	ID     string `json:"id"`
+	Calls  int64  `json:"calls"`
+	Errors int64  `json:"errors"`
+	Last   int64  `json:"last"` // 最近一次请求的 unix 毫秒
+}
+
 // file 落盘结构。
 type file struct {
 	Version int      `json:"version"`
 	Saved   string   `json:"saved"`
 	Buckets []bucket `json:"buckets"`
+	// Keys 为空时不落字段：旧版本 usage.json 本来就没有这一项，读方须容忍缺失。
+	Keys []KeyStat `json:"keys,omitempty"`
 }
 
 // Recorder 并发安全的用量记录器。
 type Recorder struct {
 	mu      sync.Mutex
 	path    string
-	buckets map[string]*bucket // key: scope|realm|uid|model
+	buckets map[string]*bucket  // key: scope|realm|uid|model
+	keys    map[string]*KeyStat // key: API Key 的稳定 id（清单 38）
 	dirty   bool
 	started time.Time
 
@@ -89,6 +106,7 @@ func New(path string) *Recorder {
 	r := &Recorder{
 		path:    path,
 		buckets: make(map[string]*bucket),
+		keys:    make(map[string]*KeyStat),
 		started: time.Now(),
 		stop:    make(chan struct{}),
 		done:    make(chan struct{}),
@@ -197,6 +215,35 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 	r.dirty = true
 }
 
+// AddKey 按调用方 Key 的稳定 id（livecfg.APIKeyEntry.ID()）记一次调用。
+// id 为空（未配置鉴权、无从归属）是空操作。
+//
+// 刻意不并进 buckets：桶主键是 (时间片, realm, uid, model)——「调用方 Key」与
+// 「池账号」是两个正交维度，硬塞会改动桶键，牵动全部聚合与 Rollup 回填。
+// 面板只需要「这把用没用过、共几次」，单独一列累计器即可。
+func (r *Recorder) AddKey(id string, ok bool, now time.Time) {
+	if r == nil || id == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := r.keys[id]
+	if k == nil {
+		k = &KeyStat{ID: id}
+		r.keys[id] = k
+	}
+	k.Calls++
+	if !ok {
+		k.Errors++
+	}
+	// 只朝前推：并发晚到的旧时间戳不能把「最近使用」拨回去——一把刚被调用的 Key
+	// 若显示「三天没动」，用户就会把它删掉。
+	if ms := now.UnixMilli(); ms > k.Last {
+		k.Last = ms
+	}
+	r.dirty = true
+}
+
 // Rollup 把超出 hourlyKeep 的小时桶折叠为日桶（按本地日历日）。
 // 幂等：同一小时反复折叠不会重复计数（先累加再删源桶）。
 func (r *Recorder) Rollup(now time.Time) {
@@ -269,6 +316,14 @@ func (r *Recorder) load() error {
 		b := f.Buckets[i]
 		r.buckets[b.Scope+"|"+b.Realm+"|"+b.UID+"|"+b.Model] = &b
 	}
+	// 旧版 usage.json 没有 keys 字段：缺失即空映射，照常加载（不能报错清零桶）。
+	for i := range f.Keys {
+		k := f.Keys[i]
+		if k.ID == "" {
+			continue
+		}
+		r.keys[k.ID] = &k
+	}
 	log.Printf("[usage] 已恢复 %d 个用量桶（%s）", len(r.buckets), r.path)
 	return nil
 }
@@ -291,6 +346,13 @@ func (r *Recorder) flush(force bool) {
 	snap := file{Version: 1, Saved: time.Now().Format(time.RFC3339), Buckets: make([]bucket, 0, len(r.buckets))}
 	for _, b := range r.buckets {
 		snap.Buckets = append(snap.Buckets, *b)
+	}
+	if len(r.keys) > 0 {
+		snap.Keys = make([]KeyStat, 0, len(r.keys))
+		for _, k := range r.keys {
+			snap.Keys = append(snap.Keys, *k)
+		}
+		sort.Slice(snap.Keys, func(i, j int) bool { return snap.Keys[i].ID < snap.Keys[j].ID })
 	}
 	r.dirty = false
 	r.mu.Unlock()
@@ -380,11 +442,14 @@ type Snapshot struct {
 	ByRealm   []KeyedAgg `json:"by_realm"`
 	ByAccount []KeyedAgg `json:"by_account"`
 	ByModel   []KeyedAgg `json:"by_model"`
-	Series    []Point    `json:"series"`
-	Buckets   int        `json:"buckets"`
-	FileBytes int64      `json:"file_bytes"`
-	Since     string     `json:"since,omitempty"`
-	Generated string     `json:"generated"`
+	// ByKey 逐 API Key 调用量（清单 38）。**累计口径，不随 hours 窗口变化**——
+	// 桶没有 per-key 维度，窗口化不了；面板 keys 视图本来就查 hours=0（全部历史）。
+	ByKey     []KeyStat `json:"by_key"`
+	Series    []Point   `json:"series"`
+	Buckets   int       `json:"buckets"`
+	FileBytes int64     `json:"file_bytes"`
+	Since     string    `json:"since,omitempty"`
+	Generated string    `json:"generated"`
 }
 
 // Snapshot 聚合**所选窗口内**的桶，产出面板一次拉取的全部用量视图数据。
@@ -410,6 +475,10 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	bs := make([]bucket, 0, len(r.buckets))
 	for _, b := range r.buckets {
 		bs = append(bs, *b)
+	}
+	keyStats := make([]KeyStat, 0, len(r.keys))
+	for _, k := range r.keys {
+		keyStats = append(keyStats, *k)
 	}
 	r.mu.Unlock()
 
@@ -497,6 +566,18 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 		Buckets:   matched,
 		Generated: time.Now().Format(time.RFC3339),
 	}
+	// 调用量降序、同量按最近使用降序：面板 keys 视图第一眼的就是"最不能删的"；
+	// 再按 id 升序兜底，输出稳定。
+	sort.Slice(keyStats, func(i, j int) bool {
+		if keyStats[i].Calls != keyStats[j].Calls {
+			return keyStats[i].Calls > keyStats[j].Calls
+		}
+		if keyStats[i].Last != keyStats[j].Last {
+			return keyStats[i].Last > keyStats[j].Last
+		}
+		return keyStats[i].ID < keyStats[j].ID
+	})
+	snap.ByKey = keyStats
 	for i := range snap.ByAccount {
 		snap.ByAccount[i].Realm = acctRealm[snap.ByAccount[i].Key]
 	}

@@ -10,6 +10,7 @@ import { defineView } from '../shell.js';
 import { platforms, loadPlatforms, platName, platWithPrefix } from '../platforms.js';
 
 const keys = signal(null);
+const keyStats = signal(null);   // id → {calls,errors,last}（清单 38：删 Key 前看这把还有没有人用）
 const err = signal('');
 const scope = signal('all');       // all = 全平台 / some = 指定平台
 const picked = signal(new Set());  // 指定平台时勾选的平台 id
@@ -19,11 +20,36 @@ const justMade = signal(null);     // 刚生成的那一把（一次性卡片）
 // 平台清单来自注册表（platforms.js）——不再自带名字表
 const ALL_PLATS = () => platforms.peek().map(p => p.id);
 
+// 调用量标注。hours=0 = 全部历史：by_key 本来就是累计口径。
+// usage 拉失败只丢标注，不挡密钥列表——列表才是这一屏的主角。
 async function load(quiet = true) {
   err.set('');
   await loadPlatforms();
-  try { keys.set((await api('apikeys')).keys || []); }
+  try {
+    const [k, u] = await Promise.all([
+      api('apikeys'),
+      api('usage?hours=0').catch(() => null),
+    ]);
+    keys.set(k.keys || []);
+    const m = {};
+    for (const s of (u && u.by_key) || []) m[s.id] = s;
+    keyStats.set(m);
+  }
   catch (e) { err.set(e.message); if (!quiet) toast(e.message, 'fail'); }
+}
+
+function lastUsed(ms) {
+  if (!ms) return '';
+  const d = new Date(ms), p = n => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// statLine —— 「没见过调用」就是最硬的删除依据；失败次数顺带说，
+// 因为它决定的是「这把是不是坏了」而不是「还在不在用」。
+function statLine(s) {
+  if (!s || !s.calls) return '没见过调用';
+  const t = lastUsed(s.last);
+  return `调用 ${s.calls} 次 · 最近 ${t || '时间未知'}` + (s.errors ? `（失败 ${s.errors}）` : '');
 }
 
 function togglePlat(p) {
@@ -179,6 +205,7 @@ export default defineView({
   render() {
     if (!keys() && !err()) load();
     const list = keys() || [];
+    const stats = keyStats() || {};
     const made = justMade();
     const { box: scopeEl, paint } = scopeBox();
     paint();
@@ -225,6 +252,7 @@ export default defineView({
                   h('div', { class: 'nm' }, k.name || '未命名',
                     k.note ? h('span', { class: 'note', text: ' · ' + k.note }) : null),
                   h('code', { text: k.masked || '••••', title: '完整密钥只在生成那一次显示' }),
+                  h('div', { class: 'muted', style: { fontSize: '11.5px' }, text: statLine(stats[k.id]) }),
                 ),
                 h('div', { class: 'row wrap', style: { gap: '5px' } },
                   (!k.platforms || !k.platforms.length || k.platforms.includes('*'))

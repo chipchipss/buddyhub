@@ -10,7 +10,6 @@ package panel
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -45,9 +44,10 @@ type apiKeyRow struct {
 
 // keyID —— 一把 Key 的稳定标识（sha256 前 12 位）。不可从掩码反推，也不必入库：
 // 列表与删除都靠它，前端因此永远拿不到明文（掩码函数复用 accounts_dir.go 的 maskKey）。
+// 算法收编到 livecfg.APIKeyEntry.ID()——用量统计的 per-Key 计数键（清单 38）也用它，
+// 两处必须是同一个函数的同一算法，面板行 id 才查得到对应的那条统计。
 func keyID(key string) string {
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])[:12]
+	return livecfg.APIKeyEntry{Key: key}.ID()
 }
 
 // getAPIKeys GET /panel/api/apikeys —— 列出全部 Key（掩码，不回明文）。
