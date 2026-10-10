@@ -1162,6 +1162,47 @@ console.log('KEYS OK');
 setTimeout(() => process.exit(0), 50);
 `
 	runNodeHarness(t, node, dir, "keys-page.mjs", harness, "KEYS OK", "密钥页的范围单选/一次性卡片不符")
+
+	// 单独一轮：平台注册表**晚到**时这一屏必须自己补出平台名（2026-10-10 用户实测）。
+	// 上一轮预先 await 了 loadPlatforms()，恰好把这条竞态遮住——真实首屏是先画密钥、
+	// 注册表还在路上，platName 只能回落成 id，界面上就漏出 qoder / codearts 这种实现词。
+	late := wizardBoot(t) + `
+const view = (await import('./views/keys.js')).default;
+const { effect } = await import('./kernel.js');
+const { platforms, loadPlatforms } = await import('./platforms.js');
+DATA['/api/apikeys'] = { ok: true, keys: [{ id: 'k1', name: '桌面端', masked: 'bh-aa1…bb22', platforms: ['qoder', 'codearts'] }] };
+DATA['/api/usage?hours=0'] = { ok: true, by_key: [] };
+await loadPlatforms();
+
+const mount = document.createElement('div');
+document.body.append(mount);
+// 只看那一行密钥右侧的平台标签——整页文本会撞上「前缀对照表」里的 qoder:，那是该出现的技术词。
+const rowChips = () => {
+  const row = findAll(mount, 'keyrow')[0];
+  return row ? findAll(row, 'chip').map(c => c.textContent.trim()) : null;
+};
+const settle = async () => { for (let i = 0; i < 60; i++) await new Promise(r => setTimeout(r, 0)); };
+
+// 把注册表清空再画：platName 在没有注册表时按设计回落成 id——这就是用户看到的
+// 那一帧（上一轮预载把它遮住了）。随后让注册表到位，这一屏必须自己重画。
+platforms.set([]);
+effect(() => { const n = view.render(); mount.replaceChildren(n); return n; });
+await settle();
+const bare = rowChips();
+if (!bare) bad('等不到密钥行（注册表清空后就不画了吗）');
+else if (bare.join('/') !== 'qoder/codearts') bad('没构造出「注册表还没到」那一帧，标签实为 ' + bare.join('/'));
+platforms.set(PLATFORMS);
+await settle();
+const named = rowChips();
+const qname = (PLATFORMS.find(p => p.id === 'qoder') || {}).name;
+const canme = (PLATFORMS.find(p => p.id === 'codearts') || {}).name;
+if (!qname || !canme) bad('夹具里没有 qoder / codearts 的名字');
+else if (!named || named.join('/') !== qname + '/' + canme) bad('注册表到位后标签没补成平台名，实为 ' + (named || []).join('/'));
+if (problems.length) { console.error(problems.join('\n')); process.exit(1); }
+console.log('LATE REGISTRY OK');
+setTimeout(() => process.exit(0), 50);
+`
+	runNodeHarness(t, node, dir, "keys-late-registry.mjs", late, "LATE REGISTRY OK", "密钥页在平台注册表晚到时没把 id 补成平台名")
 }
 
 // TestLogsPageRender 执行记录页（清单 40 / 41 / 42）必须画对：五路筛选合成
@@ -1473,7 +1514,9 @@ const POSTS = [];   // 动作真实下发了什么（撤销链要能对上号）
 const OVERVIEW = { total: 3, healthy: 2, version: '1.11.8', redis_mode: 'local', uptime_sec: 120, accounts: POOL };
 globalThis.fetch = async (url, opt) => {
   const u = String(url);
-  POSTS.push(((opt && opt.method) || 'GET') + ' ' + u);
+  // 带上 body：只记方法 + 路径的话，「往不存在的端点发」和「发对了端点」在
+  // /disable|toggle/ 这类宽松正则下长得一样（Z.AI 只有 toggle 就是这个坑）。
+  POSTS.push(((opt && opt.method) || 'GET') + ' ' + u + (opt && opt.body ? ' ' + String(opt.body) : ''));
   if (u.includes('/api/overview')) return j(OVERVIEW);
   if (u.includes('/api/platforms')) return j({ ok: true, platforms: REG });
   if (u.includes('/api/zai/accounts')) return j(ZAI);
@@ -1652,6 +1695,13 @@ else {
     if (j0.bad !== 0) bad('桩里全部该成功，失败数应为 0，实为 ' + j0.bad);
     if (j0.state !== 'done') bad('跑完的作业状态应是 done，实为 ' + j0.state);
     if (POSTS.filter(p => /disable|toggle/.test(p)).length !== toggleBefore + 6) bad('停用没有逐账号下发');
+    // Z.AI 只有翻转端点：enable/disable 这两个路径后端根本不存在，发过去就是 404
+    // （停用按钮点了没反应、账号还活着）。批量与单行都必须走 toggle + {enabled}。
+    const zaiWrong = POSTS.filter(p => /zai\/accounts\/[^/]+\/(enable|disable)/.test(p));
+    if (zaiWrong.length) bad('Z.AI 启停打了不存在的端点：' + zaiWrong[0]);
+    const zaiOff = POSTS.filter(p => /zai\/accounts\/[^/]+\/toggle/.test(p));
+    if (!zaiOff.length) bad('Z.AI 停用没发 toggle');
+    else if (!zaiOff.every(p => /"enabled"\s*:\s*false/.test(p))) bad('Z.AI toggle 没带 {"enabled":false}：' + zaiOff[0]);
   }
   if (host.hidden) bad('有作业时活动栏还收着');
   if (!host.textContent.includes('停用 6 个')) bad('作业标题没说清动作与数量：' + host.textContent.trim().slice(0, 40));

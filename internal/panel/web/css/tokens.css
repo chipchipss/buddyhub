@@ -42,6 +42,11 @@
     transparent 70%);
   --glow: rgba(255, 255, 255, .10);    /* 柔和外发光 */
 
+  /* 危险动作色：不可逆操作必须一眼认出来。全站保持单色，但「会删掉东西」
+     不该靠描边粗细去暗示——灰色只会被读成禁用（2026-10-10 实测反馈）。 */
+  --danger: #ff6f61;
+  --danger-soft: rgba(255, 111, 97, .12);
+
   /* 投影 */
   --shadow: 0 20px 50px -22px rgba(0, 0, 0, .85), 0 2px 10px -4px rgba(0, 0, 0, .6);
   --shadow-sm: 0 8px 22px -12px rgba(0, 0, 0, .7);
@@ -114,6 +119,8 @@
     transparent 70%);
   --glow: rgba(255, 255, 255, .9);
 
+  --danger: #c4342a;
+  --danger-soft: rgba(196, 52, 42, .10);
   --shadow: 0 20px 50px -26px rgba(35, 32, 28, .30), 0 2px 10px -6px rgba(35, 32, 28, .16);
   --shadow-sm: 0 8px 22px -14px rgba(35, 32, 28, .26);
   --shadow-pop: 0 40px 90px -34px rgba(35, 32, 28, .34);

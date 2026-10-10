@@ -58,7 +58,10 @@
 }
 .acctrow {
   display: grid;
-  grid-template-columns: 26px minmax(0, 1.7fr) minmax(0, .95fr) minmax(0, .95fr) auto;
+  /* 操作列定宽：有的行是「签到 + ⋯」、有的只有「⋯」，auto 列宽会让 ⋯ 的
+     位置逐行跳动，扫一眼对不上号（2026-10-10 反馈）。定宽 + 右对齐让 ⋯ 恒定贴右；
+     168px 是最宽的一档：回执「完成」+「撤销」+ ⋯ 同时在场（160px 实测会挤）。 */
+  grid-template-columns: 26px minmax(0, 1.7fr) minmax(0, .95fr) minmax(0, .95fr) 168px;
   grid-template-areas: "cb name st bal acts";
   gap: 12px; align-items: center;
   padding: 9px 14px;

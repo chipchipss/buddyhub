@@ -225,7 +225,8 @@ function actsCell(r) {
   }
   // ⋯ 常驻：回执那一秒里少一个按钮，行宽就跳一下（清单 15 的代价是「不跳」）。
   out.push(h('button', {
-    class: 'btn sm icon ghost', title: '更多操作', disabled: !!bulk.peek() || (!!f && f.state === 'run'),
+    class: 'btn sm icon ghost', title: '更多操作', 'aria-label': '更多操作',
+    disabled: !!bulk.peek() || (!!f && f.state === 'run'),
     onclick: ev => openMenu(ev.currentTarget, menuFor(r)),
   }, icon('more')));
   return out;

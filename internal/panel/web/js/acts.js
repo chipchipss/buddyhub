@@ -87,8 +87,13 @@ export async function run(kind, row) {
     if (kind === 'enable') return poolAct(row.id, 'revive');
     return poolAct(row.id, kind);
   }
-  // Z.AI 只有一个翻转端点：调用方负责只在状态不符时下发（批量条已按此过滤）。
-  if (row.provider === 'zai') return zaiAct(row.id, kind);
+  // Z.AI 只有一个翻转端点：enable/disable 都得发 toggle + {enabled}，
+  // 直接拼 kind 会打到 /enable、/disable 这两个不存在的路径上（404）。
+  if (row.provider === 'zai') {
+    if (kind === 'enable') return zaiAct(row.id, 'toggle', { enabled: true });
+    if (kind === 'disable') return zaiAct(row.id, 'toggle', { enabled: false });
+    return zaiAct(row.id, kind);
+  }
   if (kind === 'enable') return extAct(row.provider, row.id, 'toggle', { disabled: false });
   if (kind === 'disable') return extAct(row.provider, row.id, 'toggle', { disabled: true });
   return extAct(row.provider, row.id, kind);

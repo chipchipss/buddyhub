@@ -204,6 +204,11 @@ export default defineView({
   },
   render() {
     if (!keys() && !err()) load();
+    // 平台注册表要在这里拉、并且被读到：platName 在注册表没到位时会原样吐 id，
+    // 于是「可调用：qoder · codearts…」这种实现词就漏到界面上（2026-10-10 反馈）。
+    // 读 platforms() 是登记依赖——注册表到达后本屏要重画成中文名。
+    loadPlatforms();
+    platforms();
     const list = keys() || [];
     const stats = keyStats() || {};
     const made = justMade();

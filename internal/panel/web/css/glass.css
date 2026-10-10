@@ -266,9 +266,10 @@
 .btn.ghost:hover { background: var(--glass); }
 /* 选中态（详情抽屉的子页签）：玻璃变实、描边加重，与 .seg button.on 同一语言 */
 .btn.on { background: var(--glass-3); border-color: var(--edge-2); font-weight: 600; }
-/* 危险动作：单色下用「描边加重 + 常驻细流光」区分，而非红色 */
-.btn.danger { color: var(--fg-2); }
-.btn.danger:hover { color: var(--fg); border-color: var(--edge-2); background: var(--glass-2); }
+/* 危险动作：红色 + 加重描边。之前只用「描边加重 + fg-2 灰字」，
+   灰字在批量条那种深色条上被读成禁用按钮（2026-10-10 反馈）。 */
+.btn.danger { color: var(--danger); border-color: var(--danger-soft); }
+.btn.danger:hover { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
 
 /* ── 卡片 ─────────────────────────────────────────────────────── */
 .card {
@@ -504,8 +505,8 @@ input[type="checkbox"] { width: auto; accent-color: var(--fg-2); }
 }
 .menu-item:hover { color: var(--fg); background: var(--glass-2); }
 .menu-item:disabled { opacity: .42; cursor: default; }
-.menu-item.danger { color: var(--fg-3); }
-.menu-item.danger:hover { color: var(--fg); background: var(--glass-2); }
+.menu-item.danger { color: var(--danger); }
+.menu-item.danger:hover { color: var(--danger); background: var(--danger-soft); }
 
 /* ── Toast ────────────────────────────────────────────────────── */
 #toasts {
