@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/dingtalk"
 	"github.com/chipchipss/buddyhub/internal/extprovider/accio"
 	"github.com/chipchipss/buddyhub/internal/extprovider/autoclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
@@ -82,6 +83,10 @@ type Config struct {
 	// false（显式逃生门）时即便 auth realm=global 也不提供 global: 模型名
 	// （modelList 不列 global 名单）。
 	GlobalEnabled bool
+
+	// DingTalk 钉钉告警配置（阶段 5，可选；nil = 关闭）。
+	// 面板在线改 webhook/secret/阈值时经 Live 快照下发，此处为启动默认值。
+	DingTalk *dingtalk.Settings
 
 	// Usage 逐请求用量记录器（可选；nil = 不记录）。
 	// 在 recordAttempt 这一唯一汇聚点调用，因此流式/非流式、成功/失败都会计入，
@@ -170,6 +175,12 @@ type Handler struct {
 	// bridgeUsage Qoder 流式路径的 usage 累加器（阶段 4）：账号 → 本次请求
 	// 累计 token。流结束后入账即清（每请求一轮）。并发安全——多请求并行。
 	bridgeUsage *qoder.UsageAccumulator
+	// qoderIdle / qoderKeyQuota / dingTalk Qoder 通道钉钉告警三件套（阶段 5，
+	// fork modelIdleAlert 语义）：闲时状态 / Key 配额告警状态 / 发送器。
+	// 全部 nil = 告警关闭（默认；main 装配或面板注入配置后生效）。
+	qoderIdle     *dingtalk.IdleState
+	qoderKeyQuota *dingtalk.KeyQuotaState
+	dingTalk      *dingtalk.Sender
 }
 
 // NewHandler 构建 handler。
@@ -187,7 +198,9 @@ func NewHandler(cfg Config) *Handler {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), qoderSessions: qoder.NewSessionStore(),
-		qoderLedger: qoder.NewCreditLedger(), bridgeUsage: qoder.NewUsageAccumulator()}
+		qoderLedger: qoder.NewCreditLedger(), bridgeUsage: qoder.NewUsageAccumulator(),
+		qoderIdle: &dingtalk.IdleState{}, qoderKeyQuota: dingtalk.NewKeyQuotaState(),
+		dingTalk: dingtalk.NewSender()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responsesRoundTrip))
 	h.mux.HandleFunc("POST /responses", h.withAuth(h.responsesRoundTrip))

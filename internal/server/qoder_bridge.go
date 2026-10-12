@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chipchipss/buddyhub/internal/dingtalk"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
 	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/session"
@@ -85,6 +86,11 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 			lastErr = "账号额度已耗尽（分配上限内）"
 			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			tried[a.ID] = true
+			// 阶段 5：耗尽告警（fork notifyApiKeyQuotaExhausted——活跃态只报一次）。
+			if h.qoderLedger != nil {
+				key := qoder.AccountKey(string(a.Provider), a.ID)
+				h.qoderAlertQuotaExhausted(a, h.qoderLedger.UsedCredits(key), h.qoderLedger.AllocationLimit(key), 0)
+			}
 			continue
 		}
 		tried[a.ID] = true
@@ -110,6 +116,7 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 
 		// 成功建流：按客户端是否要流式决定透传或聚合（resilient 泵内做首帧判定）。
 		log.Printf("qoder-bridge: acct=%s model=%s 建流成功", a.ID, bareModel)
+		h.qoderRecordCall() // 阶段 5：闲时告警的事实源（成功调用即记）
 		if h.clientWantsStream(body) {
 			// 阶段 4 POST 记账（流式）：泵尾把上游 usage 帧累加进 bridgeUsage，
 			// 结束后一次性入账（fork recordKeyQuotaUsage fire-and-forget 语义）。
@@ -575,10 +582,87 @@ func (h *Handler) ExtSetManager(m ExtManager) { h.extManager = m }
 
 // ── 阶段 4：额度门与记账 ──
 
+// ── 阶段 4：额度门与记账 ──
+
+// qoderAlertCfg 当前告警配置（阶段 5）：默认关闭；main 装配或面板可注入。
+// 用值类型 + 无锁读写——配置变更频率极低（面板改一次），竞态无害
+// （最坏晚一个请求周期生效）。
+func (h *Handler) qoderAlertCfg() dingtalk.Settings {
+	if h.cfg.DingTalk == nil {
+		return dingtalk.Settings{}
+	}
+	return dingtalk.NormalizeSettings(*h.cfg.DingTalk)
+}
+
+// qoderRecordCall 记一次成功的 Qoder 调用（阶段 5 闲时告警的事实源）。
+// 在成功建流并开始透传时调；nil 安全。
+func (h *Handler) qoderRecordCall() {
+	if h.qoderIdle == nil {
+		return
+	}
+	h.qoderIdle.RecordCall(time.Now())
+}
+
+// qoderAlertQuotaExhausted 账号分配额度耗尽告警（阶段 5，fork
+// notifyApiKeyQuotaExhausted）：PRE 门判 exhausted 时调；同一账号耗尽态
+// 持续期间只报一次（activeExhaustedKeys），恢复解禁后才可再报。
+// fire-and-forget：发送失败只回滚状态记日志。
+func (h *Handler) qoderAlertQuotaExhausted(a *extstore.ExtAccount, used, limit, remaining float64) {
+	set := h.qoderAlertCfg()
+	if !set.Enabled || set.DingTalkWebhook == "" {
+		return
+	}
+	keyID := qoder.AccountKey(string(a.Provider), a.ID)
+	ev := h.qoderKeyQuota.EvaluateExhausted(set, keyID, time.Now())
+	if !ev.ShouldAlert {
+		return
+	}
+	name := a.Label
+	if name == "" {
+		name = a.ID
+	}
+	text := dingtalk.BuildExhaustedText(dingtalk.QuotaDetails{
+		KeyName: name, Provider: string(a.Provider), Used: used, Limit: limit, Remaining: remaining,
+	}, set.Locale, time.Now())
+	h.qoderKeyQuota.MarkExhaustedAlerted(keyID, time.Now())
+	if err := h.dingTalk.SendWithRetry(set, text, time.Now(), 3); err != nil {
+		h.qoderKeyQuota.RollbackExhausted(keyID) // 发送失败回滚：下次可重试
+		log.Printf("qoder-bridge: acct=%s 额度耗尽告警发送失败: %v", a.ID, err)
+		return
+	}
+	log.Printf("qoder-bridge: acct=%s 额度耗尽告警已发送", a.ID)
+}
+
+// qoderAlertQuotaThreshold 使用率阈值告警（阶段 5，fork
+// notifyApiKeyQuotaThresholdExceeded）：记账后调，过阈值+过冷却才报。
+func (h *Handler) qoderAlertQuotaThreshold(a *extstore.ExtAccount, used, limit float64) {
+	set := h.qoderAlertCfg()
+	if !set.Enabled || !set.QuotaUsageThresholdEnable || set.DingTalkWebhook == "" {
+		return
+	}
+	keyID := qoder.AccountKey(string(a.Provider), a.ID)
+	ev := h.qoderKeyQuota.EvaluateThreshold(set, keyID, used, limit, time.Now())
+	if !ev.ShouldAlert {
+		return
+	}
+	name := a.Label
+	if name == "" {
+		name = a.ID
+	}
+	text := dingtalk.BuildThresholdText(dingtalk.QuotaDetails{
+		KeyName: name, Provider: string(a.Provider), Used: used, Limit: limit,
+		Remaining: limit - used,
+	}, ev.ThresholdPct, ev.UsagePercent, set.Locale, time.Now())
+	h.qoderKeyQuota.MarkThresholdAlerted(keyID, time.Now())
+	if err := h.dingTalk.SendWithRetry(set, text, time.Now(), 3); err != nil {
+		log.Printf("qoder-bridge: acct=%s 阈值告警发送失败: %v", a.ID, err)
+	}
+}
+
 // qoderQuotaGate 路由前额度门（fork apiKeyPolicy PRE-request 语义）：
 // 读账本分配上限内的已用量（精确优先、余额差估算兜底），判定账号是否还有
 // 额度。无账本/无上限 → QuotaOK；两条估算路都无数据 → QuotaUnknown
-//（调用方 fail-open 放行——配额基础设施不可用不挡正常流量）。
+// （调用方 fail-open 放行——配额基础设施不可用不挡正常流量）。
 func (h *Handler) qoderQuotaGate(a *extstore.ExtAccount) qoder.QuotaGateResult {
 	if h.qoderLedger == nil {
 		return qoder.QuotaOK
@@ -619,6 +703,13 @@ func (h *Handler) qoderRecordUsage(a *extstore.ExtAccount, sessKey, model string
 			TotalTokens:      u.TotalTokens,
 			HasTotal:         u.TotalTokens > 0,
 		}, true)
+	}
+	// 阶段 5：使用率阈值告警（记账后判，fork notifyApiKeyQuotaThresholdExceeded）。
+	if h.qoderLedger != nil {
+		key := qoder.AccountKey(string(a.Provider), a.ID)
+		if limit := h.qoderLedger.AllocationLimit(key); limit > 0 {
+			h.qoderAlertQuotaThreshold(a, h.qoderLedger.UsedCredits(key), limit)
+		}
 	}
 	log.Printf("qoder-bridge: acct=%s 记账 prompt=%d completion=%d total=%d",
 		a.ID, u.PromptTokens, u.CompletionTokens, u.TotalTokens)
