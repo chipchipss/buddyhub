@@ -376,6 +376,256 @@ func truncateMsg(s string, n int) string {
 	return s
 }
 
+// ── 阶段 2：流中段兜底与自动续跑 ──
+// 移植自 9router-qoder-plus qoder.js（HEAD 290c68c）：
+//   - 终止状态机 L1308-1332/L1374-1384（upstreamTermination 五态）；
+//   - 中途信封错误 L1400-1436（statusCodeValue≠200 → 内联 error 帧，不伪造 finish）；
+//   - chunk.error 透传 L1437-1444；transport error 只认正常 EOF L1554-1560；
+//   - 终帧暂存 L1453-1456（isHeldTerminal）与释放 L1554-1605；
+//   - 续跑触发全 AND 条件 L1554-1563 与状态重置 L1596-1605；
+//   - dangling 判定 L1124-1140（DANGLING_* 常量 + looksLikeDanglingIntent）。
+
+// StreamTermination 流终止状态（对齐 fork upstreamTermination）。
+type StreamTermination string
+
+const (
+	TermClean         StreamTermination = "clean_done"          // 见到 [DONE] 正常结束
+	TermPrematureDone StreamTermination = "premature_done"      // 无 finish_reason 即 [DONE]
+	TermUpstreamError StreamTermination = "upstream_error"      // 流内错误
+	TermFinishNoDone  StreamTermination = "finish_without_done" // 有 finish_reason 无 [DONE]
+	TermPrematureEOF  StreamTermination = "premature_eof"       // EOF 但无 finish_reason 无 [DONE]
+)
+
+// MidStreamKind 单个 data 帧在流中段的分类结果（桥接据此决定透传/拦截）。
+type MidStreamKind int
+
+const (
+	MidPass          MidStreamKind = iota // 普通正文帧，原样透传
+	MidQueueSignal                        // 排队/超时标记帧（防御包裹），不透传
+	MidEnvelopeError                      // 错误信封（statusCodeValue≠200 或 error 对象）
+	MidDone                               // [DONE] 哨兵
+	MidTerminal                           // 带 finish_reason 的终帧（暂存判定交给上层 held 机制）
+)
+
+// ClassifyMidStreamData 流中段 data 帧分类（对齐 fork processLine L1400-1456）：
+// 首帧判定（ParseFirstEnvelopeData）之后的每一个 data 帧都过这里。
+//   - "[DONE]" → MidDone；
+//   - 信封 statusCodeValue≥400 → MidEnvelopeError（envErr 非 nil，内联错误帧素材）；
+//   - chunk.error 对象 → MidEnvelopeError（原样透传语义由上层决定，fork 是直接转发）；
+//   - isQueued/10605 标记 → MidQueueSignal（防御上游改版）；
+//   - 普通 chunk 且带 finish_reason → MidTerminal（上层暂存）；
+//   - 其余 → MidPass。
+func ClassifyMidStreamData(data string) (kind MidStreamKind, envErr *EnvelopeError, signal QueueInfo) {
+	trimmed := strings.TrimSpace(data)
+	if trimmed == "[DONE]" {
+		return MidDone, nil, QueueInfo{}
+	}
+	var frame struct {
+		Error *struct {
+			Message string `json:"message"`
+			Code    any    `json:"code"`
+		} `json:"error"`
+		StatusCodeValue int    `json:"statusCodeValue"`
+		Body            string `json:"body"`
+		IsQueued        *bool  `json:"isQueued"`
+		Code            any    `json:"code"`
+		Choices         []struct {
+			FinishReason any `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(data), &frame); err != nil {
+		// 非JSON：fork 里 processLine 对解析失败直接 return（丢弃），我们保守透传
+		// 让客户端侧解析器自己面对（语义等价于 fork 的静默跳过，但不丢字节）。
+		return MidPass, nil, QueueInfo{}
+	}
+	if frame.IsQueued != nil && *frame.IsQueued {
+		return MidQueueSignal, nil, QueueInfo{Queued: true, Reason: "queued"}
+	}
+	if s, ok := frame.Code.(string); ok && s == "10605" {
+		return MidQueueSignal, nil, QueueInfo{Queued: true, Reason: "queued"}
+	}
+	// 中途信封错误：statusCodeValue≠200（fork L1400-1436——头已上线，
+	// 只能内联 error 帧，绝不能补 finish_reason=stop）。
+	if frame.StatusCodeValue >= 400 {
+		envErr, _ = ParseFirstEnvelopeData(data)
+		if envErr != nil {
+			return MidEnvelopeError, envErr, QueueInfo{}
+		}
+	}
+	if frame.Error != nil {
+		return MidEnvelopeError, nil, QueueInfo{}
+	}
+	// 终帧判定：choices[].finish_reason 非空即终帧（fork isHeldTerminal L1324-1331，
+	// finish_reason="tool_calls" 也是终帧——工具调用回合照常暂存）。
+	if len(frame.Choices) > 0 && frame.Choices[0].FinishReason != nil {
+		if fr, ok := frame.Choices[0].FinishReason.(string); ok && fr != "" {
+			return MidTerminal, nil, QueueInfo{}
+		}
+	}
+	return MidPass, nil, QueueInfo{}
+}
+
+// BuildMidStreamErrorFrame 内联错误帧（对齐 fork L1417-1430）：
+// 头已上线后唯一的诚实信号——真实 error 帧 + [DONE]，绝不补 finish_reason=stop
+// （否则客户端记成功回合，带污染历史重试）。
+func BuildMidStreamErrorFrame(envErr *EnvelopeError) string {
+	msg := envErr.Message
+	if envErr.Code == "rate_limit_exceeded" {
+		// fork withRetryAfterHint：限流附 30s 重试提示。
+		msg = truncateMsg(msg, 400) + " (retry after 30s)"
+	} else {
+		msg = truncateMsg(msg, 1600)
+	}
+	frame := map[string]any{
+		"error": map[string]any{
+			"message": msg,
+			"type":    "server_error",
+			"code":    envErr.Code,
+		},
+	}
+	raw, _ := json.Marshal(frame)
+	return string(raw)
+}
+
+// TurnTracker 回合状态跟踪（对齐 fork trackChunk L1355-1368 + 状态变量 L1313-1316）。
+// 流泵每处理一个 chunk 调 Track，续跑重置调 Reset。
+type TurnTracker struct {
+	SawToolCall    bool
+	SawFinish      bool
+	LastFinish     string
+	turnText       strings.Builder
+	turnTextLength int
+}
+
+// Track 记录一个 OpenAI chunk 的回合事实（tool_call / content / finish_reason）。
+func (t *TurnTracker) Track(chunkJSON string) {
+	var chunk struct {
+		Choices []struct {
+			Delta struct {
+				Content   string `json:"content"`
+				ToolCalls []any  `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason any `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal([]byte(chunkJSON), &chunk) != nil {
+		return
+	}
+	for _, ch := range chunk.Choices {
+		if len(ch.Delta.ToolCalls) > 0 {
+			t.SawToolCall = true
+		}
+		if ch.Delta.Content != "" {
+			// 只留末 120 字符（判定只需尾部），防止长答案内存增长。
+			t.turnText.WriteString(ch.Delta.Content)
+			if t.turnText.Len() > 720 {
+				s := t.turnText.String()
+				t.turnText.Reset()
+				t.turnText.WriteString(s[len(s)-360:])
+			}
+		}
+		if fr, ok := ch.FinishReason.(string); ok && fr != "" {
+			t.SawFinish = true
+			t.LastFinish = fr
+		}
+	}
+}
+
+// TurnText 当前累积的回合文本（判定用，只保证含末尾内容）。
+func (t *TurnTracker) TurnText() string { return t.turnText.String() }
+
+// Reset 续跑前状态重置（fork L1596-1600：六项全清，kind 改 openai 由泵自行处理）。
+func (t *TurnTracker) Reset() {
+	t.SawToolCall = false
+	t.SawFinish = false
+	t.LastFinish = ""
+	t.turnText.Reset()
+	t.turnTextLength = 0
+}
+
+// dangling 判定（fork L1124-1140 语义，保守移植——语义固化不走配置，
+// 误杀止血走 QODER_AUTO_CONTINUE_MAX=0，调参走专项 PR）。
+var (
+	danglingExclusionsRe = regexp.MustCompile(`(?i)let me know|告诉我|如有疑问|有问题随时`)
+	danglingColonRe      = regexp.MustCompile(`[:：]\s*$`)
+	danglingIntentRe     = regexp.MustCompile(`(?i)(让我|我先|我来|我核对|我检查|我查一下|接下来|现在|let me|i'?ll|i will|now let|next,? i)[^。！？!?]{0,60}[。.]?\s*$`)
+)
+
+// LooksLikeDanglingIntent "宣布式收尾"启发式：模型说了下一步要做什么却没发
+// tool call 就结束回合。保守设计——短文本、冒号或意图动词收尾、常见客套排除，
+// 正常最终答案绝不误续。
+func LooksLikeDanglingIntent(text string) bool {
+	t := strings.TrimSpace(text)
+	if t == "" || len([]rune(t)) > 600 {
+		return false
+	}
+	if danglingExclusionsRe.MatchString(t) {
+		return false
+	}
+	if danglingColonRe.MatchString(t) {
+		return true
+	}
+	r := []rune(t)
+	tail := t
+	if len(r) > 120 {
+		tail = string(r[len(r)-120:])
+	}
+	return danglingIntentRe.MatchString(tail)
+}
+
+// ContinueNudge 续跑请求追加的用户消息（fork CONTINUE_NUDGE L114-115 原文）。
+const ContinueNudge = "Continue now: execute the step you just announced with a tool call in this turn. Do not restate the intent."
+
+// BuildContinueBody 构造续跑请求体（对齐 fork continueFetch L1845-1906 前半）：
+// ①过滤空 reasoning-only assistant 消息（无 tool_calls 且 content 空）；
+// ②追加 {assistant: danglingText} + {user: ContinueNudge}；③流式恒开。
+// request_id 重生成由 ChatMeta 空值触发 BuildChatBody 的既有逻辑完成。
+func BuildContinueBody(incoming []byte, danglingText string) ([]byte, error) {
+	var req struct {
+		Messages []json.RawMessage `json:"messages"`
+		Stream   *bool             `json:"stream"`
+		Extra    map[string]json.RawMessage
+	}
+	if err := json.Unmarshal(incoming, &req); err != nil {
+		return nil, err
+	}
+	var kept []json.RawMessage
+	for _, m := range req.Messages {
+		var probe struct {
+			Role      string `json:"role"`
+			Content   any    `json:"content"`
+			ToolCalls []any  `json:"tool_calls"`
+		}
+		if json.Unmarshal(m, &probe) == nil &&
+			probe.Role == "assistant" && len(probe.ToolCalls) == 0 {
+			if s, ok := probe.Content.(string); ok && strings.TrimSpace(s) == "" {
+				continue // 空 reasoning-only assistant 消息，续跑重放会污染上下文
+			}
+		}
+		kept = append(kept, m)
+	}
+	dangling, _ := json.Marshal(map[string]string{"role": "assistant", "content": danglingText})
+	nudge, _ := json.Marshal(map[string]string{"role": "user", "content": ContinueNudge})
+	kept = append(kept, dangling, nudge)
+
+	var full map[string]json.RawMessage
+	if err := json.Unmarshal(incoming, &full); err != nil {
+		return nil, err
+	}
+	msgs, _ := json.Marshal(kept)
+	full["messages"] = msgs
+	full["stream"] = json.RawMessage("true")
+	return json.Marshal(full)
+}
+
+// HasToolsRequest 判断请求体是否带 tools（续跑触发条件之一）。
+func HasToolsRequest(incoming []byte) bool {
+	var probe struct {
+		Tools []any `json:"tools"`
+	}
+	return json.Unmarshal(incoming, &probe) == nil && len(probe.Tools) > 0
+}
+
 // SSELineScanner 按行拆 SSE 流并在首帧判定时挂钩：server 桥接用它做
 // "首个 data 帧 = 排队/错误信封" 的原位分类。这里提供最小实现供桥接复用：
 // ReadLine 返回下一行（不含行尾 \n），EOF 返回 io.EOF。

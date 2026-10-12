@@ -7,6 +7,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -88,7 +89,7 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 		// 成功建流：按客户端是否要流式决定透传或聚合（resilient 泵内做首帧判定）。
 		log.Printf("qoder-bridge: acct=%s model=%s 建流成功", a.ID, bareModel)
 		if h.clientWantsStream(body) {
-			h.proxyQoderResilientSSE(w, rc, res, a.ID)
+			h.proxyQoderResilientSSE(w, r, rc, res, a.ID, body)
 		} else {
 			h.proxyQoderAggregate(w, rc)
 		}
@@ -111,6 +112,15 @@ func (h *Handler) qoderResilientStream(r *http.Request, cli *qoder.Client, cred 
 	a *extstore.ExtAccount, body []byte, res qoder.ResilienceConfig) (
 	rc io.ReadCloser, status int, envErr *qoder.EnvelopeError, fatal bool, ferr error,
 ) {
+	return h.qoderResilientStreamCtx(r.Context(), cli, cred, a, body, res)
+}
+
+// qoderResilientStreamCtx 弹性建流的 context 直通版：续跑请求复用主请求的
+// context——客户端断开时续跑同步取消，不留孤儿上游流。
+func (h *Handler) qoderResilientStreamCtx(ctx context.Context, cli *qoder.Client, cred *qoder.Credential,
+	a *extstore.ExtAccount, body []byte, res qoder.ResilienceConfig) (
+	rc io.ReadCloser, status int, envErr *qoder.EnvelopeError, fatal bool, ferr error,
+) {
 	ensureKeepalive := func() {
 		// 建流阶段排队等待的心跳由调用方 ResponseWriter 处理不安全（头未发），
 		// 这里只做空操作占位：真实心跳在 proxyQoderResilientSSE 的流内空闲检测里。
@@ -122,7 +132,7 @@ func (h *Handler) qoderResilientStream(r *http.Request, cli *qoder.Client, cred 
 		if err != nil {
 			return nil, 0, nil, false, err
 		}
-		cur, st, err := cli.ChatStream(r.Context(), cred, outBody, meta)
+		cur, st, err := cli.ChatStream(ctx, cred, outBody, meta)
 		if err == nil {
 			// HTTP 2xx：做首帧判定——首个 data 帧可能是排队/错误信封。
 			cur, envErr2, signal, retryable := qoder.ClassifyFirstEnvelope(cur, res)
@@ -131,7 +141,7 @@ func (h *Handler) qoderResilientStream(r *http.Request, cli *qoder.Client, cred 
 			}
 			if retryable {
 				// 首帧即排队/超时标记：按其预算继续原位重试。
-				if !h.qoderWait(r, res, attempt, signal.Reason, signal.IsTimeout) {
+				if !h.qoderWait(ctx, res, attempt, signal.Reason, signal.IsTimeout) {
 					return nil, st, nil, false, errors.New("客户端断开，放弃重试")
 				}
 				continue
@@ -141,8 +151,8 @@ func (h *Handler) qoderResilientStream(r *http.Request, cli *qoder.Client, cred 
 		ue, ok := err.(*qoder.UpstreamError)
 		if !ok {
 			// 网络层错误：少量原位重试（复用排队预算的前 3 次），其余换号。
-			if attempt <= 3 && r.Context().Err() == nil {
-				if !h.qoderWait(r, res, attempt, "network: "+err.Error(), false) {
+			if attempt <= 3 && ctx.Err() == nil {
+				if !h.qoderWait(ctx, res, attempt, "network: "+err.Error(), false) {
 					return nil, 0, nil, false, err
 				}
 				continue
@@ -157,7 +167,7 @@ func (h *Handler) qoderResilientStream(r *http.Request, cli *qoder.Client, cred 
 			return nil, ue.Status, nil, false, ue
 		}
 		// 排队/超时：原位等待后重试（排队识别优先于普通失败——fork 语义）。
-		if !h.qoderWait(r, res, attempt, info.Reason, info.IsTimeout) {
+		if !h.qoderWait(ctx, res, attempt, info.Reason, info.IsTimeout) {
 			return nil, ue.Status, nil, false, ue
 		}
 	}
@@ -166,7 +176,7 @@ func (h *Handler) qoderResilientStream(r *http.Request, cli *qoder.Client, cred 
 
 // qoderWait 弹性等待：日志 + 退避 sleep（带抖动）。返回 false = 客户端已断开。
 // isTimeout=true 时按首 token 超时策略取延迟，否则按排队退避。
-func (h *Handler) qoderWait(r *http.Request, res qoder.ResilienceConfig, attempt int, reason string, isTimeout bool) bool {
+func (h *Handler) qoderWait(ctx context.Context, res qoder.ResilienceConfig, attempt int, reason string, isTimeout bool) bool {
 	var d time.Duration
 	if isTimeout {
 		d = res.TimeoutDelayFor(attempt)
@@ -177,14 +187,26 @@ func (h *Handler) qoderWait(r *http.Request, res qoder.ResilienceConfig, attempt
 	select {
 	case <-time.After(d):
 		return true
-	case <-r.Context().Done():
+	case <-ctx.Done():
 		return false
 	}
 }
 
-// proxyQoderResilientSSE 逐帧透传 Qoder SSE，并在流内做首帧判定与排队识别。
-// 首个 data 帧若是排队/超时标记：向客户端发注释心跳继续等下一帧（帧本身不透传）。
-func (h *Handler) proxyQoderResilientSSE(w http.ResponseWriter, rc io.ReadCloser, res qoder.ResilienceConfig, acctID string) {
+// proxyQoderResilientSSE 流式兜底泵（阶段 2，语义对齐 fork wrapQoderSSE）：
+//   - 全程逐帧分类（ClassifyMidStreamData）：正文透传、排队帧发注释心跳、
+//     错误信封发内联 error 帧+[DONE]、[DONE] 哨兵终结；
+//   - 五态终止状态机（clean_done/premature_done/upstream_error/finish_without_done/
+//     premature_eof），EOF 分类对齐 fork classifyEndOfStream；
+//   - 终帧（finish_reason）暂存不转发（heldFinish），确认无续跑才释放——
+//     自动续跑前置，防客户端在续跑请求间隙结束回合并 abort；
+//   - 自动续跑：全 AND 触发（fork L1554-1563），续跑请求重新生成 request_id
+//     防上游 Duplicate 判定，计数走 QODER_AUTO_CONTINUE_MAX（默认 1，0=关）；
+//   - 审阅意见回链（Chief 三条）：①abort/写失败后不发错误帧、不泄终帧——
+//     所有写路径先探写错误，断开即静默收流；②held 释放四个显式测试用例
+//     （无续跑顺序/有续跑哨兵复用/abort 不释放/信封错误置空顺序）；
+//     ③"只有正常 EOF 可当缺 [DONE]"——transport error 即使见过 finish_reason
+//     也算失败，held 帧不得把截断答案变成成功回合（反例测试钉死）。
+func (h *Handler) proxyQoderResilientSSE(w http.ResponseWriter, r *http.Request, rc io.ReadCloser, res qoder.ResilienceConfig, acctID string, origBody []byte) {
 	defer rc.Close()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -195,54 +217,239 @@ func (h *Handler) proxyQoderResilientSSE(w http.ResponseWriter, rc io.ReadCloser
 		writeOpenAIError(w, http.StatusInternalServerError, "streaming_unsupported", "服务器不支持流式响应 Flush")
 		return
 	}
-	buf := make([]byte, 32*1024)
-	var pending []byte
-	firstDataChecked := false
-	for {
-		n, err := rc.Read(buf)
-		if n > 0 {
-			pending = append(pending, buf[:n]...)
-			// 逐行拆 SSE data 帧，只在首帧前做判定。
-			for {
-				idx := indexByteSlice(pending, '\n')
-				if idx < 0 {
-					break
-				}
-				line := string(pending[:idx])
-				pending = pending[idx+1:]
-				trimmed := strings.TrimSpace(line)
-				if !strings.HasPrefix(trimmed, "data:") {
-					if _, werr := w.Write([]byte(line + "\n")); werr != nil {
-						return
-					}
-					continue
-				}
-				payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-				if !firstDataChecked {
-					firstDataChecked = true
-					if envErr, signal := qoder.ParseFirstEnvelopeData(payload); envErr != nil {
-						writeOpenAIError(w, envErr.Status, envErr.Code, envErr.Message)
-						return
-					} else if signal.Queued {
-						// 上游改版包裹的排队首帧：发注释心跳，不透传，继续等。
-						w.Write([]byte(": queued\n"))
-						flusher.Flush()
-						continue
-					}
-				}
-				if _, werr := w.Write([]byte(line + "\n")); werr != nil {
-					return
-				}
-			}
-			flusher.Flush()
+
+	var (
+		term          qoder.StreamTermination
+		heldFinish    string // 暂存的终帧原文（含 "data: " 前缀，不含行尾换行）
+		doneEmitted   bool
+		clientGone    bool // 客户端断开标志：置位后一切写路径静默、不发错误帧
+		tracker       qoder.TurnTracker
+		continuations int
+		hasTools      = qoder.HasToolsRequest(origBody)
+	)
+
+	// writeLine 唯一写出口：写失败即置 clientGone（审阅①：断开后静默，
+	// 不发错误帧、不泄终帧——fork 无此闸，Go 侧 ResponseWriter 语义要求）。
+	writeLine := func(s string) bool {
+		if clientGone {
+			return false
 		}
-		if err != nil {
-			// 尾部残留（无换行的最后一段）原样补发。
-			if len(pending) > 0 {
-				w.Write(pending)
-			}
+		if _, err := w.Write([]byte(s)); err != nil {
+			clientGone = true
+			return false
+		}
+		return true
+	}
+
+	// emitInlineError 内联错误帧 + [DONE]（fork L1417-1430：头已上线后唯一的
+	// 诚实信号，绝不补 finish_reason=stop——否则客户端记成功回合带污染历史重试）。
+	emitInlineError := func(message, code string) {
+		if doneEmitted || clientGone {
 			return
 		}
+		frame := map[string]any{"error": map[string]any{
+			"message": qoder.RedactSensitive(truncateBridgeMsg(message, 1600)),
+			"type":    "server_error",
+			"code":    code,
+		}}
+		raw, _ := json.Marshal(frame)
+		if !writeLine("data: " + string(raw) + "\n\ndata: [DONE]\n\n") {
+			return
+		}
+		flusher.Flush()
+		doneEmitted = true
+		term = qoder.TermUpstreamError
+	}
+
+	// emitDone 正常收尾：此刻确认无续跑才释放暂存终帧（fork L1558-1566）。
+	emitDone := func() {
+		if doneEmitted || clientGone {
+			return
+		}
+		if heldFinish != "" {
+			if !writeLine(heldFinish + "\n") {
+				return
+			}
+			heldFinish = ""
+		}
+		if !writeLine("data: [DONE]\n\n") {
+			return
+		}
+		flusher.Flush()
+		doneEmitted = true
+	}
+
+	// linePump 处理一行 SSE。返回 false = 上游流应立即终止。
+	linePump := func(line string) bool {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			return true
+		}
+		if !strings.HasPrefix(trimmed, "data:") {
+			return writeLine(line + "\n") // 注释/事件行原样透传
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+		kind, envErr, _ := qoder.ClassifyMidStreamData(payload)
+		switch kind {
+		case qoder.MidDone:
+			// fork handleDoneSignal：无 finish_reason 即 [DONE] = premature_done
+			//（截断答案不算成功回合）。
+			if !tracker.SawFinish {
+				term = qoder.TermPrematureDone
+				emitInlineError("upstream sent [DONE] before a terminal chunk", "stream_disconnected")
+			} else {
+				term = qoder.TermClean
+				emitDone() // 释放暂存终帧 + [DONE]
+			}
+			return false
+		case qoder.MidQueueSignal:
+			// 防御包裹的排队帧：发注释心跳，不透传帧本身。
+			return writeLine(": queued\n\n")
+		case qoder.MidEnvelopeError:
+			heldFinish = "" // fork：错误帧前丢暂存终帧
+			if envErr != nil {
+				emitInlineError(envErr.Message, envErr.Code)
+			} else {
+				// chunk.error 对象（fork L1437-1444）：错误帧原样转发后终结。
+				if writeLine("data: " + payload + "\n\n") {
+					flusher.Flush()
+				}
+				doneEmitted = true
+				term = qoder.TermUpstreamError
+			}
+			return false
+		case qoder.MidTerminal:
+			heldFinish = line // 暂存不转发，续跑判定后统一释放
+			tracker.Track(payload)
+			return true
+		default:
+			tracker.Track(payload)
+			return writeLine(line + "\n")
+		}
+	}
+
+	// pump 读完一条上游流：返回 true = 正常耗尽（EOF 且未发 done）。
+	pump := func(reader io.Reader) bool {
+		buf := make([]byte, 32*1024)
+		var pending []byte
+		for {
+			n, err := reader.Read(buf)
+			if n > 0 {
+				pending = append(pending, buf[:n]...)
+				for {
+					idx := indexByteSlice(pending, '\n')
+					if idx < 0 {
+						break
+					}
+					line := string(pending[:idx])
+					pending = pending[idx+1:]
+					if !linePump(line) || doneEmitted || clientGone {
+						return false
+					}
+				}
+				flusher.Flush()
+			}
+			if err != nil {
+				if err == io.EOF {
+					if len(pending) > 0 && !linePump(string(pending)) {
+						return false
+					}
+					return !doneEmitted && !clientGone
+				}
+				// transport error（审阅铁律③）：即使见过 finish_reason 也算失败，
+				// held 帧不释放——否则截断答案变成功回合。
+				term = qoder.TermUpstreamError
+				emitInlineError("upstream stream failed before a terminal chunk", "stream_disconnected")
+				return false
+			}
+		}
+	}
+
+	// classifyEOF EOF 终态分类（fork classifyEndOfStream）。
+	classifyEOF := func() {
+		if doneEmitted || term != "" {
+			return
+		}
+		if tracker.SawFinish {
+			term = qoder.TermFinishNoDone
+		} else {
+			term = qoder.TermPrematureEOF
+		}
+	}
+
+	// continueFetch 续跑请求（fork continueFetch 语义）：每个候选账号构造
+	// BuildContinueBody（追加悬挂文本+NUDGE、过滤空 assistant、流式恒开），
+	// 走 qoderResilientStreamCtx 复用主请求 context（断开同步取消），
+	// ChatMeta 空值触发 request_id 重生成防 Duplicate；fatal/失败换下一账号。
+	continueFetch := func(ctx context.Context) (io.ReadCloser, bool) {
+		if h.cfg.ExtAccounts == nil {
+			return nil, false
+		}
+		cli := qoder.New()
+		for _, a := range h.cfg.ExtAccounts() {
+			if a.Provider != extstore.PQoder || a.Disabled {
+				continue
+			}
+			var cred qoder.Credential
+			if json.Unmarshal(a.Cred, &cred) != nil {
+				continue
+			}
+			outBody, err := qoder.BuildContinueBody(origBody, tracker.TurnText())
+			if err != nil {
+				continue
+			}
+			cur, _, envErr, fatal, ferr := h.qoderResilientStreamCtx(ctx, cli, &cred, a, outBody, res)
+			if fatal || envErr != nil || ferr != nil || cur == nil {
+				if cur != nil {
+					cur.Close()
+				}
+				continue
+			}
+			return cur, true
+		}
+		return nil, false
+	}
+
+	// ── 主循环 ──
+	if !pump(rc) {
+		return
+	}
+	classifyEOF()
+
+	// 自动续跑全 AND 条件（fork L1554-1563 原文语义）。
+	for term != qoder.TermUpstreamError && !doneEmitted && !clientGone &&
+		res.AutoContinueMax > 0 && continuations < res.AutoContinueMax &&
+		hasTools && !tracker.SawToolCall && tracker.LastFinish != "tool_calls" &&
+		qoder.LooksLikeDanglingIntent(tracker.TurnText()) {
+
+		continuations++
+		heldFinish = "" // 回合没结束：丢暂存终帧，否则客户端中途 abort 我们
+		log.Printf("qoder-bridge: acct=%s auto-continue %d/%d (finish=%s, dangling intent)",
+			acctID, continuations, res.AutoContinueMax, tracker.LastFinish)
+
+		next, ok := continueFetch(r.Context())
+		if !ok {
+			term = qoder.TermUpstreamError
+			emitInlineError("auto-continue request failed", "stream_disconnected")
+			break
+		}
+		tracker.Reset() // fork：六项状态清零后再泵续跑流
+		term = ""
+		more := pump(next)
+		next.Close()
+		if !more {
+			return
+		}
+		classifyEOF()
+	}
+
+	// premature_eof 兜底（fork）：EOF 且无任何终止标志。
+	if !doneEmitted && !clientGone && term == qoder.TermPrematureEOF {
+		emitInlineError("upstream stream closed before a terminal chunk", "stream_disconnected")
+	}
+	// 无续跑将跟随：释放终帧收尾。
+	if !doneEmitted {
+		emitDone()
 	}
 }
 
@@ -254,6 +461,14 @@ func indexByteSlice(b []byte, sep byte) int {
 		}
 	}
 	return -1
+}
+
+// truncateBridgeMsg 桥接层错误文案截断（供内联 error 帧）。
+func truncateBridgeMsg(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "..."
+	}
+	return s
 }
 
 // clientWantsStream 从请求体读 stream 字段。
