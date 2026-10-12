@@ -47,10 +47,41 @@ func (p *Panel) extManager() *extstore.Manager {
 }
 
 // extAccounts GET /panel/api/ext/accounts —— 全部外部账号视图（含余额，逐账号实时查）。
+// 阶段 5：响应行并入额度快照（credits_allocated/used/remaining/exhausted），
+// 供前端账号行渲染 Credits Used 列。QuotaSource 未注入（裸用/测试）时跳过，
+// 行形状与引入前一致。
 func (p *Panel) extAccounts(w http.ResponseWriter, r *http.Request) {
+	accounts := p.extManager().StatusAll(r.Context())
+	if p.cfg.QuotaSource != nil {
+		type quotaRow struct {
+			AccountKey       string  `json:"account_key"`
+			CreditsAllocated float64 `json:"credits_allocated"`
+			CreditsUsed      float64 `json:"credits_used"`
+			CreditsRemaining float64 `json:"credits_remaining"`
+			Exhausted        bool    `json:"exhausted"`
+			Precise          bool    `json:"precise"`
+		}
+		byKey := map[string]quotaRow{}
+		for _, raw := range p.cfg.QuotaSource() {
+			if b, err := json.Marshal(raw); err == nil {
+				var row quotaRow
+				if json.Unmarshal(b, &row) == nil && row.AccountKey != "" {
+					byKey[row.AccountKey] = row
+				}
+			}
+		}
+		for i := range accounts {
+			if row, ok := byKey[accounts[i].Key]; ok {
+				accounts[i].CreditsAllocated = row.CreditsAllocated
+				accounts[i].CreditsUsed = row.CreditsUsed
+				accounts[i].CreditsRemaining = row.CreditsRemaining
+				accounts[i].CreditsExhausted = row.Exhausted
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       true,
-		"accounts": p.extManager().StatusAll(r.Context()),
+		"accounts": accounts,
 	})
 }
 

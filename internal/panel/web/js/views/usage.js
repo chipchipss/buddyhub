@@ -14,11 +14,28 @@ const plat = signal('all');
 const usage = signal(null);
 const pk = signal(null);
 const pkPlat = signal('all');
+const keyRows = signal(null);
+const keyFilter = signal('');
 
 async function loadUsage(quiet = true) {
   try {
     usage.set(await api('usage?hours=' + encodeURIComponent(hours.peek())));
   } catch (e) { if (!quiet) toast(e.message, 'fail'); }
+}
+
+/* 按	Key 用量：后端已做 key_name 前缀过滤（/panel/api/usage/keys），
+   这里把过滤词透传，输入防抖 300ms 重查。Key Name 列 = api_keys 配置里
+   的 name，匿名 Key 回退显示 ID 摘要。 */
+let keyDeb = null;
+async function loadKeys(quiet = true) {
+  try {
+    const f = encodeURIComponent(keyFilter.peek());
+    keyRows.set(await api('usage/keys' + (f ? '?key_name=' + f : '')));
+  } catch (e) { if (!quiet) toast(e.message, 'fail'); }
+}
+function loadKeysDebounced() {
+  clearTimeout(keyDeb);
+  keyDeb = setTimeout(loadKeys, 300);
 }
 
 async function loadPk(quiet = true) {
@@ -235,6 +252,47 @@ function usageSeg() {
         usageRows((d && d.by_model) || [], false, false),
       )),
     ),
+    keyUsageSeg(),
+  );
+}
+
+/* ── 按 Key 用量（阶段 5：Key Name 列 + 过滤）────────────────── */
+function fmtKeyLast(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { hour12: false });
+}
+
+function keyUsageSeg() {
+  const rows = keyRows();
+  return h('section', { class: 'card' },
+    h('header', null,
+      h('h2', { text: '按 Key' }),
+      h('span', { class: 'hint', text: '调用方 API Key 维度 · 名字取自密钥配置' }),
+      h('span', { class: 'grow' }),
+      h('input', {
+        class: 'input', placeholder: '按 Key 名过滤…', style: { width: '170px' },
+        value: keyFilter(),
+        oninput: ev => { keyFilter.set(ev.target.value); loadKeysDebounced(); },
+      }),
+      h('button', { class: 'btn sm', onclick: () => loadKeys(false) }, icon('refresh'), '刷新'),
+    ),
+    h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
+      h('thead', null, h('tr', null,
+        h('th', { text: 'Key 名' }), h('th', { text: 'Key ID', class: 'num' }),
+        h('th', { class: 'num', text: '调用' }), h('th', { class: 'num', text: '失败' }),
+        h('th', { class: 'num', text: '最近使用' }))),
+      !rows ? h('tbody', null, h('tr', null, h('td', { colspan: '5' }, h('div', { class: 'busy', text: '读取按 Key 用量' }))))
+        : !(rows.keys || []).length ? h('tbody', null, h('tr', null, h('td', { colspan: '5' },
+          h('div', { class: 'empty', style: { padding: '20px 0' } }, h('div', { class: 'd', text: keyFilter() ? '没有匹配的 Key' : '暂无按 Key 用量数据' })))))
+          : h('tbody', null, ...(rows.keys || []).map(k => h('tr', null,
+            h('td', null, h('span', { text: k.name || '(未命名)' })),
+            h('td', { class: 'num muted', text: String(k.id || '').slice(0, 12) + '…' }),
+            h('td', { class: 'num', text: fmtTok(k.calls) }),
+            h('td', { class: 'num', text: String(k.errors || 0) }),
+            h('td', { class: 'num', text: fmtKeyLast(k.last) }),
+          ))),
+    )),
   );
 }
 
@@ -336,6 +394,7 @@ export const statsView = defineView({
   render() {
     loadPlatforms();
     if (!usage()) loadUsage();
+    if (!keyRows()) loadKeys();
     return h('div', { class: 'view stack' }, usageSeg());
   },
 });

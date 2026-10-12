@@ -293,6 +293,21 @@ type Config struct {
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
 	} `json:"session_sticky"`
 
+	// DingTalk 钉钉告警配置（阶段 5，fork modelIdleAlert 语义）。缺省 enabled=false
+	// = 全关（不配 webhook 就完全不发请求）。加签 secret 留空 = 不加签降级
+	//（建议必配：无签名的 webhook 谁拿到 URL 都能推）。
+	DingTalk struct {
+		Enabled         bool   `json:"enabled"`                       // 默认 false
+		Webhook         string `json:"webhook"`                       // 钉钉机器人 webhook
+		Secret          string `json:"secret,omitempty"`              // 加签密钥（SEC 开头）
+		IdleMinutes     int    `json:"idle_minutes,omitempty"`        // 闲时阈值，默认 5 分钟
+		CooldownMin     int    `json:"cooldown_minutes,omitempty"`    // 全局告警冷却，默认 5 分钟
+		ThresholdPct    int    `json:"quota_threshold_pct,omitempty"` // 使用率阈值，默认 80
+		ThresholdOn     bool   `json:"quota_threshold_enabled"`       // 阈值告警开关（独立于 enabled）
+		Locale          string `json:"locale,omitempty"`              // "en" | "zh-CN"
+		MessageTemplate string `json:"message_template,omitempty"`    // 闲时文案模板（占位符见包注释）
+	} `json:"dingtalk"`
+
 	// 解析后
 	SoftRateDur            time.Duration `json:"-"`
 	SoftRateMaxDur         time.Duration `json:"-"`

@@ -739,6 +739,15 @@ func (h *Handler) bridgeUsageAddFrame(acctID, data string) {
 	h.bridgeUsage.AddFrame(qoder.AccountKey(string(extstore.PQoder), acctID), data)
 }
 
+// QuotaSnapshots 全部账号的额度快照（面板 /panel/api/quota 数据源）。
+// 面板不 import qoder 包，经此方法 + QuotaSource 闭包解耦；nil 账本返回空。
+func (h *Handler) QuotaSnapshots() []qoder.QuotaSnapshot {
+	if h.qoderLedger == nil {
+		return nil
+	}
+	return h.qoderLedger.Snapshot(nil)
+}
+
 // noteChat 上报一次对话结果。
 //
 // 统一从这里走：桥接里散落 `if h.extManager != nil` 会漏掉（漏一次 = 那个号

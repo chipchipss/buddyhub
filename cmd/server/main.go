@@ -16,10 +16,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/dingtalk"
 	"github.com/chipchipss/buddyhub/internal/extprovider/accio"
 	"github.com/chipchipss/buddyhub/internal/extprovider/autoclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
@@ -356,6 +358,10 @@ func main() {
 	// 装配期定死的字段：配置页在用户按下保存之前就要说清「其中几项需重启」。
 	restartFields := restartRequiredFields(cfg)
 
+	// 阶段 4 面板额度源：面板先建、handler 后建——经原子引用解耦时序
+	//（闭包读 handler 指针，未就绪时返回空态）。
+	var qoderHandler atomic.Value // *server.Handler
+
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -374,6 +380,20 @@ func main() {
 		},
 		Version: appVersion,
 		Live:    live,
+		// 阶段 4 面板增强：账号额度快照（配额弹窗 / Credits Used 列）。
+		// 元素是 qoder.QuotaSnapshot（面板不 import qoder，经 any 切片解耦）。
+		QuotaSource: func() []any {
+			h4, ok := qoderHandler.Load().(*server.Handler)
+			if !ok || h4 == nil {
+				return nil
+			}
+			snaps := h4.QuotaSnapshots()
+			out := make([]any, 0, len(snaps))
+			for _, s := range snaps {
+				out = append(out, s)
+			}
+			return out
+		},
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -435,6 +455,18 @@ func main() {
 		PromptText: cfg.PromptText,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
+		// 阶段 5：钉钉告警配置（config.dingtalk 缺省 enabled=false 全关）。
+		DingTalk: &dingtalk.Settings{
+			Enabled:                   cfg.DingTalk.Enabled,
+			DingTalkWebhook:           cfg.DingTalk.Webhook,
+			DingTalkSecret:            cfg.DingTalk.Secret,
+			IdleMinutes:               cfg.DingTalk.IdleMinutes,
+			CooldownMinutes:           cfg.DingTalk.CooldownMin,
+			QuotaUsageThresholdEnable: cfg.DingTalk.ThresholdOn,
+			QuotaUsageThresholdPct:    cfg.DingTalk.ThresholdPct,
+			Locale:                    cfg.DingTalk.Locale,
+			MessageTemplate:           cfg.DingTalk.MessageTemplate,
+		},
 	})
 
 	// 免费 key 池注入（groq/zp/l7/or；空 key 的上游不可用，LLM7 匿名层除外）。
@@ -456,6 +488,7 @@ func main() {
 	// 端口被占时日志里两行紧挨着自相矛盾（「正在监听 :7863」下一行就是 bind 失败），
 	// 而新人第一次跑最常见的失败正是本机已有实例。提前 bind 还能让调度器根本不启动，
 	// 避免半个进程在后台签到 / 刷余额。
+	qoderHandler.Store(h) // 面板 QuotaSource 引用就位（必须在 bind 前完成）
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		log.Fatalf("监听 %s 失败：%v（端口被占：改 config.json 的 listen，或 WB2A_LISTEN，或先停掉占用该端口的进程）", cfg.Listen, err)
