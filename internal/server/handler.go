@@ -194,6 +194,10 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	// CC-Switch 兼容端点（阶段 4，fork src/app/api/usage/route.js）：
+	// 第三方 Qoder 账号切换客户端拉额度视图用。
+	h.mux.HandleFunc("POST /api/usage", h.withAuth(h.ccSwitchUsage))
+	h.mux.HandleFunc("POST /user/balance", h.withAuth(h.ccSwitchBalance))
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
 	}
