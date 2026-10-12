@@ -147,7 +147,7 @@ func TestLooksLikeDanglingIntent(t *testing.T) {
 		{"I'll now run the tests", true},
 		{"I will fix this bug next", true},
 		{"现在开始实现", true},
-		{"总之这就是完整方案，如有疑问告诉我", false}, // 排除短语
+		{"总之这就是完整方案，如有疑问告诉我", false},                // 排除短语
 		{"Let me know if you need anything", false}, // 排除短语
 		{"修复完成，所有测试通过。", false},
 		{"The answer is 42.", false},

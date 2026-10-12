@@ -57,7 +57,7 @@ func TestSessionStoreEvictsOldestAtCap(t *testing.T) {
 	s := NewSessionStore()
 	// 灌满到容量上限，再写一条应逐最旧。
 	for i := 0; i < sessionMaxEntries; i++ {
-		s.SessionIDFor(string(rune('a' + i%26)) + string(rune('0'+i/26)))
+		s.SessionIDFor(string(rune('a'+i%26)) + string(rune('0'+i/26)))
 	}
 	first := s.SessionIDFor("a0")
 	// 逐掉一个最旧后 first 键仍可能还在（最旧不一定是它）；断言容量不超限即可。
