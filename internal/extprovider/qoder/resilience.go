@@ -444,7 +444,7 @@ func ClassifyFirstEnvelope(rc io.ReadCloser, res ResilienceConfig) (io.ReadClose
 		rc.Close()
 		return nil, nil, signal, true
 	}
-	return &replayedCloser{r: io.MultiReader(bytes.NewReader(pr.replayed()), rc)}, nil, QueueInfo{}, false
+	return &replayedCloser{r: io.MultiReader(bytes.NewReader(pr.replayed()), rc), rc: rc}, nil, QueueInfo{}, false
 }
 
 // peekReader 逐字节缓冲读，支持 replayed() 取回全部已读字节。
@@ -483,13 +483,20 @@ func (p *peekReader) readLine() (string, error) {
 // replayed 返回尚未被 readLine 消费的全部已读字节（首判定行 + 之后未读缓冲）。
 func (p *peekReader) replayed() []byte { return p.seen[p.consumed:] }
 
-// replayedCloser 把 MultiReader 包装回 ReadCloser。
+// replayedCloser 把 MultiReader 包装回 ReadCloser；Close 透传给底层，
+// 否则正常路径的 HTTP body 永远不被释放（连接泄漏）。
 type replayedCloser struct {
-	r io.Reader
+	r  io.Reader
+	rc io.Closer
 }
 
 func (c *replayedCloser) Read(b []byte) (int, error) { return c.r.Read(b) }
-func (c *replayedCloser) Close() error               { return nil }
+func (c *replayedCloser) Close() error {
+	if c.rc != nil {
+		return c.rc.Close()
+	}
+	return nil
+}
 
 // jitter 对退避时长加 ±10% 抖动，避免多客户端同步重试打向上游。
 // fork 未做，这里是多账号部署后的稳健性补充。
