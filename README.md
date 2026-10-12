@@ -1264,6 +1264,18 @@ python import_codearts.py <accessKeys.csv>   # CodeArts AK/SK 批量导入面板
 - 保证恰好一个 `data: [DONE]`（上游漏发时兜底补写）；空流先写一帧 `error` 再补 `[DONE]`
 - 非流式请求由本地聚合完整 SSE 流为单 `chat.completion` 响应（含 `reasoning_content` / `tool_calls`）
 
+#### Qoder 通道弹性层 KNOWN-LIMITATIONS（阶段 1+2 交付范围外）
+
+阶段 1（建流弹性：排队原位重试 / 首 token 超时三档 / 首帧信封判定）与阶段 2
+（流式兜底：五态终止状态机 / 终帧暂存释放 / 自动续跑）已交付，以下为自查裁定
+的有意范围边界，非缺陷清单：
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 流内定时 keepalive 心跳 | **未实现** | fork（9router-qoder-plus qoder.js L1492-1502）有 `setInterval` 定时注释心跳（`Math.max(10, keepaliveMs)` ms）；buddyhub 只对排队标记帧发即时注释。影响场景：客户端有空闲超时（如 Codex 默认 5 分钟）而上游合法静默更久时，连接可能被客户端侧掐断。后续按用户实际客户端构成反馈再定优先级 |
+| `statusCodeValue` 信封路径 | **未在 buddyhub 链路实测** | buddyhub 的 Qoder 上游（api2-v2 纯 Bearer）返回裸 OpenAI chunk，不走 fork 的 `{statusCodeValue, body}` 信封；信封解析代码保留作防御（静态对照 fork 实现），但无线上数据验证 |
+| 600 字符 dangling 口径 | **刻意偏离 fork** | fork 用 JS `length > 600`（UTF-16 code unit，中文约 200 字即触顶）；buddyhub 用 rune 计数（中文 600 字触顶），对多字节文本更正确。经裁定保留，测试有注释固化，回归勿按"对齐 fork"改回 |
+
 ### 上游端点
 
 上游接口均为 CodeBuddy 官方 CLI / 插件使用的**非公开 / 逆向接口**，未见公开 API 文档；路径及 Host 以代码内常量为准（见文末出处表）。两类 base：
