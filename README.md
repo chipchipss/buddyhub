@@ -1275,6 +1275,8 @@ python import_codearts.py <accessKeys.csv>   # CodeArts AK/SK 批量导入面板
 | 流内定时 keepalive 心跳 | **未实现** | fork（9router-qoder-plus qoder.js L1492-1502）有 `setInterval` 定时注释心跳（`Math.max(10, keepaliveMs)` ms）；buddyhub 只对排队标记帧发即时注释。影响场景：客户端有空闲超时（如 Codex 默认 5 分钟）而上游合法静默更久时，连接可能被客户端侧掐断。后续按用户实际客户端构成反馈再定优先级 |
 | `statusCodeValue` 信封路径 | **未在 buddyhub 链路实测** | buddyhub 的 Qoder 上游（api2-v2 纯 Bearer）返回裸 OpenAI chunk，不走 fork 的 `{statusCodeValue, body}` 信封；信封解析代码保留作防御（静态对照 fork 实现），但无线上数据验证 |
 | 600 字符 dangling 口径 | **刻意偏离 fork** | fork 用 JS `length > 600`（UTF-16 code unit，中文约 200 字即触顶）；buddyhub 用 rune 计数（中文 600 字触顶），对多字节文本更正确。经裁定保留，测试有注释固化，回归勿按"对齐 fork"改回 |
+| Qoder CN 企业 VPC 路由 | **未实现（有意）** | magpie-plugins qoder index.mjs L198-247/L1310-1325 支持企业实例（`<instance>.vpc.qoder.com.cn` 等 host 重写）。buddyhub 当前只接 public 双站点（qoder.com / qoder.cn）。注意 fail-closed 语义：若后续支持，VPC 实例名校验失败必须 SignInGone，**绝不能静默回落 public host**（会把企业 token 发到公网端点） |
+| COSY 请求签名 | **不适用** | magpie 的 api3.qoder.sh 链路要求 COSY envelope 签名（RSA 包裹 AES key + md5，index.mjs L86-110）；buddyhub 走 api2-v2 的 OpenAI 兼容端点（Bearer 直连，qoderclicn@1.1.16 协议），**不需要 COSY**。仅当未来切换到 api3 COSY 端点时才需补此实现 |
 
 ### 上游端点
 
