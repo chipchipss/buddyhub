@@ -34,8 +34,23 @@ const (
 	refreshPathDT  = "/api/v1/deviceToken/refresh" // drt- 前缀（设备码登录签发）
 	refreshPathJRT = "/api/v1/jobToken/refresh"    // jrt- 前缀（PAT/service account 兑换签发）
 	chatUserAgent  = "qoder/1.1.16"
-	chatTimeout    = 300 * time.Second
 )
+
+// chatTimeout 已废弃（历史上掐断过长 SSE 流）；保留名字仅为兼容参考，
+// chat 走 streamClient（无总超时），短调用继续用 HTTP 客户端的 30s。
+const chatTimeout = 300 * time.Second
+
+// streamTransport chat 流式专用传输：ResponseHeaderTimeout 充当上游响应头超时
+// （QODER_STREAM_TIMEOUT_MS，默认 600s），正文读取不限时——空闲由弹性泵的
+// QODER_STALL_TIMEOUT_MS 兜底。fork 的 fetch 计时器同样只在等响应头期间生效。
+func newStreamTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = time.Duration(envInt("QODER_STREAM_TIMEOUT_MS", 600000, 1000)) * time.Millisecond
+	return t
+}
+
+// streamClient chat SSE 专用客户端（无总超时）。
+var streamClient = &http.Client{Transport: newStreamTransport()}
 
 // ChatMeta Qoder 请求上下文（每次对话生成一次，轮转内共享）。
 type ChatMeta struct {
@@ -84,8 +99,17 @@ func newRequestID() string {
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
+// UpstreamError 非 2xx 响应：携带状态码与截断 body，弹性层据此分类
+// （排队/超时可原位重试，其余换号或直报）。error 接口照常满足。
+type UpstreamError struct {
+	Status int
+	Body   string
+}
+
+func (e *UpstreamError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body) }
+
 // ChatStream 发起 Qoder chat（恒流式），返回可读 SSE 流与状态码。
-// 调用方负责关闭返回的 ReadCloser。
+// 调用方负责关闭返回的 ReadCloser。非 2xx 返回 *UpstreamError（Body 已读出）。
 func (c *Client) ChatStream(ctx context.Context, cred *Credential, body []byte, meta ChatMeta) (io.ReadCloser, int, error) {
 	if meta.RequestID == "" {
 		meta.RequestID = newRequestID()
@@ -104,14 +128,20 @@ func (c *Client) ChatStream(ctx context.Context, cred *Credential, body []byte, 
 	req.Header.Set("X-Request-ID", meta.RequestID)
 	req.Header.Set("X-Session-ID", meta.SessionID)
 
-	resp, err := c.HTTP.Do(req)
+	client := c.HTTP
+	// 共享 30s 总超时客户端会掐断长 SSE 流：chat 一律走无总超时的 streamClient
+	//（响应头超时由其 Transport 负责），除非测试显式注入了别的客户端。
+	if client == httpClient {
+		client = streamClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
 		raw, _ := io.ReadAll(resp.Body)
-		return nil, resp.StatusCode, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(raw, 200))
+		return nil, resp.StatusCode, &UpstreamError{Status: resp.StatusCode, Body: string(raw)}
 	}
 	return resp.Body, resp.StatusCode, nil
 }
