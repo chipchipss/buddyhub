@@ -85,6 +85,10 @@ type Config struct {
 	// 由注入方保证（qoder.QuotaSnapshot），面板不 import qoder 避免包环。
 	QuotaSource QuotaSource
 
+	// QuotaRemove 移除账号分配上限（配额弹窗「移除分配」按钮，fork quota modal
+	// 语义）。accountKey 形如 "qoder/<id>"；nil = 按钮隐藏（裸用/测试无账本）。
+	QuotaRemove func(accountKey string)
+
 	// ProbeFile 模型输出上限探测结果文件（scripts/probe_max_tokens.py --panel-out
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
@@ -211,6 +215,7 @@ func (p *Panel) routes() {
 	// 阶段 4/5 面板增强：逐 Key 用量（带名称+过滤）、账号额度快照（配额弹窗）。
 	p.mux.HandleFunc("GET /panel/api/usage/keys", p.withAuth(p.usageKeyNames))
 	p.mux.HandleFunc("GET /panel/api/quota", p.withAuth(p.quota))
+	p.mux.HandleFunc("POST /panel/api/quota/remove", p.withAuth(p.quotaRemove))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))

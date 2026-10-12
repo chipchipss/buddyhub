@@ -394,6 +394,12 @@ func main() {
 			}
 			return out
 		},
+		// 配额弹窗「移除分配」：复用同一原子引用（fork quota modal 一键移除语义）。
+		QuotaRemove: func(accountKey string) {
+			if h4, ok := qoderHandler.Load().(*server.Handler); ok && h4 != nil {
+				h4.RemoveQuotaAllocation(accountKey)
+			}
+		},
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),

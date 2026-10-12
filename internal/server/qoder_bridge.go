@@ -748,6 +748,17 @@ func (h *Handler) QuotaSnapshots() []qoder.QuotaSnapshot {
 	return h.qoderLedger.Snapshot(nil)
 }
 
+// RemoveQuotaAllocation 移除账号分配上限（面板配额弹窗「移除分配」按钮）。
+// fork quota modal 同语义：SetAllocation(key, 0) 即删分配；移除后该账号
+// 回到无上限（PRE 额度门放行），记账继续累计。nil 账本安全空操作。
+func (h *Handler) RemoveQuotaAllocation(accountKey string) {
+	if accountKey == "" {
+		return
+	}
+	h.qoderLedger.SetAllocation(accountKey, 0)
+	log.Printf("qoder-bridge: 面板移除账号分配上限 %s", accountKey)
+}
+
 // noteChat 上报一次对话结果。
 //
 // 统一从这里走：桥接里散落 `if h.extManager != nil` 会漏掉（漏一次 = 那个号

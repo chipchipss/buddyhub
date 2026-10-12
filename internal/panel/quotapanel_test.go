@@ -77,6 +77,54 @@ func TestQuotaEndpoint(t *testing.T) {
 	}
 }
 
+func TestQuotaRemoveEndpoint(t *testing.T) {
+	// 未注入 QuotaRemove → 501（裸用/测试无账本）。
+	pNone := newQuotaTestPanel(t, []any{fakeQuotaRow{AccountKey: "qoder/a", Allocated: 100}}, "")
+	w0 := httptest.NewRecorder()
+	pNone.ServeHTTP(w0, httptest.NewRequest(http.MethodPost, "/panel/api/quota/remove",
+		strings.NewReader(`{"account_key":"qoder/a"}`)))
+	if w0.Code != http.StatusNotImplemented {
+		t.Fatalf("no-remove wiring must be 501, got %d", w0.Code)
+	}
+
+	// 注入后：正确转发 account_key；空 key 400。
+	removed := make([]string, 0, 2)
+	cfgFp := ""
+	p := newQuotaTestPanel(t, []any{fakeQuotaRow{AccountKey: "qoder/a", Allocated: 100}}, cfgFp)
+	p.cfg.QuotaRemove = func(key string) { removed = append(removed, key) }
+
+	w1 := httptest.NewRecorder()
+	p.ServeHTTP(w1, httptest.NewRequest(http.MethodPost, "/panel/api/quota/remove",
+		strings.NewReader(`{"account_key":"qoder/a"}`)))
+	if w1.Code != http.StatusOK || len(removed) != 1 || removed[0] != "qoder/a" {
+		t.Fatalf("remove = %d %v", w1.Code, removed)
+	}
+
+	w2 := httptest.NewRecorder()
+	p.ServeHTTP(w2, httptest.NewRequest(http.MethodPost, "/panel/api/quota/remove",
+		strings.NewReader(`{}`)))
+	if w2.Code != http.StatusBadRequest {
+		t.Fatalf("empty key must be 400, got %d", w2.Code)
+	}
+
+	// can_remove 标记透出（前端据此显示操作列）。
+	w3 := httptest.NewRecorder()
+	pNone.ServeHTTP(w3, httptest.NewRequest(http.MethodGet, "/panel/api/quota", nil))
+	var body map[string]any
+	if json.Unmarshal(w3.Body.Bytes(), &body) != nil {
+		t.Fatalf("json: %s", w3.Body.String())
+	}
+	if body["can_remove"] != false {
+		t.Fatalf("can_remove should be false when unwired: %v", body["can_remove"])
+	}
+	p.cfg.QuotaRemove = func(string) {}
+	w4 := httptest.NewRecorder()
+	p.ServeHTTP(w4, httptest.NewRequest(http.MethodGet, "/panel/api/quota", nil))
+	if json.Unmarshal(w4.Body.Bytes(), &body) != nil || body["can_remove"] != true {
+		t.Fatalf("can_remove should be true when wired: %v", body["can_remove"])
+	}
+}
+
 func TestQuotaEndpointNilSource(t *testing.T) {
 	p := newQuotaTestPanel(t, nil, "")
 	p.cfg.QuotaSource = nil

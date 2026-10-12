@@ -23,6 +23,7 @@ import { begin, report, finish } from '../jobs.js';
 import { loadZai, zaiData } from './zai-segment.js';
 import { loadExt, extData } from './ext-segment.js';
 import { openAccountDetail } from './account-detail.js';
+import { openQuotaModal } from '../quota.js';
 
 const filter = signal('all');    // 'all' 或平台 id
 const query = signal('');
@@ -123,6 +124,10 @@ function searchBox() {
 // 而搜索框不参与重画（非受控输入，重建一次就丢一次焦点）。
 function opsKids(z) {
   return [
+    h('button', {
+      class: 'btn sm ghost', title: 'Qoder 积分账本快照：各账号已分配/已用/剩余',
+      onclick: () => openQuotaModal(),
+    }, icon('wallet'), '账号配额'),
     h('button', {
       class: 'btn sm ghost', title: '向每个平台逐个查询余额（上游请求，别高频点）',
       onclick: ev => doRefreshAll(ev),

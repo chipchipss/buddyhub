@@ -15,6 +15,7 @@ package panel
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -52,10 +53,30 @@ func (p *Panel) quota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":        true,
-		"available": true,
-		"quotas":    p.cfg.QuotaSource(),
+		"ok":         true,
+		"available":  true,
+		"quotas":     p.cfg.QuotaSource(),
+		"can_remove": p.cfg.QuotaRemove != nil,
 	})
+}
+
+// quotaRemove POST /panel/api/quota/remove —— 移除账号分配上限
+// （配额弹窗「移除分配」，fork quota modal 语义）。body: {account_key}。
+func (p *Panel) quotaRemove(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.QuotaRemove == nil {
+		writeErr(w, http.StatusNotImplemented, "quota ledger not wired")
+		return
+	}
+	var body struct {
+		AccountKey string `json:"account_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.AccountKey) == "" {
+		writeErr(w, http.StatusBadRequest, "account_key 必填")
+		return
+	}
+	p.cfg.QuotaRemove(strings.TrimSpace(body.AccountKey))
+	log.Printf("panel: 已移除账号分配上限 %s", body.AccountKey)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": body.AccountKey})
 }
 
 // keyNameIndex Key 摘要 id → 显示名的映射（livecfg 配置读取）。
