@@ -466,7 +466,7 @@ func ClassifyMidStreamData(data string) (kind MidStreamKind, envErr *EnvelopeErr
 	return MidPass, nil, QueueInfo{}
 }
 
-	// BuildMidStreamErrorFrame 内联错误帧（对齐 fork L1417-1430）：
+// BuildMidStreamErrorFrame 内联错误帧（对齐 fork L1417-1430）：
 // 头已上线后唯一的诚实信号——真实 error 帧 + [DONE]，绝不补 finish_reason=stop
 // （否则客户端记成功回合，带污染历史重试）。
 // rate_limit_exceeded 附 30s retry-after 提示（fork withRetryAfterHint 语义）。

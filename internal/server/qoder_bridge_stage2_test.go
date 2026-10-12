@@ -161,8 +161,8 @@ func (b *brokenWriter) Write(p []byte) (int, error) {
 	}
 	return b.buf.Write(p)
 }
-func (b *brokenWriter) WriteHeader(int)         {}
-func (b *brokenWriter) Flush()                  {}
+func (b *brokenWriter) WriteHeader(int) {}
+func (b *brokenWriter) Flush()          {}
 
 // ── 铁律③反例：见过 finish_reason 后 transport error
 // → 必须发 stream_disconnected，不得释放 held 帧、不得补 [DONE] 当正常结束。 ──
