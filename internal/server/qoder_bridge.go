@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/dingtalk"
+	"github.com/chipchipss/buddyhub/internal/extprovider/authcore"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
 	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/session"
@@ -62,16 +63,28 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 		}
 		// 到期前自动续期；续期失败继续尝试下一个账号。
 		if cred.NeedsRefresh() {
-			if fresh, err := cli.Refresh(r.Context(), &cred); err == nil {
+			fresh, rerr := cli.RefreshForSite(r.Context(), qoder.SiteByID(cred.SiteID), &cred)
+			var gone *authcore.SignInGone
+			var expired *qoder.SignInExpiredError
+			switch {
+			case rerr == nil:
 				if raw, merr := json.Marshal(fresh); merr == nil {
 					mgr.ReplaceCred(a.Provider, a.ID, raw)
 					cred = *fresh
+					_ = mgr.MarkSignInActive(a.Provider, a.ID) // renewed → 清 lapsed
 				}
-			} else {
-				log.Printf("qoder-bridge: %s 续期失败: %v", a.ID, err)
-				// 此前这里**只 continue 不设 lastErr**：整轮失败时
-				// h.lastQoderErr 是空串，503 文案里看不到真实原因。
-				lastErr = "续期失败: " + err.Error()
+			case errors.As(rerr, &gone) && gone.Expired, errors.As(rerr, &expired):
+				// Qoder 明确拒绝刷新（401/403）：登录态已失效，标记 lapsed 并跳过。
+				note := "Qoder 登录已失效（refresh 被拒），请重新设备授权登录"
+				_ = mgr.MarkSignInExpired(a.Provider, a.ID, note)
+				h.noteChat(a.Provider, a.ID, errors.New(note))
+				lastErr = note
+				tried[a.ID] = true
+				continue
+			default:
+				log.Printf("qoder-bridge: %s 续期失败: %v", a.ID, rerr)
+				// 网络错误/5xx：**保留登录态**（绝不固化禁用），走普通失败路径换号。
+				lastErr = "续期失败: " + rerr.Error()
 				h.noteChat(a.Provider, a.ID, errOf(lastErr))
 				tried[a.ID] = true
 				continue
@@ -561,6 +574,10 @@ type ExtManager interface {
 	NoteBalance(provider, id string, balance float64, ok bool)
 	// CachedBalance 免网络读该平台的最高余额。第二返回值=是否测得过。
 	CachedBalance(provider string) (float64, bool)
+	// MarkSignInExpired 标记 provider 明确确认凭据失效（refresh 401/403）。
+	MarkSignInExpired(provider, id, note string) error
+	// MarkSignInActive 清除 lapsed 标记（refresh 成功后）。
+	MarkSignInActive(provider, id string) error
 }
 
 // qoderSessionID 阶段 3 会话隔离：客户端会话键 → 稳定上游 session_id。

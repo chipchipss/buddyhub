@@ -28,6 +28,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -331,6 +332,16 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case extstore.PQoder:
+		// 显式 site 参数允许已有 Qoder 通道登录 CN；省略默认 global，
+		// 保持存量行为。SiteID 随凭据持久化，refresh 必须回原站点。
+		var req struct {
+			Site string `json:"site"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		site := qoder.SiteGlobal
+		if strings.EqualFold(strings.TrimSpace(req.Site), "cn") {
+			site = qoder.SiteCN
+		}
 		// machineID 留空由协议层生成并写进凭据——它参与服务端设备绑定，
 		// 必须持久化，否则续期会失败。
 		sess, err := qoder.NewDeviceSession("")
@@ -338,16 +349,15 @@ func (p *Panel) extLoginStart(w http.ResponseWriter, r *http.Request) {
 			startFail(w, provider, http.StatusInternalServerError, "生成设备会话失败："+err.Error())
 			return
 		}
+		sess.Site = site
 		id := putExtLoginSession(&extLoginSession{
 			provider: provider, createdAt: time.Now(), device: sess,
 		})
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":         true,
-			"mode":       "device",
-			"session":    id,
-			"auth_url":   sess.BuildAuthUrl(),
+			"ok": true, "mode": "device", "session": id,
+			"auth_url": sess.BuildAuthUrl(), "site": site.ID,
 			"expires_in": int(extLoginTTL.Seconds()),
-			"hint":       "在浏览器打开链接并完成登录授权",
+			"hint":       site.Name + "：在浏览器打开链接并完成登录授权",
 		})
 
 	case extstore.PCopilot:
@@ -488,8 +498,8 @@ func (p *Panel) extLoginPoll(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Session string `json:"session"`
 		// Code QClaw 专用：用户在微信授权页拿到的 code（或整条回调 URL）。
-		// 微信把 code 回给腾讯自己的域名，网关截不到，只能让用户贴回来。
 		Code string `json:"code"`
+		Site string `json:"site"` // Qoder: "global" | "cn"，省略默认 global
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request json")
@@ -780,7 +790,11 @@ func pollQoderDevice(ctx context.Context, sess *extLoginSession) (cred *extLogin
 	if got.Nickname != "" {
 		label = "Qoder " + got.Nickname
 	}
-	return &extLoginCred{id: uid, label: label, note: "设备授权登录", cred: *got}, true, ""
+	got.SiteID = sess.device.Site.ID
+	if got.SiteID == "" {
+		got.SiteID = qoder.SiteGlobal.ID
+	}
+	return &extLoginCred{id: uid, label: label, note: "设备授权登录（" + sess.device.Site.Name + "）", cred: *got}, true, ""
 }
 
 // pollCopilotCode 轮询一次设备码授权。

@@ -139,6 +139,12 @@ func (f *fakeExtMgr) CachedBalance(provider string) (float64, bool) {
 	return b.balance, b.ok
 }
 
+// MarkSignInExpired / MarkSignInActive 阶段 4b 生命周期接口的测试桩：
+// 记录调用供断言，其余桥接测试不依赖其行为。
+func (f *fakeExtMgr) MarkSignInExpired(provider, id, note string) error { return nil }
+
+func (f *fakeExtMgr) MarkSignInActive(provider, id string) error { return nil }
+
 // balRec 测试用的余额快照。
 type balRec struct {
 	balance float64

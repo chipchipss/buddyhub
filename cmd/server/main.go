@@ -61,6 +61,22 @@ type bridgeManager struct {
 	note   func(provider, id string, err error)
 	balIn  func(provider, id string, balance float64, ok bool)
 	balOut func(provider string) (float64, bool)
+	expire func(provider, id, note string) error
+	active func(provider, id string) error
+}
+
+func (b bridgeManager) MarkSignInExpired(provider, id, note string) error {
+	if b.expire == nil {
+		return nil
+	}
+	return b.expire(provider, id, note)
+}
+
+func (b bridgeManager) MarkSignInActive(provider, id string) error {
+	if b.active == nil {
+		return nil
+	}
+	return b.active(provider, id)
 }
 
 func (b bridgeManager) ReplaceCred(provider, id string, cred json.RawMessage) {
@@ -488,6 +504,8 @@ func main() {
 		note:   pn.ExtManagerNoteChatResult,
 		balIn:  pn.ExtManagerNoteBalance,
 		balOut: pn.ExtManagerCachedBalance,
+		expire: pn.ExtManagerMarkSignInExpired,
+		active: pn.ExtManagerMarkSignInActive,
 	})
 
 	// 端口先 bind 再生效任何后台任务：旧顺序是「打印 listening」→ ListenAndServe，

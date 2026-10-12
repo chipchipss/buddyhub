@@ -260,6 +260,16 @@ func (p *Panel) ExtManagerCachedBalance(provider string) (float64, bool) {
 	return p.extManager().CachedBalance(provider)
 }
 
+// ExtManagerMarkSignInExpired 标记 Qoder 账号登录态失效（refresh 401/403 明确拒绝）。
+func (p *Panel) ExtManagerMarkSignInExpired(provider, id, note string) error {
+	return p.extManager().MarkSignInExpired(provider, id, note)
+}
+
+// ExtManagerMarkSignInActive 清除登录失效标记（refresh 成功后）。
+func (p *Panel) ExtManagerMarkSignInActive(provider, id string) error {
+	return p.extManager().MarkSignInActive(provider, id)
+}
+
 // ---------------------------------------------------------------------------
 // Loomy 账号服务登录（密码 / 短信）：新增平台账号的自动路径。
 // 登录成功 = session 拿到 + 设备身份持久化 + 外部账号落库，全自动。
