@@ -101,8 +101,44 @@ func TestEstimateUsedFromBalance(t *testing.T) {
 	}
 }
 
-func TestParseChatUsage(t *testing.T) {
-	resp := map[string]any{"usage": map[string]any{
+func TestUsageAccumulatorOverwriteSemantics(t *testing.T) {
+	a := NewUsageAccumulator()
+	key := "qoder/acct-1"
+	a.Reset(key)
+	// 中途帧只有 completion 增量：只覆盖对应字段。
+	a.AddFrame(key, `{"choices":[{"delta":{"content":"hi"}}]}`)
+	a.AddFrame(key, `{"choices":[],"usage":{"completion_tokens":10}}`)
+	// 末帧全量统计：覆盖出现的字段，未出现的保留。
+	a.AddFrame(key, `{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}`)
+	got := a.Take(key)
+	if got.PromptTokens != 100 || got.CompletionTokens != 20 || got.TotalTokens != 120 {
+		t.Fatalf("usage = %+v", got)
+	}
+	// Take 后清空：再 Take 零值。
+	if again := a.Take(key); again.TotalTokens != 0 {
+		t.Fatalf("take must clear: %+v", again)
+	}
+	// 无 usage 字段的帧不产生记录。
+	a.AddFrame(key, `{"choices":[{"delta":{"content":"x"}}]}`)
+	if u := a.Take(key); u.TotalTokens != 0 {
+		t.Fatalf("frame without usage must not record: %+v", u)
+	}
+}
+
+func TestParseUsageFrame(t *testing.T) {
+	u, ok := ParseUsageFrame(`{"choices":[],"usage":{"prompt_tokens":5,"total_tokens":8}}`)
+	if !ok || u.PromptTokens != 5 || u.TotalTokens != 8 {
+		t.Fatalf("frame usage = %+v ok=%v", u, ok)
+	}
+	if _, ok := ParseUsageFrame("not json"); ok {
+		t.Fatal("non-json must be !ok")
+	}
+	if _, ok := ParseUsageFrame(`{"choices":[{"delta":{"content":"x"}}]}`); ok {
+		t.Fatal("frame without usage must be !ok")
+	}
+}
+
+func TestParseChatUsage(t *testing.T) {	resp := map[string]any{"usage": map[string]any{
 		"prompt_tokens":     float64(100),
 		"completion_tokens": float64(50),
 		"total_tokens":      float64(150),

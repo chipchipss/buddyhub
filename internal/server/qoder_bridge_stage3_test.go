@@ -7,8 +7,10 @@ import (
 	"testing"
 
 	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
+	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/pool"
 	"github.com/chipchipss/buddyhub/internal/upstream"
+	"github.com/chipchipss/buddyhub/internal/usage"
 )
 
 /* ── 阶段 3：会话隔离与压缩的桥接层测试 ─────────────────────── */
@@ -97,7 +99,62 @@ func TestQoderCompactionRequestDetection(t *testing.T) {
 	}
 }
 
-// 长会话估算达到 900K 线时应触发压缩判断（fork 1M/900K 固定策略）。
+// ── 阶段 4：额度门与记账的桥接层测试 ─────────────────────────
+
+func TestQoderQuotaGateSkipsExhausted(t *testing.T) {
+	h := NewHandler(Config{Pool: pool.New(""), Upstream: upstream.New()})
+	key := qoder.AccountKey("qoder", "acct-x")
+	h.qoderLedger.SetAllocation(key, 100)
+	h.qoderLedger.RecordCredits(key, 100) // 精确记账打满
+	if got := h.qoderQuotaGate(&extstore.ExtAccount{Provider: extstore.PQoder, ID: "acct-x"}); got != qoder.QuotaExhausted {
+		t.Fatalf("exhausted gate = %v, want Exhausted", got)
+	}
+	// 未超限 → OK
+	h.qoderLedger.SetAllocation(key, 200)
+	if got := h.qoderQuotaGate(&extstore.ExtAccount{Provider: extstore.PQoder, ID: "acct-x"}); got != qoder.QuotaOK {
+		t.Fatalf("within-limit gate = %v, want OK", got)
+	}
+	// 无账本配置 → QuotaOK（不限制）
+	h2 := NewHandler(Config{Pool: pool.New(""), Upstream: upstream.New()})
+	h2.qoderLedger = nil
+	if got := h2.qoderQuotaGate(&extstore.ExtAccount{Provider: extstore.PQoder, ID: "any"}); got != qoder.QuotaOK {
+		t.Fatalf("no-ledger gate = %v, want OK", got)
+	}
+}
+
+func TestQoderRecordUsageWritesUsageRecorder(t *testing.T) {
+	h := NewHandler(Config{Pool: pool.New(""), Upstream: upstream.New(),
+		Usage: usage.New("")})
+	acct := &extstore.ExtAccount{Provider: extstore.PQoder, ID: "acct-u"}
+	h.qoderRecordUsage(acct, "conv-1", "qmodel", qoder.UsageFromChatCompletion{
+		PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150,
+	})
+	snap := h.cfg.Usage.Snapshot(0, nil)
+	if snap.Totals.TotalTokens != 150 || snap.Totals.PromptTokens != 100 {
+		t.Fatalf("usage recorder not written: %+v", snap.Totals)
+	}
+	// 零用量不写（无 usage 帧的请求不记）。
+	h.qoderRecordUsage(acct, "conv-1", "qmodel", qoder.UsageFromChatCompletion{})
+	if snap2 := h.cfg.Usage.Snapshot(0, nil); snap2.Totals.TotalTokens != 150 {
+		t.Fatalf("zero usage must not write: %+v", snap2.Totals)
+	}
+}
+
+func TestQoderBridgeUsageAccumulatorRoundTrip(t *testing.T) {
+	h := NewHandler(Config{Pool: pool.New(""), Upstream: upstream.New()})
+	h.bridgeUsageReset("acct-s")
+	// 模拟泵内帧：中间帧 + 末帧全量。
+	h.bridgeUsageAddFrame("acct-s", `{"choices":[{"delta":{"content":"hi"}}]}`)
+	h.bridgeUsageAddFrame("acct-s", `{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+	got := h.bridgeUsageTake("acct-s")
+	if got.TotalTokens != 15 || got.PromptTokens != 10 {
+		t.Fatalf("accumulated usage = %+v", got)
+	}
+	// Take 后清空。
+	if again := h.bridgeUsageTake("acct-s"); again.TotalTokens != 0 {
+		t.Fatalf("take must clear: %+v", again)
+	}
+}
 
 func TestQoderCompactionThreshold(t *testing.T) {
 	if qoder.ShouldCompact(qoder.AutoCompactTokenLimit - 1) {

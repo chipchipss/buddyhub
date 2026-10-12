@@ -22,6 +22,7 @@
 package qoder
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 )
@@ -303,4 +304,78 @@ func ParseChatUsage(resp map[string]any) (UsageFromChatCompletion, bool) {
 		out.TotalTokens = int64(v)
 	}
 	return out, true
+}
+
+// ParseUsageFrame 从单个 SSE data 帧负载解析 usage（流式路径的末帧携带）。
+// 与 ParseChatUsage 同一口径，只是输入是帧 JSON 文本。
+func ParseUsageFrame(data string) (UsageFromChatCompletion, bool) {
+	var frame map[string]any
+	if json.Unmarshal([]byte(data), &frame) != nil {
+		return UsageFromChatCompletion{}, false
+	}
+	return ParseChatUsage(frame)
+}
+
+// UsageAccumulator 流式请求的 usage 累加器：账号 → 本次请求累计 token。
+//
+// 语义（fork recordKeyQuotaUsage 的 tpm 维度）：上游 SSE 只在末帧给一次
+// usage 对象（stream_options.include_usage=true 时），故"累加"实际是覆盖
+// 语义——但保留累加形状以兼容多帧 usage 的上游（若中途也发，后帧覆盖前帧
+// 的对应字段，不重复计）。
+type UsageAccumulator struct {
+	mu   sync.Mutex
+	seen map[string]UsageFromChatCompletion
+}
+
+// NewUsageAccumulator 建空累加器。
+func NewUsageAccumulator() *UsageAccumulator {
+	return &UsageAccumulator{seen: map[string]UsageFromChatCompletion{}}
+}
+
+// Reset 清空某账号的本轮累计（请求开始时调）。
+func (a *UsageAccumulator) Reset(accountKey string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.seen, accountKey)
+}
+
+// AddFrame 把一个 SSE 帧的 usage 累加/覆盖进账号本轮累计。
+func (a *UsageAccumulator) AddFrame(accountKey, data string) {
+	if a == nil {
+		return
+	}
+	u, ok := ParseUsageFrame(data)
+	if !ok {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// 覆盖语义：同字段取新值（末帧通常是全量统计；中途帧只有增量字段时
+	// 只覆盖出现的部分，缺失部分保留前值——不重复计）。
+	cur := a.seen[accountKey]
+	if u.PromptTokens > 0 {
+		cur.PromptTokens = u.PromptTokens
+	}
+	if u.CompletionTokens > 0 {
+		cur.CompletionTokens = u.CompletionTokens
+	}
+	if u.TotalTokens > 0 {
+		cur.TotalTokens = u.TotalTokens
+	}
+	a.seen[accountKey] = cur
+}
+
+// Take 取走并清空账号本轮累计（请求结束时入账）。
+func (a *UsageAccumulator) Take(accountKey string) UsageFromChatCompletion {
+	if a == nil {
+		return UsageFromChatCompletion{}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	u := a.seen[accountKey]
+	delete(a.seen, accountKey)
+	return u
 }

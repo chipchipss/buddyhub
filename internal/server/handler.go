@@ -164,6 +164,12 @@ type Handler struct {
 	// qoderSessions Qoder 通道会话隔离存储（阶段 3，fork sessionManager 语义）：
 	// 客户端会话键 → 稳定上游 session_id；nil 时桥接按"无隔离"退化（测试/裸用）。
 	qoderSessions *qoder.SessionStore
+	// qoderLedger Qoder 通道积分账本（阶段 4，fork apiKeyPolicy 语义）：
+	// 账号级分配上限 + 每请求精确记账；nil 时 PRE 门全部放行（fail-open）。
+	qoderLedger *qoder.CreditLedger
+	// bridgeUsage Qoder 流式路径的 usage 累加器（阶段 4）：账号 → 本次请求
+	// 累计 token。流结束后入账即清（每请求一轮）。并发安全——多请求并行。
+	bridgeUsage *qoder.UsageAccumulator
 }
 
 // NewHandler 构建 handler。
@@ -180,7 +186,8 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), qoderSessions: qoder.NewSessionStore()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), qoderSessions: qoder.NewSessionStore(),
+		qoderLedger: qoder.NewCreditLedger(), bridgeUsage: qoder.NewUsageAccumulator()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responsesRoundTrip))
 	h.mux.HandleFunc("POST /responses", h.withAuth(h.responsesRoundTrip))

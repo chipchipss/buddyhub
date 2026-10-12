@@ -20,6 +20,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/session"
 	"github.com/chipchipss/buddyhub/internal/upstream"
+	"github.com/chipchipss/buddyhub/internal/usage"
 )
 
 // QoderChatStream 直接向客户端透传 Qoder 的 OpenAI 兼容 SSE。
@@ -47,6 +48,10 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 	// 阶段 3：客户端会话键 → 上游 session_id 的稳定映射（fork sessionManager
 	// 语义：账号不是对话边界，无客户端键时 ephemeral 隔离，绝不账号级共享）。
 	sessKey := session.ExtractKey(body)
+	// 阶段 4：PRE 额度门（fork apiKeyPolicy PRE-request 语义）——每个账号在
+	// 撞上游前先判额度；QuotaUnknown = fail-open 放行（配额基础设施不可用
+	// 绝不能挡正常流量）。
+	tried := map[string]bool{}
 	for _, a := range accounts {
 		var cred qoder.Credential
 		if json.Unmarshal(a.Cred, &cred) != nil {
@@ -67,9 +72,22 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 				// h.lastQoderErr 是空串，503 文案里看不到真实原因。
 				lastErr = "续期失败: " + err.Error()
 				h.noteChat(a.Provider, a.ID, errOf(lastErr))
+				tried[a.ID] = true
 				continue
 			}
 		}
+
+		// 阶段 4 PRE 额度门：分配上限内的已用额度（精确账本优先、余额差估算
+		// 兜底）达到上限即跳过该号（fork exhaustedConnectionIds 语义）。
+		// 估算数据缺失（QuotaUnknown）一律放行——fail-open。
+		if gate := h.qoderQuotaGate(a); gate == qoder.QuotaExhausted {
+			log.Printf("qoder-bridge: acct=%s 额度已耗尽（分配上限内），跳过", a.ID)
+			lastErr = "账号额度已耗尽（分配上限内）"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
+			tried[a.ID] = true
+			continue
+		}
+		tried[a.ID] = true
 
 		// 建流（带弹性：排队原位重试、首 token 超时独立预算、换号前原账号先扛）。
 		rc, status, envErr, fatal, ferr := h.qoderResilientStreamCtx(r.Context(), cli, &cred, a, body, res, sessKey)
@@ -93,9 +111,23 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 		// 成功建流：按客户端是否要流式决定透传或聚合（resilient 泵内做首帧判定）。
 		log.Printf("qoder-bridge: acct=%s model=%s 建流成功", a.ID, bareModel)
 		if h.clientWantsStream(body) {
+			// 阶段 4 POST 记账（流式）：泵尾把上游 usage 帧累加进 bridgeUsage，
+			// 结束后一次性入账（fork recordKeyQuotaUsage fire-and-forget 语义）。
+			h.bridgeUsageReset(a.ID)
 			h.proxyQoderResilientSSE(w, r, rc, res, a.ID, body, sessKey)
+			h.qoderRecordUsage(a, sessKey, bareModel, h.bridgeUsageTake(a.ID))
 		} else {
-			h.proxyQoderAggregate(w, rc)
+			agg, err := upstream.Aggregate(rc)
+			if err != nil {
+				writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
+				h.noteChat(a.Provider, a.ID, errOf("聚合失败: "+err.Error()))
+				return true
+			}
+			// 阶段 4 POST 记账：非流式一次性拿全量 usage。
+			if u, ok := qoder.ParseChatUsage(agg); ok {
+				h.qoderRecordUsage(a, sessKey, bareModel, u)
+			}
+			writeJSON(w, http.StatusOK, agg)
 		}
 		h.noteChat(a.Provider, a.ID, nil)
 		return true
@@ -321,9 +353,11 @@ func (h *Handler) proxyQoderResilientSSE(w http.ResponseWriter, r *http.Request,
 		case qoder.MidTerminal:
 			heldFinish = line // 暂存不转发，续跑判定后统一释放
 			tracker.Track(payload)
+			h.bridgeUsageAddFrame(acctID, payload) // 阶段 4：末帧可能带 usage
 			return true
 		default:
 			tracker.Track(payload)
+			h.bridgeUsageAddFrame(acctID, payload) // 阶段 4：usage 帧累加
 			return writeLine(line + "\n")
 		}
 	}
@@ -538,6 +572,81 @@ func (h *Handler) qoderSessionID(sessKey string) string {
 
 // ExtSetManager 注入外部账号管理器（main 装配时调用；nil = Qoder 桥接禁用）。
 func (h *Handler) ExtSetManager(m ExtManager) { h.extManager = m }
+
+// ── 阶段 4：额度门与记账 ──
+
+// qoderQuotaGate 路由前额度门（fork apiKeyPolicy PRE-request 语义）：
+// 读账本分配上限内的已用量（精确优先、余额差估算兜底），判定账号是否还有
+// 额度。无账本/无上限 → QuotaOK；两条估算路都无数据 → QuotaUnknown
+//（调用方 fail-open 放行——配额基础设施不可用不挡正常流量）。
+func (h *Handler) qoderQuotaGate(a *extstore.ExtAccount) qoder.QuotaGateResult {
+	if h.qoderLedger == nil {
+		return qoder.QuotaOK
+	}
+	key := qoder.AccountKey(string(a.Provider), a.ID)
+	// 余额差估算：余额缓存观测折算（无观测传 -1 = 不可用）。
+	est := -1.0
+	if h.extManager != nil {
+		if bal, ok := h.extManager.CachedBalance(string(a.Provider)); ok {
+			// CachedBalance 是平台最高余额（粗口径）：只作为"有观测"的信号，
+			// 精确差估算需要 per-account baseline，当前上游不给，故传 0 表示
+			// "观测存在但折算为 0 消耗"——不拦路，由精确记账兜底。
+			_ = bal
+			est = 0
+		}
+	}
+	return h.qoderLedger.Gate(key, est)
+}
+
+// qoderRecordUsage POST 记账（fork recordKeyQuotaUsage 语义）：
+//  1. token 统计进 usage.Recorder（面板用量视图，与腾讯池同源）；
+//  2. 积分账本精确记账（RecordCredits）——buddyhub 侧上游不明示 credit
+//     消耗，token 不折算积分（汇率未知），此处仅在有显式 credits 时记；
+//     当前 Qoder 上游无该字段，故只走 usage.Recorder，账本由 SetAllocation
+//     配置的上限 + 未来上游 credits 字段驱动。
+//
+// fire-and-forget：记账失败只打日志，不影响已完成的响应。
+func (h *Handler) qoderRecordUsage(a *extstore.ExtAccount, sessKey, model string, u qoder.UsageFromChatCompletion) {
+	if u.TotalTokens <= 0 && u.PromptTokens <= 0 && u.CompletionTokens <= 0 {
+		return
+	}
+	if h.cfg.Usage != nil {
+		h.cfg.Usage.Add(time.Now(), "ext", string(a.Provider)+"/"+a.ID, model, usage.Delta{
+			PromptTokens:     u.PromptTokens,
+			HasPromptTokens:  u.PromptTokens > 0,
+			CompletionTokens: u.CompletionTokens,
+			HasCompletion:    u.CompletionTokens > 0,
+			TotalTokens:      u.TotalTokens,
+			HasTotal:         u.TotalTokens > 0,
+		}, true)
+	}
+	log.Printf("qoder-bridge: acct=%s 记账 prompt=%d completion=%d total=%d",
+		a.ID, u.PromptTokens, u.CompletionTokens, u.TotalTokens)
+}
+
+// bridgeUsageReset 清空账号本轮流式 usage 累计（建流后调用）。
+func (h *Handler) bridgeUsageReset(acctID string) {
+	if h.bridgeUsage == nil {
+		return
+	}
+	h.bridgeUsage.Reset(qoder.AccountKey(string(extstore.PQoder), acctID))
+}
+
+// bridgeUsageTake 取走并清空账号本轮流式 usage 累计（流结束后入账）。
+func (h *Handler) bridgeUsageTake(acctID string) qoder.UsageFromChatCompletion {
+	if h.bridgeUsage == nil {
+		return qoder.UsageFromChatCompletion{}
+	}
+	return h.bridgeUsage.Take(qoder.AccountKey(string(extstore.PQoder), acctID))
+}
+
+// bridgeUsageAddFrame 泵内调用：把一个 SSE data 帧的 usage 累加进账号本轮。
+func (h *Handler) bridgeUsageAddFrame(acctID, data string) {
+	if h.bridgeUsage == nil {
+		return
+	}
+	h.bridgeUsage.AddFrame(qoder.AccountKey(string(extstore.PQoder), acctID), data)
+}
 
 // noteChat 上报一次对话结果。
 //
