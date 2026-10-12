@@ -18,6 +18,7 @@ import (
 
 	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
 	"github.com/chipchipss/buddyhub/internal/extstore"
+	"github.com/chipchipss/buddyhub/internal/session"
 	"github.com/chipchipss/buddyhub/internal/upstream"
 )
 
@@ -43,6 +44,9 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 
 	lastErr := ""
 	res := qoder.LoadResilienceConfig()
+	// 阶段 3：客户端会话键 → 上游 session_id 的稳定映射（fork sessionManager
+	// 语义：账号不是对话边界，无客户端键时 ephemeral 隔离，绝不账号级共享）。
+	sessKey := session.ExtractKey(body)
 	for _, a := range accounts {
 		var cred qoder.Credential
 		if json.Unmarshal(a.Cred, &cred) != nil {
@@ -68,7 +72,7 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 		}
 
 		// 建流（带弹性：排队原位重试、首 token 超时独立预算、换号前原账号先扛）。
-		rc, status, envErr, fatal, ferr := h.qoderResilientStream(r, cli, &cred, a, body, res)
+		rc, status, envErr, fatal, ferr := h.qoderResilientStreamCtx(r.Context(), cli, &cred, a, body, res, sessKey)
 		if fatal {
 			// 终局错误（首信封 provider/overflow 等）：直接写 OpenAI 错误给客户端，
 			// 不再换号——这类错误换号也无法解决（如上下文超限）。
@@ -89,7 +93,7 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 		// 成功建流：按客户端是否要流式决定透传或聚合（resilient 泵内做首帧判定）。
 		log.Printf("qoder-bridge: acct=%s model=%s 建流成功", a.ID, bareModel)
 		if h.clientWantsStream(body) {
-			h.proxyQoderResilientSSE(w, r, rc, res, a.ID, body)
+			h.proxyQoderResilientSSE(w, r, rc, res, a.ID, body, sessKey)
 		} else {
 			h.proxyQoderAggregate(w, rc)
 		}
@@ -100,25 +104,20 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 	return false // 全部 Qoder 账号不可用
 }
 
-// qoderResilientStream 在单个账号内做阶段 1 弹性建流：
-//   - 排队（403/429 body isQueued/10605）→ 原位重试，退避 QODER_QUEUE_*（默认 15 次 5s→60s），
-//     等待期间向客户端发 SSE 注释心跳（QODER_KEEPALIVE_MS）——此时还没写过任何正文，安全；
-//   - 首 token 超时（504/408 + 文案）→ 按 FirstTokenFallback 策略独立预算重试；
-//   - 其余错误原样上抛给账号轮换。
-//
-// 返回 fatal=true 表示已直接向客户端写出终局错误（首信封错误）；
-// rc 非 nil 表示建流成功（调用方负责关闭并继续透传）。
+// qoderResilientStream *http.Request 签名保留兼容（主路径委托 Ctx 版）。
 func (h *Handler) qoderResilientStream(r *http.Request, cli *qoder.Client, cred *qoder.Credential,
 	a *extstore.ExtAccount, body []byte, res qoder.ResilienceConfig) (
 	rc io.ReadCloser, status int, envErr *qoder.EnvelopeError, fatal bool, ferr error,
 ) {
-	return h.qoderResilientStreamCtx(r.Context(), cli, cred, a, body, res)
+	return h.qoderResilientStreamCtx(r.Context(), cli, cred, a, body, res, "")
 }
 
 // qoderResilientStreamCtx 弹性建流的 context 直通版：续跑请求复用主请求的
 // context——客户端断开时续跑同步取消，不留孤儿上游流。
+// sessKey 是客户端会话键（session.ExtractKey 结果，空=无客户端键）：
+// 阶段 3 用它派生稳定的上游 session_id（fork 隔离语义，见 qoder/session.go）。
 func (h *Handler) qoderResilientStreamCtx(ctx context.Context, cli *qoder.Client, cred *qoder.Credential,
-	a *extstore.ExtAccount, body []byte, res qoder.ResilienceConfig) (
+	a *extstore.ExtAccount, body []byte, res qoder.ResilienceConfig, sessKey string) (
 	rc io.ReadCloser, status int, envErr *qoder.EnvelopeError, fatal bool, ferr error,
 ) {
 	ensureKeepalive := func() {
@@ -126,8 +125,12 @@ func (h *Handler) qoderResilientStreamCtx(ctx context.Context, cli *qoder.Client
 		// 这里只做空操作占位：真实心跳在 proxyQoderResilientSSE 的流内空闲检测里。
 	}
 	_ = ensureKeepalive
+	// 阶段 3 会话隔离：会话键 → 稳定上游 session_id。无客户端键时 SessionIDFor
+	// 返回一次性 UUID（fork ephemeral 语义——隔离优先，绝不账号级共享）。
+	meta := qoder.ChatMeta{SessionID: h.qoderSessionID(sessKey)}
 	for attempt := 1; attempt <= res.QueueMaxAttempts; attempt++ {
-		meta := qoder.ChatMeta{} // 每次重试重新生成 request_id，防上游 Duplicate 判定
+		meta.RequestID = ""  // 每次重试重新生成，防上游 Duplicate 判定
+		meta.RequestSet = "" // 同上；session_id 保持稳定（会话隔离语义）
 		outBody, err := qoder.BuildChatBody(body, meta)
 		if err != nil {
 			return nil, 0, nil, false, err
@@ -206,7 +209,7 @@ func (h *Handler) qoderWait(ctx context.Context, res qoder.ResilienceConfig, att
 //     （无续跑顺序/有续跑哨兵复用/abort 不释放/信封错误置空顺序）；
 //     ③"只有正常 EOF 可当缺 [DONE]"——transport error 即使见过 finish_reason
 //     也算失败，held 帧不得把截断答案变成成功回合（反例测试钉死）。
-func (h *Handler) proxyQoderResilientSSE(w http.ResponseWriter, r *http.Request, rc io.ReadCloser, res qoder.ResilienceConfig, acctID string, origBody []byte) {
+func (h *Handler) proxyQoderResilientSSE(w http.ResponseWriter, r *http.Request, rc io.ReadCloser, res qoder.ResilienceConfig, acctID string, origBody []byte, sessKey string) {
 	defer rc.Close()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -395,7 +398,7 @@ func (h *Handler) proxyQoderResilientSSE(w http.ResponseWriter, r *http.Request,
 			if err != nil {
 				continue
 			}
-			cur, _, envErr, fatal, ferr := h.qoderResilientStreamCtx(ctx, cli, &cred, a, outBody, res)
+			cur, _, envErr, fatal, ferr := h.qoderResilientStreamCtx(ctx, cli, &cred, a, outBody, res, sessKey)
 			if fatal || envErr != nil || ferr != nil || cur == nil {
 				if cur != nil {
 					cur.Close()
@@ -517,6 +520,20 @@ type ExtManager interface {
 	NoteBalance(provider, id string, balance float64, ok bool)
 	// CachedBalance 免网络读该平台的最高余额。第二返回值=是否测得过。
 	CachedBalance(provider string) (float64, bool)
+}
+
+// qoderSessionID 阶段 3 会话隔离：客户端会话键 → 稳定上游 session_id。
+// 键非空：存储内稳定映射（fork runtimeSessionStore——TTL 内同键同值，
+// prompt cache 连续）；键为空：一次性 UUID（fork ephemeral 分支——两个
+// 独立首回合客户端不共用账号级服务端状态，完整历史每次请求都发）。
+func (h *Handler) qoderSessionID(sessKey string) string {
+	if h.qoderSessions == nil {
+		if sessKey == "" {
+			return qoder.StableSessionHash("qoder-session", "")
+		}
+		return qoder.StableSessionHash("qoder-session", sessKey)
+	}
+	return h.qoderSessions.SessionIDFor(sessKey)
 }
 
 // ExtSetManager 注入外部账号管理器（main 装配时调用；nil = Qoder 桥接禁用）。

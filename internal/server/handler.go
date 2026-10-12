@@ -20,6 +20,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extprovider/ima"
 	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qclaw"
+	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
 	"github.com/chipchipss/buddyhub/internal/extprovider/raccoon"
 	"github.com/chipchipss/buddyhub/internal/extprovider/trae"
 	"github.com/chipchipss/buddyhub/internal/extstore"
@@ -160,6 +161,9 @@ type Handler struct {
 	raccoonFlights  flightGroup[*raccoon.Credential]
 	// imaFlights ima 续期单飞表：cookie 里的 refresh_token 同样是一次性轮换语义。
 	imaFlights flightGroup[*ima.Credential]
+	// qoderSessions Qoder 通道会话隔离存储（阶段 3，fork sessionManager 语义）：
+	// 客户端会话键 → 稳定上游 session_id；nil 时桥接按"无隔离"退化（测试/裸用）。
+	qoderSessions *qoder.SessionStore
 }
 
 // NewHandler 构建 handler。
@@ -176,7 +180,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), qoderSessions: qoder.NewSessionStore()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responsesRoundTrip))
 	h.mux.HandleFunc("POST /responses", h.withAuth(h.responsesRoundTrip))
