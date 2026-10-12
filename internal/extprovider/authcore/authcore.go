@@ -106,6 +106,19 @@ func ExpiresAtMS(v any) int64 {
 	}
 }
 
+// ExpiryDeadline 将设备授权过期字段收敛为截止时间。MiniMax expired_in
+// 变体：≥1e12 是绝对 Unix 毫秒时间戳，较小正数是相对秒数（magpie
+// minimax/index.mjs L240-246）。
+func ExpiryDeadline(value int64, now time.Time) time.Time {
+	if value <= 0 {
+		return time.Time{}
+	}
+	if value >= 1e12 {
+		return time.UnixMilli(value)
+	}
+	return now.Add(time.Duration(value) * time.Second)
+}
+
 // ── Device-flow 轮询状态机 ──
 
 // PollStatus 一次轮询的判定（fork minimax pollDevice 的五态）。
