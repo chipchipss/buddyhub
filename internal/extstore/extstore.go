@@ -267,6 +267,14 @@ type ExtAccountView struct {
 	// 没有它们的话，某个号被自动退避时界面上只表现为「莫名不被选中」。
 	FailStreak  int `json:"fail_streak,omitempty"`
 	CooldownSec int `json:"cooldown_sec,omitempty"`
+	// Key 额度账本的账号键（"provider/id"，阶段 4 CreditLedger 口径）。
+	// 空串 = 非 qoder 类走账本的平台（面板额度列渲染时跳过）。
+	Key string `json:"key,omitempty"`
+	// Credits* 阶段 4 积分账本快照（面板 Credits Used 列）。全零 = 无分配记录。
+	CreditsAllocated float64 `json:"credits_allocated,omitempty"`
+	CreditsUsed      float64 `json:"credits_used,omitempty"`
+	CreditsRemaining float64 `json:"credits_remaining,omitempty"` // -1 = 无上限
+	CreditsExhausted bool    `json:"credits_exhausted,omitempty"`
 }
 
 // CheckinResult 统一签到结果。
@@ -467,6 +475,8 @@ func (m *Manager) CheckinAll(ctx context.Context) []*CheckinResult {
 // ViewOne 单账号余额视图。
 func (m *Manager) ViewOne(ctx context.Context, a *ExtAccount) *ExtAccountView {
 	v := &ExtAccountView{Provider: a.Provider, ID: a.ID, Label: a.Label, Disabled: a.Disabled}
+	// 账号键（阶段 4 额度账本口径），qoder 平台的额度列靠它对上快照。
+	v.Key = a.Provider + "/" + a.ID
 	// 退避状态**先填**：停用账号也该显示（否则用户看不出"停用了"与
 	// "还在冷却中"是两回事），且这段不发任何网络请求。
 	if f, c := m.ChatHealthOne(a.Provider, a.ID); f > 0 || c > 0 {
