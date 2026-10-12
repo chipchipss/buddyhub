@@ -185,6 +185,45 @@ func TestQoderPumpTransportErrorAfterFinishIsFailure(t *testing.T) {
 	}
 }
 
+// ── 偏差1 修复验证：429/限流内联错误帧带 retry-after 提示 ──
+
+func TestQoderPumpRateLimitFrameCarriesRetryHint(t *testing.T) {
+	h := newQoderPumpHarness(t)
+	// 中途信封错误且分类为限流（code 带 rate_limit_exceeded 语义由上游给）。
+	sse := "data: " + `{"statusCodeValue":429,"body":"too many requests, slow down"}` + "\n\n"
+	out := runPump(t, h, sse, nil, `{"messages":[]}`)
+	if !strings.Contains(out, "stream_disconnected") && !strings.Contains(out, "error") {
+		t.Fatalf("429 envelope must produce inline error:\n%s", out)
+	}
+	// 直接验证帧构造原语（桥接路径的 code 由分类决定，这里锁 retry-after 语义）。
+	frame := qoder.BuildMidStreamErrorFrame("rate_limit_exceeded", "too many requests")
+	if !strings.Contains(frame, "retry after 30s") {
+		t.Fatalf("rate_limit frame missing retry hint: %s", frame)
+	}
+}
+
+// ── 偏差2 修复验证：tool_calls 终帧直透（不暂存、立即到客户端）──
+
+func TestQoderPumpToolCallsTerminalPassthrough(t *testing.T) {
+	h := newQoderPumpHarness(t)
+	// tool_calls 终帧后跟 [DONE]：终帧必须在 [DONE] 之前原样到达（不暂存）。
+	sse := chunkLine("调用工具中") + finishLine("tool_calls") + "data: [DONE]\n\n"
+	out := runPump(t, h, sse, nil, `{"messages":[]}`)
+
+	fi := strings.Index(out, `"finish_reason":"tool_calls"`)
+	di := strings.Index(out, "data: [DONE]")
+	if fi < 0 || di < 0 || fi > di {
+		t.Fatalf("tool_calls frame must pass through before [DONE]:\n%s", out)
+	}
+	// 且不得触发续跑（fork：tool_calls 是真实回合结束）
+	if strings.Contains(out, "auto-continue") {
+		t.Fatalf("tool_calls turn must not continue:\n%s", out)
+	}
+	if strings.Contains(out, "error") {
+		t.Fatalf("tool_calls + done must be clean:\n%s", out)
+	}
+}
+
 // ── premature_done：无 finish_reason 即 [DONE]。 ──
 
 func TestQoderPumpPrematureDone(t *testing.T) {

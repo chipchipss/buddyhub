@@ -243,17 +243,14 @@ func (h *Handler) proxyQoderResilientSSE(w http.ResponseWriter, r *http.Request,
 
 	// emitInlineError 内联错误帧 + [DONE]（fork L1417-1430：头已上线后唯一的
 	// 诚实信号，绝不补 finish_reason=stop——否则客户端记成功回合带污染历史重试）。
+	// 帧构造统一走 qoder.BuildMidStreamErrorFrame（偏差1 修复：rate_limit 的
+	// retry-after 提示分支从此生效，与 fork withRetryAfterHint 语义对齐）。
 	emitInlineError := func(message, code string) {
 		if doneEmitted || clientGone {
 			return
 		}
-		frame := map[string]any{"error": map[string]any{
-			"message": qoder.RedactSensitive(truncateBridgeMsg(message, 1600)),
-			"type":    "server_error",
-			"code":    code,
-		}}
-		raw, _ := json.Marshal(frame)
-		if !writeLine("data: " + string(raw) + "\n\ndata: [DONE]\n\n") {
+		raw := qoder.BuildMidStreamErrorFrame(code, qoder.RedactSensitive(message))
+		if !writeLine("data: " + raw + "\n\ndata: [DONE]\n\n") {
 			return
 		}
 		flusher.Flush()
@@ -461,14 +458,6 @@ func indexByteSlice(b []byte, sep byte) int {
 		}
 	}
 	return -1
-}
-
-// truncateBridgeMsg 桥接层错误文案截断（供内联 error 帧）。
-func truncateBridgeMsg(s string, n int) string {
-	if len(s) > n {
-		return s[:n] + "..."
-	}
-	return s
 }
 
 // clientWantsStream 从请求体读 stream 字段。

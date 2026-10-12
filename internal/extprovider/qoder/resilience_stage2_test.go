@@ -6,6 +6,43 @@ import (
 	"testing"
 )
 
+// ── BuildMidStreamErrorFrame（偏差1 修复验证）──
+
+func TestBuildMidStreamErrorFrameRetryAfter(t *testing.T) {
+	// 429/限流帧必须带 retry-after 提示（fork withRetryAfterHint 语义，
+	// 自查裁定"修"——原实现该分支是死代码）。
+	frame := BuildMidStreamErrorFrame("rate_limit_exceeded", "rate limited by upstream")
+	if !strings.Contains(frame, "retry after 30s") {
+		t.Fatalf("rate_limit frame missing retry hint: %s", frame)
+	}
+	// 非限流不带提示，文案截断 1600
+	long := strings.Repeat("x", 3000)
+	frame2 := BuildMidStreamErrorFrame("upstream_error", long)
+	if strings.Contains(frame2, "retry after") {
+		t.Fatalf("non-rate-limit must not carry retry hint: %s", frame2[:80])
+	}
+	if len(frame2) > 2100 {
+		t.Fatalf("message not truncated: len=%d", len(frame2))
+	}
+}
+
+// ── tool_calls 终帧直透（偏差2 修复验证）──
+
+func TestClassifyMidStreamToolCallsPassthrough(t *testing.T) {
+	// fork isHeldTerminal L1324-1329：tool_calls 是真实回合结束，直接透行不暂存。
+	k, _, _ := ClassifyMidStreamData(`{"choices":[{"delta":{"tool_calls":[{"id":"t1"}]},"finish_reason":"tool_calls"}]}`)
+	if k != MidPass {
+		t.Fatalf("tool_calls terminal = %v, want MidPass (passthrough)", k)
+	}
+	// 其他 finish_reason 仍暂存
+	if k, _, _ := ClassifyMidStreamData(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`); k != MidTerminal {
+		t.Fatalf("stop terminal = %v, want MidTerminal", k)
+	}
+	if k, _, _ := ClassifyMidStreamData(`{"choices":[{"delta":{},"finish_reason":"length"}]}`); k != MidTerminal {
+		t.Fatalf("length terminal = %v, want MidTerminal", k)
+	}
+}
+
 // ── 阶段 2：ClassifyMidStreamData ──
 
 func TestClassifyMidStreamDone(t *testing.T) {
@@ -30,8 +67,9 @@ func TestClassifyMidStreamTerminal(t *testing.T) {
 	if k != MidTerminal {
 		t.Fatalf("finish stop = %v", k)
 	}
-	// tool_calls 也是终帧（fork isHeldTerminal 同样暂存）
-	if k, _, _ := ClassifyMidStreamData(`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`); k != MidTerminal {
+	// tool_calls 是真实回合结束：fork 直接透行不暂存（MidPass）——自查裁定
+	// 偏差2 修复后的语义，勿改回 MidTerminal。
+	if k, _, _ := ClassifyMidStreamData(`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`); k != MidPass {
 		t.Fatalf("finish tool_calls = %v", k)
 	}
 	// 无 finish_reason 不算终帧
@@ -93,6 +131,11 @@ func TestTurnTrackerTrackAndReset(t *testing.T) {
 // ── LooksLikeDanglingIntent ──
 
 func TestLooksLikeDanglingIntent(t *testing.T) {
+	// 注意（自查裁定·刻意偏离）：fork L1136 用 JS `t.length > 600`，JS length 是
+	// UTF-16 code unit 计数——同样 600 单位，纯中文只覆盖约 200 个汉字，长中文
+	// 回复会被提前判"不续跑"（误杀）。本实现用 rune 计数（len([]rune(t)) > 600），
+	// 对多字节文本语义更正确：中文 600 字才触顶。这是经 Chief 裁定"不改，方向
+	// 正确"的有意偏离，回归时勿按"对齐 fork"把它改回 code unit。
 	cases := []struct {
 		text string
 		want bool

@@ -455,23 +455,24 @@ func ClassifyMidStreamData(data string) (kind MidStreamKind, envErr *EnvelopeErr
 	if frame.Error != nil {
 		return MidEnvelopeError, nil, QueueInfo{}
 	}
-	// 终帧判定：choices[].finish_reason 非空即终帧（fork isHeldTerminal L1324-1331，
-	// finish_reason="tool_calls" 也是终帧——工具调用回合照常暂存）。
+	// 终帧判定：choices[].finish_reason 非空且 ≠ "tool_calls" 才暂存
+	//（fork isHeldTerminal L1324-1329 原文——tool_calls 是真实回合结束，
+	// 客户端仍有活要干不会 abort，直接透行不暂存）。
 	if len(frame.Choices) > 0 && frame.Choices[0].FinishReason != nil {
-		if fr, ok := frame.Choices[0].FinishReason.(string); ok && fr != "" {
+		if fr, ok := frame.Choices[0].FinishReason.(string); ok && fr != "" && fr != "tool_calls" {
 			return MidTerminal, nil, QueueInfo{}
 		}
 	}
 	return MidPass, nil, QueueInfo{}
 }
 
-// BuildMidStreamErrorFrame 内联错误帧（对齐 fork L1417-1430）：
+	// BuildMidStreamErrorFrame 内联错误帧（对齐 fork L1417-1430）：
 // 头已上线后唯一的诚实信号——真实 error 帧 + [DONE]，绝不补 finish_reason=stop
 // （否则客户端记成功回合，带污染历史重试）。
-func BuildMidStreamErrorFrame(envErr *EnvelopeError) string {
-	msg := envErr.Message
-	if envErr.Code == "rate_limit_exceeded" {
-		// fork withRetryAfterHint：限流附 30s 重试提示。
+// rate_limit_exceeded 附 30s retry-after 提示（fork withRetryAfterHint 语义）。
+func BuildMidStreamErrorFrame(code, message string) string {
+	msg := message
+	if code == "rate_limit_exceeded" {
 		msg = truncateMsg(msg, 400) + " (retry after 30s)"
 	} else {
 		msg = truncateMsg(msg, 1600)
@@ -480,7 +481,7 @@ func BuildMidStreamErrorFrame(envErr *EnvelopeError) string {
 		"error": map[string]any{
 			"message": msg,
 			"type":    "server_error",
-			"code":    envErr.Code,
+			"code":    code,
 		},
 	}
 	raw, _ := json.Marshal(frame)
