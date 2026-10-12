@@ -17,6 +17,7 @@ package extstore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"sort"
 	"strings"
@@ -194,13 +195,18 @@ var renewers = map[string]renewer{
 		if !cred.NeedsRefresh() {
 			return renewNone, ""
 		}
-		fresh, err := qoder.New().Refresh(ctx, &cred)
+		fresh, err := qoder.New().RefreshForSite(ctx, qoder.SiteByID(cred.SiteID), &cred)
 		if err != nil {
-			if manualRenewHint(err) {
+			var expired *qoder.SignInExpiredError
+			if errors.As(err, &expired) {
+				// Qoder 明确拒绝刷新：标 lapsed，账号需人工重新设备授权。
+				_ = m.MarkSignInExpired(a.Provider, a.ID, "Qoder 登录已失效（refresh 被拒）")
 				return renewManual, err.Error()
 			}
+			// 网络/5xx：保留登录态，不标 lapsed。
 			return renewFailed, err.Error()
 		}
+		_ = m.MarkSignInActive(a.Provider, a.ID)
 		return writeBack(m, a, fresh)
 	},
 	PIMA: func(ctx context.Context, m *Manager, a *ExtAccount) (renewStatus, string) {

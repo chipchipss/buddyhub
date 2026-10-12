@@ -30,11 +30,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/chipchipss/buddyhub/internal/extprovider/authcore"
 )
 
 const (
@@ -56,8 +59,14 @@ type Credential struct {
 	SecurityOAuthToken string `json:"security_oauth_token"`
 	AccessToken        string `json:"access_token"`
 	RefreshToken       string `json:"refresh_token,omitempty"`
+	SiteID             string `json:"site_id,omitempty"`     // "global" | "cn"，续期必须回到原站点
 	ExpireTime         int64  `json:"expire_time,omitempty"` // 毫秒
 	RefreshExpireTime  int64  `json:"refresh_token_expire_time,omitempty"`
+	// Qoder CN 不能换 jobToken 时，deviceToken 本身用于 chat（magpie qoder index.mjs L279-282）。
+	DeviceChat bool `json:"device_chat,omitempty"`
+	// 保留 device-token pair（deviceChat refresh/401 recovery，index.mjs L307-308）。
+	DeviceToken        string `json:"device_token,omitempty"`
+	DeviceRefreshToken string `json:"device_refresh_token,omitempty"`
 	MachineID          string `json:"machine_id"`
 	UID                string `json:"uid,omitempty"`
 	Nickname           string `json:"nickname,omitempty"`
@@ -74,6 +83,9 @@ func (c *Credential) Bearer() string {
 // Client Qoder 积分客户端。
 type Client struct {
 	HTTP *http.Client
+	// SpentCaches 一次性 refresh token 的并发结果缓存（按 site 隔离）。
+	// nil 时用包级默认缓存；测试可注入独立缓存。
+	SpentCaches map[string]*authcore.SpentCache
 }
 
 // New 创建客户端。
@@ -312,6 +324,7 @@ const pkceAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012345
 
 // DeviceSession 一次设备登录会话。
 type DeviceSession struct {
+	Site      Site
 	Verifier  string
 	Challenge string
 	Nonce     string
@@ -342,13 +355,23 @@ func NewDeviceSession(machineID string) (*DeviceSession, error) {
 			return nil, err
 		}
 	}
-	return &DeviceSession{Verifier: verifier, Challenge: challenge, Nonce: nonce, MachineID: machineID}, nil
+	return &DeviceSession{Site: SiteGlobal, Verifier: verifier, Challenge: challenge, Nonce: nonce, MachineID: machineID}, nil
 }
 
 // BuildAuthUrl 构造浏览器授权 URL。
 func (s *DeviceSession) BuildAuthUrl() string {
-	return fmt.Sprintf("%s%s?challenge=%s&challenge_method=S256&nonce=%s&machine_id=%s&client_id=%s",
-		AuthBase, deviceSelect, s.Challenge, s.Nonce, s.MachineID, ClientID)
+	site := s.Site
+	if site.Web == "" {
+		site = SiteGlobal
+	}
+	q := url.Values{
+		"challenge": {s.Challenge}, "challenge_method": {"S256"}, "nonce": {s.Nonce},
+		"machine_id": {s.MachineID}, "client_id": {site.ClientID},
+	}
+	if site.Redirect != "" {
+		q.Set("redirect_uri", site.Redirect)
+	}
+	return site.Web + deviceSelect + "?" + q.Encode()
 }
 
 // Poll 轮询一次取 token（挂 openApiBase，不是 authBase —— 写错 host 永远 401）。
@@ -359,9 +382,13 @@ func (s *DeviceSession) BuildAuthUrl() string {
 // 等待授权」时，唯一能区分「上游说还没授权」和「我们压根没在轮询」的就是它。
 // 未完成时 cred 为 nil，err 也为 nil。
 func (c *Client) Poll(ctx context.Context, s *DeviceSession) (*Credential, string, error) {
-	url := fmt.Sprintf("%s%s?nonce=%s&verifier=%s&challenge_method=S256",
-		OpenAPIBase, deviceTokenPoll, s.Nonce, s.Verifier)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	site := s.Site
+	if site.OpenAPI == "" {
+		site = SiteGlobal
+	}
+	pollURL := fmt.Sprintf("%s%s?nonce=%s&verifier=%s&challenge_method=S256",
+		site.OpenAPI, deviceTokenPoll, url.QueryEscape(s.Nonce), url.QueryEscape(s.Verifier))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -409,6 +436,89 @@ func (c *Client) Poll(ctx context.Context, s *DeviceSession) (*Credential, strin
 		Nickname:           strAt(doc, "user_name", "nickname"),
 	}
 	return cred, "ok", nil
+}
+
+// ExchangeDeviceToken 将 deviceToken/poll 凭据换成模型对话凭据（jobToken），
+// 对齐 magpie packages/qoder/index.mjs L274-308。Qoder CN 特例：jobToken 端点
+// 任意 4xx 即直接用 deviceToken 做 chat token（deviceChat=true），过期按
+// deviceExpiry（expires_at → expires_in 秒 → 默认 1d）计算；Global 4xx 是登录失败。
+func (c *Client) ExchangeDeviceToken(ctx context.Context, site Site, device *Credential) (*Credential, error) {
+	if device == nil || strings.TrimSpace(device.AccessToken) == "" {
+		return nil, fmt.Errorf("device token missing")
+	}
+	if site.OpenAPI == "" {
+		site = SiteGlobal
+	}
+	if site.ID == "" {
+		site.ID = SiteGlobal.ID
+	}
+	if device.ExpireTime <= 0 {
+		device.ExpireTime = deviceExpiryMS(device)
+	}
+	if device.DeviceToken == "" {
+		device.DeviceToken = device.AccessToken
+	}
+	if device.DeviceRefreshToken == "" {
+		device.DeviceRefreshToken = device.RefreshToken
+	}
+	body, _ := json.Marshal(map[string]string{"clientId": site.ClientID})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, site.OpenAPI+"/api/v1/me/jobToken", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+device.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	if err != nil {
+		return nil, err
+	}
+	jobStatus, jobBody := resp.StatusCode, raw
+	if jobStatus >= 200 && jobStatus < 300 {
+		var token struct {
+			Token     string `json:"token"`
+			Refresh   string `json:"refresh_token"`
+			ExpiresAt any    `json:"expires_at"`
+			ExpiresIn any    `json:"expires_in"`
+		}
+		if json.Unmarshal(jobBody, &token) != nil || strings.TrimSpace(token.Token) == "" || strings.TrimSpace(token.Refresh) == "" {
+			return nil, fmt.Errorf("Qoder jobToken successful response lacks new token pair")
+		}
+		out := *device
+		out.AccessToken, out.SecurityOAuthToken, out.RefreshToken = token.Token, token.Token, token.Refresh
+		out.ExpireTime = timeMillisAt(map[string]any{"expires_at": token.ExpiresAt, "expires_in": token.ExpiresIn}, "expires_at", "expires_in")
+		out.SiteID = site.ID
+		return &out, nil
+	}
+	if site.DeviceChat && jobStatus >= 400 && jobStatus < 500 {
+		out := *device
+		out.DeviceChat, out.SiteID = true, site.ID
+		out.DeviceToken, out.DeviceRefreshToken = device.AccessToken, device.RefreshToken
+		out.SecurityOAuthToken = device.AccessToken
+		out.ExpireTime = deviceExpiryMS(device)
+		return &out, nil
+	}
+	if jobStatus == http.StatusUnauthorized || jobStatus == http.StatusForbidden {
+		return nil, &SignInExpiredError{Reason: fmt.Sprintf("%s job token refused (HTTP %d)", site.Name, jobStatus)}
+	}
+	return nil, fmt.Errorf("%s jobToken: HTTP %d: %s", site.Name, jobStatus, truncate(jobBody, 300))
+}
+
+// deviceExpiryMS fork deviceExpiry（index.mjs L189-194）：expires_at 优先，
+// 其次 expires_in 秒，均缺失时保守默认一天。
+func deviceExpiryMS(c *Credential) int64 {
+	if c == nil {
+		return 0
+	}
+	if c.ExpireTime > 0 {
+		return c.ExpireTime
+	}
+	return time.Now().Add(24 * time.Hour).UnixMilli()
 }
 
 // strAt 按优先级取串值（多个候选键）。同一个语义的字段上游可能给字符串

@@ -24,7 +24,10 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/chipchipss/buddyhub/internal/extprovider/authcore"
 )
 
 const (
@@ -99,8 +102,19 @@ func newRequestID() string {
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
-// UpstreamError 非 2xx 响应：携带状态码与截断 body，弹性层据此分类
-// （排队/超时可原位重试，其余换号或直报）。error 接口照常满足。
+// SignInExpiredError Qoder 明确拒绝 refresh token 导致登录失效。
+// 仅此错误设置 authcore.SignInGone{Expired:true}；一般网络/5xx 不得固化 lapsed。
+type SignInExpiredError struct {
+	Reason string
+}
+
+func (e *SignInExpiredError) Error() string { return e.Reason }
+
+func (e *SignInExpiredError) SignInGone() *authcore.SignInGone {
+	return &authcore.SignInGone{Reason: e.Reason, Expired: true}
+}
+
+// UpstreamError 非 2xx 响应：携带状态码与截断 body，弹性层据此分类。
 type UpstreamError struct {
 	Status int
 	Body   string
@@ -153,59 +167,265 @@ type RefreshResult struct {
 	ExpiresAt    string `json:"expires_at,omitempty"`
 }
 
-// Refresh 刷新凭据：按 refresh_token 前缀自动选择端点（drt- → deviceToken，
-// jrt- → jobToken），回写新的 dt-/drt- 对。
+// Refresh 保留旧 API：按 refresh token 前缀刷新；调用方只拿普通 error，
+// 生命周期敏感的桥接应使用 RefreshForSite（显式区分 SignInGone）。
 func (c *Client) Refresh(ctx context.Context, cred *Credential) (*Credential, error) {
+	return c.RefreshForSite(ctx, SiteGlobal, cred)
+}
+
+// RefreshForSite 按 site/凭据模式刷新，并给桥接明确的失效语义。
+//
+// 来源 magpie packages/qoder/index.mjs L314-335/L1220-1246/L1376-1385：
+//   - jrt jobToken refresh：401/403 → SignInExpiredError（expired=true）；其他
+//     status/网络错误仅普通 error，不固化 lapsed；成功必须返回 token+refresh_token 对；
+//   - CN deviceChat：drt deviceToken refresh，device token 本身即 chat token；
+//     401/403 同样 SignInExpiredError；普通/全局账号若 device refresh 仅供账号页，
+//     失败不应标 chat 掉号（本函数对非 deviceChat 的 drt refresh 不会标 SignInGone）；
+//   - refresh_token 一次性：成功必须返回新 pair，缺任一立即报错，绝不沿用已用旧 token；
+//   - SpentCache 缓存旧 refresh token 已刷结果，防并发双刷新把一次性 token 撞废。
+func (c *Client) RefreshForSite(ctx context.Context, site Site, cred *Credential) (*Credential, error) {
+	if cred == nil {
+		return nil, fmt.Errorf("nil Qoder credential")
+	}
+	// 站点判定：凭据显式 site_id 优先，但保留调用方传入的端点（测试/代理会覆盖
+	// OpenAPI host；只修正 ID/名称/deviceChat，不重建常量站点导致端点漂回生产值）。
+	if strings.TrimSpace(cred.SiteID) != "" && strings.TrimSpace(cred.SiteID) != strings.TrimSpace(site.ID) {
+		resolved := SiteByID(cred.SiteID)
+		site.ID, site.Name, site.DeviceChat = resolved.ID, resolved.Name, resolved.DeviceChat
+	}
+	if strings.TrimSpace(site.ID) == "" {
+		site.ID = SiteGlobal.ID
+	}
 	rt := strings.TrimSpace(cred.RefreshToken)
 	if rt == "" {
-		return nil, fmt.Errorf("无 refresh_token，需重新设备码登录")
+		return nil, &authcore.SignInGone{Reason: site.Name + ": the sign-in lapsed; sign in again", Expired: false}
 	}
-	path := refreshPathDT
-	if strings.HasPrefix(rt, "jrt-") {
-		path = refreshPathJRT
+	cache := c.spentCache(site)
+	if cached, ok := cache.Get(rt); ok {
+		if cached.Err != "" {
+			return nil, fmt.Errorf("cached refresh failure: %s", cached.Err)
+		}
+		var fresh Credential
+		if err := json.Unmarshal(cached.Cred, &fresh); err != nil {
+			return nil, fmt.Errorf("cached refresh credential decode: %w", err)
+		}
+		return &fresh, nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, OpenAPIBase+path, strings.NewReader(`{"refresh_token":"`+rt+`"}`))
+	isDevice := cred.DeviceChat || strings.HasPrefix(rt, "drt-")
+	path := refreshPathJRT
+	if isDevice {
+		path = refreshPathDT
+	}
+	raw, status, err := c.postJSON(ctx, site.OpenAPI+path, map[string]string{"refresh_token": rt})
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", chatUserAgent)
+	fresh, expired, err := credentialAfterRefresh(site, cred, isDevice, status, raw)
+	if err != nil {
+		return nil, err
+	}
+	if expired {
+		return nil, &SignInExpiredError{Reason: fmt.Sprintf("%s sign-in has expired (refresh HTTP %d)", site.Name, status)}
+	}
+	encoded, _ := json.Marshal(fresh)
+	cache.Put(rt, authcore.SpentEntry{Cred: encoded})
+	return fresh, nil
+}
 
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return nil, err
+func firstSiteID(ids ...string) string {
+	for _, id := range ids {
+		if strings.TrimSpace(id) != "" {
+			return id
+		}
 	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(raw, 200))
+	return SiteGlobal.ID
+}
+
+// credentialAfterRefresh is the protocol boundary used by production and tests.
+// Only job refresh 401/403, or CN deviceChat device-refresh 401/403, is expired.
+func credentialAfterRefresh(site Site, cred *Credential, deviceRefresh bool, status int, raw []byte) (*Credential, bool, error) {
+	if status != http.StatusOK {
+		expired := (status == http.StatusUnauthorized || status == http.StatusForbidden) && (!deviceRefresh || cred.DeviceChat)
+		if expired {
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("HTTP %d: %s", status, truncate(raw, 200))
 	}
 	var parsed struct {
 		Token        string `json:"token"`
 		DeviceToken  string `json:"device_token"`
 		RefreshToken string `json:"refresh_token"`
-		ExpiresAt    string `json:"expires_at"`
+		ExpiresAt    any    `json:"expires_at"`
+		ExpiresIn    any    `json:"expires_in"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, fmt.Errorf("刷新响应解析失败: %w", err)
+		return nil, false, fmt.Errorf("refresh response parse: %w", err)
 	}
-	newTok := strings.TrimSpace(parsed.Token)
-	if newTok == "" {
-		newTok = strings.TrimSpace(parsed.DeviceToken)
+	newToken := strings.TrimSpace(parsed.Token)
+	if newToken == "" {
+		newToken = strings.TrimSpace(parsed.DeviceToken)
 	}
-	if newTok == "" {
-		return nil, fmt.Errorf("刷新响应缺少 token")
+	if newToken == "" || strings.TrimSpace(parsed.RefreshToken) == "" {
+		return nil, false, fmt.Errorf("refresh success response missing rotated token pair")
 	}
 	out := *cred
-	out.AccessToken = newTok
-	out.SecurityOAuthToken = newTok // 双写同值（与设备码登录口径一致）
-	if parsed.RefreshToken != "" {
-		out.RefreshToken = parsed.RefreshToken
+	out.AccessToken, out.SecurityOAuthToken, out.RefreshToken = newToken, newToken, strings.TrimSpace(parsed.RefreshToken)
+	out.ExpireTime = timeMillisAt(map[string]any{"expires_at": parsed.ExpiresAt, "expires_in": parsed.ExpiresIn}, "expires_at", "expires_in")
+	if deviceRefresh {
+		out.DeviceToken, out.DeviceRefreshToken = newToken, out.RefreshToken
 	}
+	out.SiteID = site.ID
+	return &out, false, nil
+}
+
+func (c *Client) postJSON(ctx context.Context, target string, payload any) ([]byte, int, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", chatUserAgent)
+	client := c.HTTP
+	if client == nil {
+		client = httpClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	return raw, resp.StatusCode, err
+}
+
+// spentRefreshCaches 按 site 隔离一次性 refresh-token 结果缓存。
+var spentRefreshCaches = struct {
+	sync.Mutex
+	m map[string]*authcore.SpentCache
+}{m: map[string]*authcore.SpentCache{}}
+
+func (c *Client) spentCache(site Site) *authcore.SpentCache {
+	id := site.ID
+	if id == "" {
+		id = "global"
+	}
+	if c.SpentCaches != nil {
+		if cache := c.SpentCaches[id]; cache != nil {
+			return cache
+		}
+	}
+	spentRefreshCaches.Lock()
+	defer spentRefreshCaches.Unlock()
+	if spentRefreshCaches.m[id] == nil {
+		spentRefreshCaches.m[id] = authcore.NewSpentCache(authcore.DefaultLeadPolicy().SpentTTL)
+	}
+	return spentRefreshCaches.m[id]
+}
+
+// refreshFlights singleflight 同一已耗用 refresh token 的并发刷新：第二个请求
+// 等首个结果，绝不对一次性 token 再打一次上游（magpie spent+lock 语义）。
+var refreshFlights = struct {
+	sync.Mutex
+	m map[string]*refreshFlight
+}{m: map[string]*refreshFlight{}}
+
+type refreshFlight struct {
+	done chan struct{}
+	cred *Credential
+	err  error
+}
+
+func (c *Client) refreshSingleflight(ctx context.Context, site Site, cred *Credential) (*Credential, error) {
+	key := site.ID + "\x00" + cred.RefreshToken
+	refreshFlights.Lock()
+	if f := refreshFlights.m[key]; f != nil {
+		refreshFlights.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-f.done:
+			return f.cred, f.err
+		}
+	}
+	f := &refreshFlight{done: make(chan struct{})}
+	refreshFlights.m[key] = f
+	refreshFlights.Unlock()
+	f.cred, f.err = c.refreshUncached(ctx, site, cred)
+	refreshFlights.Lock()
+	delete(refreshFlights.m, key)
+	close(f.done)
+	refreshFlights.Unlock()
+	return f.cred, f.err
+}
+
+func (c *Client) refreshUncached(ctx context.Context, site Site, cred *Credential) (*Credential, error) {
+	rt := strings.TrimSpace(cred.RefreshToken)
+	if cached, ok := c.spentCache(site).Get(rt); ok {
+		if cached.Err != "" {
+			return nil, fmt.Errorf("cached refresh failure: %s", cached.Err)
+		}
+		var got Credential
+		if err := json.Unmarshal(cached.Cred, &got); err != nil {
+			return nil, err
+		}
+		return &got, nil
+	}
+	if cred.DeviceChat {
+		return c.refreshDeviceChat(ctx, site, cred)
+	}
+	fresh, err := c.RefreshForSite(ctx, site, cred)
+	if err != nil {
+		return nil, err
+	}
+	encoded, _ := json.Marshal(fresh)
+	c.spentCache(site).Put(rt, authcore.SpentEntry{Cred: encoded})
+	return fresh, nil
+}
+
+// refreshDeviceChat refreshes CN's device-token chat pair. Its 401/403 marks
+// sign-in expired; transient/network errors never do (magpie refreshDevice L1220-1246).
+func (c *Client) refreshDeviceChat(ctx context.Context, site Site, cred *Credential) (*Credential, error) {
+	rt := firstSiteID(cred.DeviceRefreshToken, cred.RefreshToken)
+	if strings.TrimSpace(rt) == "" {
+		return nil, &authcore.SignInGone{Reason: site.Name + ": sign-in lapsed; device refresh token missing", Expired: false}
+	}
+	raw, status, err := c.postJSON(ctx, site.OpenAPI+refreshPathDT, map[string]string{"refresh_token": rt})
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			return nil, &SignInExpiredError{Reason: fmt.Sprintf("%s sign-in expired (device refresh HTTP %d)", site.Name, status)}
+		}
+		return nil, fmt.Errorf("device refresh HTTP %d: %s", status, truncate(raw, 200))
+	}
+	var parsed struct {
+		Token        string `json:"token"`
+		DeviceToken  string `json:"device_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresAt    any    `json:"expires_at"`
+		ExpiresIn    any    `json:"expires_in"`
+	}
+	if json.Unmarshal(raw, &parsed) != nil {
+		return nil, fmt.Errorf("device refresh response parse failed")
+	}
+	token := strings.TrimSpace(parsed.Token)
+	if token == "" {
+		token = strings.TrimSpace(parsed.DeviceToken)
+	}
+	refresh := strings.TrimSpace(parsed.RefreshToken)
+	if token == "" || refresh == "" {
+		return nil, fmt.Errorf("device refresh successful response missing rotated token pair")
+	}
+	out := *cred
+	out.AccessToken, out.SecurityOAuthToken = token, token
+	out.RefreshToken, out.DeviceToken, out.DeviceRefreshToken = refresh, token, refresh
+	out.ExpireTime = timeMillisAt(map[string]any{"expires_at": parsed.ExpiresAt, "expires_in": parsed.ExpiresIn}, "expires_at", "expires_in")
 	return &out, nil
 }
 

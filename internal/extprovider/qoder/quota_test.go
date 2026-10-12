@@ -138,7 +138,8 @@ func TestParseUsageFrame(t *testing.T) {
 	}
 }
 
-func TestParseChatUsage(t *testing.T) {	resp := map[string]any{"usage": map[string]any{
+func TestParseChatUsage(t *testing.T) {
+	resp := map[string]any{"usage": map[string]any{
 		"prompt_tokens":     float64(100),
 		"completion_tokens": float64(50),
 		"total_tokens":      float64(150),

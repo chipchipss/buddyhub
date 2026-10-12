@@ -66,6 +66,11 @@ type ExtAccount struct {
 	Label    string `json:"label"`    // 展示名
 	AddedAt  string `json:"added_at"`
 	Disabled bool   `json:"disabled,omitempty"`
+	// SignInState 仅 provider 确认凭据已失效时设为 "expired"；网络/5xx 等瞬时
+	// 故障不能固化为掉号。面板可据此给用户重新登录提示。
+	SignInState string `json:"sign_in_state,omitempty"`
+	// SignInNote 最近一次掉号原因（不含敏感凭据）。
+	SignInNote string `json:"sign_in_note,omitempty"`
 	// LastCheckin 最后一次**执行过签到动作**的日期（YYYY-MM-DD）。
 	// 任务中心的「今日待办」靠它判——扫描是只读操作，不能再打一次上游状态
 	// （那等于每次扫描都对每个平台发请求）。`claimed` 与 `already-claimed`
@@ -187,6 +192,35 @@ func (m *Manager) Find(provider, id string) *ExtAccount {
 		}
 	}
 	return nil
+}
+
+// MarkSignInExpired 标记 provider 明确确认凭据失效（401/403 refresh refusal）。
+// 瞬时网络/5xx 错误不应调用此方法，必须保留登录态。
+func (m *Manager) MarkSignInExpired(provider, id, note string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, a := range m.accounts {
+		if a.Provider == provider && a.ID == id {
+			a.SignInState = "expired"
+			a.SignInNote = note
+			return m.saveLocked()
+		}
+	}
+	return fmt.Errorf("账号不存在")
+}
+
+// MarkSignInActive 清除 lapsed 标记（重新登录/refresh 成功后）。
+func (m *Manager) MarkSignInActive(provider, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, a := range m.accounts {
+		if a.Provider == provider && a.ID == id {
+			a.SignInState = ""
+			a.SignInNote = ""
+			return m.saveLocked()
+		}
+	}
+	return fmt.Errorf("账号不存在")
 }
 
 // SetDisabled 启用/停用。

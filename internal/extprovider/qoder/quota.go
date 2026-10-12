@@ -14,9 +14,10 @@
 //
 // buddyhub 侧差异：fork 的 policy 是「一把 API Key 绑一组 connection」的多租户
 // 模型；buddyhub 是单网关直连账号池，因此本文件只做三件事：
-//   1. 每账号的分配上限与已用积分账本（精确优先、估算兜底）；
-//   2. PRE 门：路由前判定账号是否还有额度（fail-open——基础设施出错不挡流量）；
-//   3. POST 记账：流结束后把本次请求 credits 累进账本。
+//  1. 每账号的分配上限与已用积分账本（精确优先、估算兜底）；
+//  2. PRE 门：路由前判定账号是否还有额度（fail-open——基础设施出错不挡流量）；
+//  3. POST 记账：流结束后把本次请求 credits 累进账本。
+//
 // 账号选择/冷却仍走既有 extstore.SelectChatOrder（fork 的 pool 骨架在
 // buddyhub 对应物就是它，见 select.go 文件头“为什么不能照搬腾讯 pool”）。
 package qoder
@@ -263,7 +264,7 @@ type CreditObservation struct {
 
 // EstimateUsedFromBalance 余额差估算（fork calculateQuotaConsumed L319 的
 // 简化口径）：max(0, baseline - current)。上游没给数（current<0）返回 -1
-//（不可用），调用方按 fail-open 处理。
+// （不可用），调用方按 fail-open 处理。
 func EstimateUsedFromBalance(obs CreditObservation) float64 {
 	if obs.CurrentRemaining < 0 || obs.InitialRemaining < 0 {
 		return -1

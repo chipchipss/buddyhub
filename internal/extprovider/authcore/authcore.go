@@ -119,6 +119,16 @@ func ExpiryDeadline(value int64, now time.Time) time.Time {
 	return now.Add(time.Duration(value) * time.Second)
 }
 
+// SignInGone marks an authentication state that can no longer sign requests.
+// Expired is true only when Qoder explicitly refused a refresh token (job refresh
+// 401/403, or device refresh 401/403 when the device token is the chat token).
+type SignInGone struct {
+	Reason  string
+	Expired bool
+}
+
+func (e *SignInGone) Error() string { return e.Reason }
+
 // ── Device-flow 轮询状态机 ──
 
 // PollStatus 一次轮询的判定（fork minimax pollDevice 的五态）。
