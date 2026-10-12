@@ -37,7 +37,7 @@ func runPump(t *testing.T, h *Handler, upstreamSSE string, readErr error, origBo
 	rc := &fakeReadCloser{data: upstreamSSE, readErr: readErr}
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(origBody))
-	h.proxyQoderResilientSSE(w, req, rc, qoder.ResilienceConfig{AutoContinueMax: 1}, "acct-test", []byte(origBody))
+	h.proxyQoderResilientSSE(w, req, rc, qoder.ResilienceConfig{AutoContinueMax: 1}, "acct-test", []byte(origBody), "")
 	return w.Body.String()
 }
 
@@ -139,7 +139,7 @@ func TestQoderPumpClientAbortSilent(t *testing.T) {
 	broken := &brokenWriter{header: http.Header{}}
 	rc := &fakeReadCloser{data: chunkLine("第一段") + chunkLine("第二段") + finishLine("stop")}
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[]}`))
-	h.proxyQoderResilientSSE(broken, req, rc, qoder.ResilienceConfig{}, "acct", []byte(`{"messages":[]}`))
+	h.proxyQoderResilientSSE(broken, req, rc, qoder.ResilienceConfig{}, "acct", []byte(`{"messages":[]}`), "")
 
 	out := broken.buf.String()
 	if strings.Contains(out, "error") || strings.Contains(out, "[DONE]") || strings.Contains(out, "finish_reason") {
@@ -290,7 +290,7 @@ func TestQoderPumpAutoContinueDisabled(t *testing.T) {
 	rc := &fakeReadCloser{data: sse}
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"tools":[{}]}`))
-	h.proxyQoderResilientSSE(w, req, rc, qoder.ResilienceConfig{AutoContinueMax: 0}, "acct", []byte(`{"tools":[{}]}`))
+	h.proxyQoderResilientSSE(w, req, rc, qoder.ResilienceConfig{AutoContinueMax: 0}, "acct", []byte(`{"tools":[{}]}`), "")
 	out := w.Body.String()
 	if !strings.Contains(out, `"finish_reason":"stop"`) {
 		t.Fatalf("AutoContinueMax=0 must release held frame directly:\n%s", out)
