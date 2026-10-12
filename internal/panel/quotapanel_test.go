@@ -62,9 +62,9 @@ func TestQuotaEndpoint(t *testing.T) {
 		t.Fatalf("status = %d", w.Code)
 	}
 	var body struct {
-		OK        bool            `json:"ok"`
-		Available bool            `json:"available"`
-		Quotas    []fakeQuotaRow  `json:"quotas"`
+		OK        bool           `json:"ok"`
+		Available bool           `json:"available"`
+		Quotas    []fakeQuotaRow `json:"quotas"`
 	}
 	if json.Unmarshal(w.Body.Bytes(), &body) != nil {
 		t.Fatalf("json: %s", w.Body.String())
@@ -83,8 +83,8 @@ func TestQuotaEndpointNilSource(t *testing.T) {
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/panel/api/quota", nil))
 	var body struct {
-		OK        bool `json:"ok"`
-		Available bool `json:"available"`
+		OK        bool  `json:"ok"`
+		Available bool  `json:"available"`
 		Quotas    []any `json:"quotas"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &body)
@@ -110,9 +110,9 @@ func TestUsageKeyNamesAndFilter(t *testing.T) {
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/panel/api/usage/keys", nil))
 	var body struct {
-		OK   bool             `json:"ok"`
-		Keys []keyUsagePayload `json:"keys"`
-		NamesMapped int        `json:"names_mapped"`
+		OK          bool              `json:"ok"`
+		Keys        []keyUsagePayload `json:"keys"`
+		NamesMapped int               `json:"names_mapped"`
 	}
 	if json.Unmarshal(w.Body.Bytes(), &body) != nil {
 		t.Fatalf("json: %s", w.Body.String())
