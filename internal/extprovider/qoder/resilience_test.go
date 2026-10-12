@@ -131,6 +131,24 @@ func TestTimeoutDelayForStrategies(t *testing.T) {
 	}
 }
 
+func TestRedactSensitive(t *testing.T) {
+	in := `HTTP 403: {"error":"bad","access_token":"dt-abcdef1234567890","next":"sk-xyz1234567890123"}`
+	out := RedactSensitive(in)
+	if strings.Contains(out, "dt-abcdef") || strings.Contains(out, "sk-xyz1234") {
+		t.Fatalf("token leaked: %s", out)
+	}
+	if !strings.Contains(out, "[REDACTED]") {
+		t.Fatalf("no redaction marker: %s", out)
+	}
+	if RedactSensitive("normal error text") != "normal error text" {
+		t.Fatal("plain text mutated")
+	}
+	if RedactSensitive("Authorization: Bearer eyJhbGciOi.abc") != "Authorization: [REDACTED]" &&
+		!strings.Contains(RedactSensitive("Authorization: Bearer eyJhbGciOi.abc"), "[REDACTED]") {
+		t.Fatal("bearer not redacted")
+	}
+}
+
 func TestSSELineScannerReplay(t *testing.T) {
 	// 模拟：注释行 + data 首帧 + 更多数据，验证 peekReader.replayed 不丢字节。
 	input := ": ping\n" + strings.Repeat("data: {\"chunk\":1}\n\n", 1) + "data: {\"chunk\":2}\n"

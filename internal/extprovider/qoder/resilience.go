@@ -278,6 +278,13 @@ func ClassifyUpstreamError(status int, body string) QueueInfo {
 // 触发其自动压缩）。
 func IsContextOverflow(message string) bool { return contextOverflowRe.MatchString(message) }
 
+var sensitiveRe = regexp.MustCompile(`(?i)(sk-[A-Za-z0-9_\-]{8,}|dt-[A-Za-z0-9_\-]{8,}|drt-[A-Za-z0-9_\-]{8,}|jrt-[A-Za-z0-9_\-]{8,}|bearer\s+[A-Za-z0-9._\-]{8,}|"(access_token|refresh_token|security_oauth_token|authorization)"\s*:\s*"[^"]*")`)
+
+// RedactSensitive 打日志前的脱敏：把 token 形态的串（sk-/dt-/drt-/jrt- 前缀、
+// Bearer 头、token 类 JSON 字段值）替换成 [REDACTED]。上游错误 body 偶尔回显
+// 凭据，直接进日志会泄漏。
+func RedactSensitive(s string) string { return sensitiveRe.ReplaceAllString(s, "[REDACTED]") }
+
 // EnvelopeError 首个 SSE data 帧即 error 对象时的分类结果。
 type EnvelopeError struct {
 	Status          int    // 建议给客户端的 HTTP 状态
@@ -449,9 +456,11 @@ type peekReader struct {
 
 func (p *peekReader) readLine() (string, error) {
 	for {
-		for i, b := range p.seen {
-			if b == '\n' {
-				line := string(p.seen[:i])
+		// 从已消费位置之后扫描换行——seen 缓冲要原样保留供 replayed() 重放，
+		// 绝不能从头扫（否则同一行被反复返回，调用方死循环）。
+		for i := p.consumed; i < len(p.seen); i++ {
+			if p.seen[i] == '\n' {
+				line := string(p.seen[p.consumed:i])
 				p.consumed = i + 1
 				return line, nil
 			}
@@ -460,6 +469,12 @@ func (p *peekReader) readLine() (string, error) {
 		n, err := p.rc.Read(chunk)
 		p.seen = append(p.seen, chunk[:n]...)
 		if err != nil {
+			// 流结束但缓冲里还有最后半行：按行返回，下次调用再报 EOF。
+			if n == 0 && err != nil && p.consumed < len(p.seen) {
+				line := string(p.seen[p.consumed:])
+				p.consumed = len(p.seen)
+				return line, nil // 尾行无换行符：返回剩余数据
+			}
 			return "", err
 		}
 	}
