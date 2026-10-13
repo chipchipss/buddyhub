@@ -20,6 +20,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extprovider/authcore"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
 	"github.com/chipchipss/buddyhub/internal/extstore"
+	"github.com/chipchipss/buddyhub/internal/livecfg"
 	"github.com/chipchipss/buddyhub/internal/session"
 	"github.com/chipchipss/buddyhub/internal/upstream"
 	"github.com/chipchipss/buddyhub/internal/usage"
@@ -135,7 +136,7 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 			// 结束后一次性入账（fork recordKeyQuotaUsage fire-and-forget 语义）。
 			h.bridgeUsageReset(a.ID)
 			h.proxyQoderResilientSSE(w, r, rc, res, a.ID, body, sessKey)
-			h.qoderRecordUsage(a, sessKey, bareModel, h.bridgeUsageTake(a.ID))
+			h.qoderRecordUsage(a, h.callerKeyID(r), sessKey, bareModel, h.bridgeUsageTake(a.ID))
 		} else {
 			agg, err := upstream.Aggregate(rc)
 			if err != nil {
@@ -145,7 +146,7 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 			}
 			// 阶段 4 POST 记账：非流式一次性拿全量 usage。
 			if u, ok := qoder.ParseChatUsage(agg); ok {
-				h.qoderRecordUsage(a, sessKey, bareModel, u)
+				h.qoderRecordUsage(a, h.callerKeyID(r), sessKey, bareModel, u)
 			}
 			writeJSON(w, http.StatusOK, agg)
 		}
@@ -699,15 +700,39 @@ func (h *Handler) qoderQuotaGate(a *extstore.ExtAccount) qoder.QuotaGateResult {
 	return h.qoderLedger.Gate(key, est)
 }
 
+// callerKeyID 取本次请求的调用方 API Key 摘要（per-Key 记账用）。
+// 与 handler.go recordAttempt 同口径：优先 context 里的鉴权条目，主 Key
+// 直通（context 无条目）时回退用主 Key 的 id；未配置鉴权两边皆空。
+func (h *Handler) callerKeyID(r *http.Request) string {
+	if id := AuthKeyEntry(r).ID(); id != "" {
+		return id
+	}
+	return livecfg.APIKeyEntry{Key: h.loadLive().APIKey}.ID()
+}
+
 // qoderRecordUsage POST 记账（fork recordKeyQuotaUsage 语义）：
 //  1. token 统计进 usage.Recorder（面板用量视图，与腾讯池同源）；
-//  2. 积分账本精确记账（RecordCredits）——buddyhub 侧上游不明示 credit
+//  2. 逐 Key 小时桶（fork keyOwner 维度）：keyID 为调用方 API Key 摘要，
+//     空则不记——ext 通道的失败尝试走 noteChat 账号级退避，不进 per-key
+//     错误列（与腾讯池 recordAttempt 的口径差异在此声明，不静默）；
+//  3. 积分账本精确记账（RecordCredits）——buddyhub 侧上游不明示 credit
 //     消耗，token 不折算积分（汇率未知），此处仅在有显式 credits 时记；
 //     当前 Qoder 上游无该字段，故只走 usage.Recorder，账本由 SetAllocation
 //     配置的上限 + 未来上游 credits 字段驱动。
 //
 // fire-and-forget：记账失败只打日志，不影响已完成的响应。
-func (h *Handler) qoderRecordUsage(a *extstore.ExtAccount, sessKey, model string, u qoder.UsageFromChatCompletion) {
+func (h *Handler) qoderRecordUsage(a *extstore.ExtAccount, keyID, sessKey, model string, u qoder.UsageFromChatCompletion) {
+	if h.cfg.Usage != nil && keyID != "" {
+		// per-Key 先记（即便本次无 usage 帧，成功完成的请求仍是一次调用）。
+		h.cfg.Usage.AddKeyUsage(keyID, usage.Delta{
+			PromptTokens:     u.PromptTokens,
+			HasPromptTokens:  u.PromptTokens > 0,
+			CompletionTokens: u.CompletionTokens,
+			HasCompletion:    u.CompletionTokens > 0,
+			TotalTokens:      u.TotalTokens,
+			HasTotal:         u.TotalTokens > 0,
+		}, true, time.Now())
+	}
 	if u.TotalTokens <= 0 && u.PromptTokens <= 0 && u.CompletionTokens <= 0 {
 		return
 	}

@@ -1070,12 +1070,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 逐 Key 调用量（清单 38）：以稳定 id 记在调用方 Key 头上。
 			// 走主 Key 鉴权时 withAuth 直接透传原始请求，context 里没有条目（零值
 			// id 为空）——但主 Key 同样有「删了会不会打挂客户端」的问题，回退用它的
-			// id 计数；未配置鉴权时两边 id 都空，AddKey 自行空操作。
+			// id 计数；未配置鉴权时两边 id 都空，AddKeyUsage 自行空操作。
+			//
+			// AddKeyUsage（fork keyOwner 维度）：与上面 Add 同源的 usage 增量
+			// 一并进 per-Key 小时桶——「这把 Key 这一小时用了多少 token」从此
+			// 可答（此前只有累计调用数）。
 			callKeyID := AuthKeyEntry(r).ID()
 			if callKeyID == "" {
 				callKeyID = livecfg.APIKeyEntry{Key: h.loadLive().APIKey}.ID()
 			}
-			h.cfg.Usage.AddKey(callKeyID, attemptOK, time.Now())
+			h.cfg.Usage.AddKeyUsage(callKeyID, usage.Delta{
+				PromptTokens:     delta.PromptTokens,
+				HasPromptTokens:  delta.HasPromptTokens,
+				CompletionTokens: delta.CompletionTokens,
+				HasCompletion:    delta.HasCompletionTokens,
+				TotalTokens:      delta.TotalTokens,
+				HasTotal:         delta.HasTotalTokens,
+			}, attemptOK, time.Now())
 		}
 	}
 

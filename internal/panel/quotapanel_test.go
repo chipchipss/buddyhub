@@ -199,3 +199,66 @@ func TestUsageKeyNamesAndFilter(t *testing.T) {
 		t.Fatalf("no-hit must be empty: %+v", body3.Keys)
 	}
 }
+
+// fork keyOwner 维度：keys 端点透出终身 token；series 端点给单 Key 时序。
+func TestUsageKeyTokensAndSeries(t *testing.T) {
+	cfg := `{"api_keys":[{"key":"sk-tok-key","name":"带token"}]}`
+	p := newQuotaTestPanel(t, nil, cfg)
+	id := keyID("sk-tok-key")
+	now := time.Now()
+	p.cfg.Usage.AddKeyUsage(id, usage.Delta{
+		PromptTokens: 100, HasPromptTokens: true,
+		CompletionTokens: 50, HasCompletion: true,
+		TotalTokens: 150, HasTotal: true,
+	}, true, now)
+	p.cfg.Usage.AddKeyUsage(id, usage.Delta{PromptTokens: 10, HasPromptTokens: true}, true, now)
+
+	// keys 端点：token 字段透出。
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/panel/api/usage/keys", nil))
+	var body struct {
+		Keys []keyUsagePayload `json:"keys"`
+	}
+	if json.Unmarshal(w.Body.Bytes(), &body) != nil {
+		t.Fatalf("json: %s", w.Body.String())
+	}
+	if len(body.Keys) != 1 {
+		t.Fatalf("keys = %+v", body.Keys)
+	}
+	k := body.Keys[0]
+	if k.PromptTokens != 110 || k.CompletionTokens != 50 || k.TotalTokens != 160 || k.Calls != 2 {
+		t.Fatalf("key tokens = %+v, want pt110/ct50/tt160/calls2", k)
+	}
+
+	// series 端点：单 Key 时序（窗口内一个小时点）。
+	ws := httptest.NewRecorder()
+	p.ServeHTTP(ws, httptest.NewRequest(http.MethodGet, "/panel/api/usage/keys/series?id="+id+"&hours=24", nil))
+	var sbody struct {
+		OK     bool          `json:"ok"`
+		ID     string        `json:"id"`
+		Hours  int           `json:"hours"`
+		Series []usage.Point `json:"series"`
+	}
+	if json.Unmarshal(ws.Body.Bytes(), &sbody) != nil {
+		t.Fatalf("series json: %s", ws.Body.String())
+	}
+	if !sbody.OK || sbody.ID != id || sbody.Hours != 24 || len(sbody.Series) != 1 {
+		t.Fatalf("series body = %+v", sbody)
+	}
+	if sbody.Series[0].PromptTokens != 110 || sbody.Series[0].Requests != 2 {
+		t.Fatalf("series point = %+v, want pt110/req2", sbody.Series[0])
+	}
+
+	// 缺 id → 400（不静默给空）。
+	wbad := httptest.NewRecorder()
+	p.ServeHTTP(wbad, httptest.NewRequest(http.MethodGet, "/panel/api/usage/keys/series", nil))
+	if wbad.Code != http.StatusBadRequest {
+		t.Fatalf("missing id code = %d, want 400", wbad.Code)
+	}
+	// 非法 hours → 400。
+	wbad2 := httptest.NewRecorder()
+	p.ServeHTTP(wbad2, httptest.NewRequest(http.MethodGet, "/panel/api/usage/keys/series?id="+id+"&hours=abc", nil))
+	if wbad2.Code != http.StatusBadRequest {
+		t.Fatalf("bad hours code = %d, want 400", wbad2.Code)
+	}
+}

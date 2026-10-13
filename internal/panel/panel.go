@@ -212,8 +212,10 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/usage", p.withAuth(p.usage))
 	p.mux.HandleFunc("GET /panel/api/usage/series", p.withAuth(p.usageSeries))
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
-	// 阶段 4/5 面板增强：逐 Key 用量（带名称+过滤）、账号额度快照（配额弹窗）。
+	// 阶段 4/5 面板增强：逐 Key 用量（带名称+过滤+token）、单 Key 时序
+	// （fork keyOwner 小时维度）、账号额度快照（配额弹窗）。
 	p.mux.HandleFunc("GET /panel/api/usage/keys", p.withAuth(p.usageKeyNames))
+	p.mux.HandleFunc("GET /panel/api/usage/keys/series", p.withAuth(p.usageKeySeries))
 	p.mux.HandleFunc("GET /panel/api/quota", p.withAuth(p.quota))
 	p.mux.HandleFunc("POST /panel/api/quota/remove", p.withAuth(p.quotaRemove))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))

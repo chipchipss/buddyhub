@@ -126,17 +126,33 @@ func TestQoderRecordUsageWritesUsageRecorder(t *testing.T) {
 	h := NewHandler(Config{Pool: pool.New(""), Upstream: upstream.New(),
 		Usage: usage.New("")})
 	acct := &extstore.ExtAccount{Provider: extstore.PQoder, ID: "acct-u"}
-	h.qoderRecordUsage(acct, "conv-1", "qmodel", qoder.UsageFromChatCompletion{
+	h.qoderRecordUsage(acct, "key-abc", "conv-1", "qmodel", qoder.UsageFromChatCompletion{
 		PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150,
 	})
 	snap := h.cfg.Usage.Snapshot(0, nil)
 	if snap.Totals.TotalTokens != 150 || snap.Totals.PromptTokens != 100 {
 		t.Fatalf("usage recorder not written: %+v", snap.Totals)
 	}
-	// 零用量不写（无 usage 帧的请求不记）。
-	h.qoderRecordUsage(acct, "conv-1", "qmodel", qoder.UsageFromChatCompletion{})
-	if snap2 := h.cfg.Usage.Snapshot(0, nil); snap2.Totals.TotalTokens != 150 {
-		t.Fatalf("zero usage must not write: %+v", snap2.Totals)
+	// per-Key 小时桶同源落一笔（fork keyOwner 维度）。
+	if len(snap.ByKey) != 1 || snap.ByKey[0].ID != "key-abc" || snap.ByKey[0].TotalTokens != 150 {
+		t.Fatalf("per-key usage not written: %+v", snap.ByKey)
+	}
+	if pts := h.cfg.Usage.KeySeries("key-abc", 24); len(pts) != 1 || pts[0].PromptTokens != 100 {
+		t.Fatalf("per-key series = %+v, want pt100", pts)
+	}
+	// 零用量不写主桶，但 per-Key 仍记一次调用（成功完成的请求没带 usage 帧）。
+	h.qoderRecordUsage(acct, "key-abc", "conv-1", "qmodel", qoder.UsageFromChatCompletion{})
+	snap2 := h.cfg.Usage.Snapshot(0, nil)
+	if snap2.Totals.TotalTokens != 150 {
+		t.Fatalf("zero usage must not write main buckets: %+v", snap2.Totals)
+	}
+	if len(snap2.ByKey) != 1 || snap2.ByKey[0].Calls != 2 {
+		t.Fatalf("per-key call count = %+v, want calls 2（零 usage 的成功请求也计）", snap2.ByKey)
+	}
+	// 空 keyID 不记 per-Key（未配置鉴权时无从归属）。
+	h.qoderRecordUsage(acct, "", "conv-1", "qmodel", qoder.UsageFromChatCompletion{TotalTokens: 9})
+	if snap3 := h.cfg.Usage.Snapshot(0, nil); len(snap3.ByKey) != 1 {
+		t.Fatalf("empty keyID must not add key rows: %+v", snap3.ByKey)
 	}
 }
 

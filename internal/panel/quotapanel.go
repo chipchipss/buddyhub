@@ -18,6 +18,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/chipchipss/buddyhub/internal/usage"
@@ -105,17 +106,22 @@ func (p *Panel) keyNameIndex() map[string]string {
 	return out
 }
 
-// keyUsagePayload by_key 行的增强形状：原 KeyStat + name（Key Name 列）。
+// keyUsagePayload by_key 行的增强形状：原 KeyStat + name（Key Name 列）
+// + 终身 token 累计（fork keyOwner 口径：这把 Key 一共消耗多少 token）。
 type keyUsagePayload struct {
-	ID     string `json:"id"`
-	Name   string `json:"name,omitempty"`
-	Calls  int64  `json:"calls"`
-	Errors int64  `json:"errors"`
-	Last   int64  `json:"last"`
+	ID               string `json:"id"`
+	Name             string `json:"name,omitempty"`
+	Calls            int64  `json:"calls"`
+	Errors           int64  `json:"errors"`
+	Last             int64  `json:"last"`
+	PromptTokens     int64  `json:"prompt_tokens,omitempty"`
+	CompletionTokens int64  `json:"completion_tokens,omitempty"`
+	TotalTokens      int64  `json:"total_tokens,omitempty"`
 }
 
 // usageKeyNames GET /panel/api/usage/keys —— 逐 Key 用量 + 名称映射。
 // key_name 查询参数做过滤（前缀不区分大小写）：Chief 派工令"Key Name 列+过滤"。
+// token 字段为终身累计（KeyStat 与 keyBuckets 同源），时间维度走 series 端点。
 func (p *Panel) usageKeyNames(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Usage == nil {
 		writeErr(w, http.StatusNotImplemented, "usage recorder not available")
@@ -130,7 +136,10 @@ func (p *Panel) usageKeyNames(w http.ResponseWriter, r *http.Request) {
 		if filter != "" && !strings.Contains(strings.ToLower(name), filter) {
 			continue
 		}
-		rows = append(rows, keyUsagePayload{ID: k.ID, Name: name, Calls: k.Calls, Errors: k.Errors, Last: k.Last})
+		rows = append(rows, keyUsagePayload{
+			ID: k.ID, Name: name, Calls: k.Calls, Errors: k.Errors, Last: k.Last,
+			PromptTokens: k.PromptTokens, CompletionTokens: k.CompletionTokens, TotalTokens: k.TotalTokens,
+		})
 	}
 	// 调用量降序（与 usage.Snapshot 的 by_key 排序一致）。
 	sort.Slice(rows, func(i, j int) bool {
@@ -140,6 +149,36 @@ func (p *Panel) usageKeyNames(w http.ResponseWriter, r *http.Request) {
 		return rows[i].ID < rows[j].ID
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "keys": rows, "names_mapped": len(names)})
+}
+
+// usageKeySeries GET /panel/api/usage/keys/series —— 单把 Key 的时序用量
+// （fork usage-db 的 period 查询：按小时/日合并的读路径）。
+// 参数：id（Key 摘要，必填）、hours（>0 窗口，<=0 全部历史，上限 60 天）。
+func (p *Panel) usageKeySeries(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Usage == nil {
+		writeErr(w, http.StatusNotImplemented, "usage recorder not available")
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "id 必填（Key 摘要）")
+		return
+	}
+	hours := 24
+	if raw := r.URL.Query().Get("hours"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "hours 必须是整数")
+			return
+		}
+		hours = n
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"id":     id,
+		"hours":  hours,
+		"series": p.cfg.Usage.KeySeries(id, hours),
+	})
 }
 
 var _ = usage.Delta{} // 保持 import（类型引用锚点）

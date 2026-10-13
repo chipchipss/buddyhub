@@ -72,6 +72,27 @@ type KeyStat struct {
 	Calls  int64  `json:"calls"`
 	Errors int64  `json:"errors"`
 	Last   int64  `json:"last"` // 最近一次请求的 unix 毫秒
+	// 终身 token 累计（fork usage-db 的 keyOwner 口径）：与 keyBuckets 的小时片
+	// 同源更新，两者之和恒等（TestKeyStatTokensMatchBucketSums 钉死）。
+	// 旧版 usage.json 无这三个字段，读方按 0 处理。
+	PromptTokens     int64 `json:"prompt_tokens,omitempty"`
+	CompletionTokens int64 `json:"completion_tokens,omitempty"`
+	TotalTokens      int64 `json:"total_tokens,omitempty"`
+}
+
+// keyBucket 单把 Key 一个小时片的用量（fork usage-db.ts：每 (key, 小时)
+// 一行 req/err/pt/ct/tt）。与 KeyStat 的正交关系：KeyStat 是终身累计
+// （无时间维度），本桶补上时间维度——回答"这把 Key 这一小时用了多少"。
+// 主桶（bucket）按 (时间片, realm, uid, model) 分片，「调用方 Key」与「池账号」
+// 是两个正交维度，沿用 KeyStat 的既有决策不并进主桶。
+type keyBucket struct {
+	KeyID string `json:"k"`
+	Scope string `json:"s"` // "h:2006-01-02T15" 或 "d:2006-10-13"（Rollup 折叠后）
+	Req   int64  `json:"q"`
+	Err   int64  `json:"e"`
+	PT    int64  `json:"p"`
+	CT    int64  `json:"c"`
+	TT    int64  `json:"t"`
 }
 
 // file 落盘结构。
@@ -81,16 +102,20 @@ type file struct {
 	Buckets []bucket `json:"buckets"`
 	// Keys 为空时不落字段：旧版本 usage.json 本来就没有这一项，读方须容忍缺失。
 	Keys []KeyStat `json:"keys,omitempty"`
+	// KeyBuckets 按 Key 的小时片用量（fork keyOwner 维度）。旧版无此字段，
+	// 读方缺失即空映射——老文件照常加载，不能因此清零。
+	KeyBuckets []keyBucket `json:"key_buckets,omitempty"`
 }
 
 // Recorder 并发安全的用量记录器。
 type Recorder struct {
-	mu      sync.Mutex
-	path    string
-	buckets map[string]*bucket  // key: scope|realm|uid|model
-	keys    map[string]*KeyStat // key: API Key 的稳定 id（清单 38）
-	dirty   bool
-	started time.Time
+	mu         sync.Mutex
+	path       string
+	buckets    map[string]*bucket    // key: scope|realm|uid|model
+	keys       map[string]*KeyStat   // key: API Key 的稳定 id（清单 38）
+	keyBuckets map[string]*keyBucket // key: keyID|scope（fork keyOwner 小时维度）
+	dirty      bool
+	started    time.Time
 
 	// wmu 把「取快照 → 写盘」排成一条队（见 flush）。逐请求的 Add 只碰 mu，不被
 	// 磁盘拖住；后台 ticker 与面板 Save() 因此不会交错写同一个文件。
@@ -104,12 +129,13 @@ type Recorder struct {
 // New 创建记录器。path 为空时禁用落盘（纯内存，测试用）。
 func New(path string) *Recorder {
 	r := &Recorder{
-		path:    path,
-		buckets: make(map[string]*bucket),
-		keys:    make(map[string]*KeyStat),
-		started: time.Now(),
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
+		path:       path,
+		buckets:    make(map[string]*bucket),
+		keys:       make(map[string]*KeyStat),
+		keyBuckets: make(map[string]*keyBucket),
+		started:    time.Now(),
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
 	}
 	if path != "" {
 		if err := r.load(); err != nil {
@@ -132,7 +158,7 @@ func (r *Recorder) Start() {
 				return
 			case <-t.C:
 				r.mu.Lock()
-				n := len(r.buckets)
+				n := len(r.buckets) + len(r.keyBuckets)
 				r.mu.Unlock()
 				if n > maxBuckets {
 					r.Rollup(time.Now())
@@ -215,18 +241,31 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 	r.dirty = true
 }
 
-// AddKey 按调用方 Key 的稳定 id（livecfg.APIKeyEntry.ID()）记一次调用。
-// id 为空（未配置鉴权、无从归属）是空操作。
-//
-// 刻意不并进 buckets：桶主键是 (时间片, realm, uid, model)——「调用方 Key」与
-// 「池账号」是两个正交维度，硬塞会改动桶键，牵动全部聚合与 Rollup 回填。
-// 面板只需要「这把用没用过、共几次」，单独一列累计器即可。
+// AddKey 只记调用计数（无 token 维度）——保留给没有 usage 可传的调用点。
+// 等价于 AddKeyUsage(id, Delta{}, ok, now)。
 func (r *Recorder) AddKey(id string, ok bool, now time.Time) {
+	r.AddKeyUsage(id, Delta{}, ok, now)
+}
+
+// AddKeyUsage 按调用方 Key 记一次调用（含 token 用量，fork usage-db 的
+// keyOwner 口径）。d 为本次请求的 usage 增量（与 Add 同口径：Has* 守卫 +
+// total 的 pt+ct 兜底）；ok=false 计失败（同样没有 usage 可加）。
+//
+// 同时更新两处（同源，之和恒等）：
+//   - KeyStat：终身累计（面板 keys 视图查全部历史）；
+//   - keyBuckets：小时片（KeySeries 的时间维度）。
+//
+// 写路径不落盘：与主桶一样只在内存累加，落盘走 30s 防抖 ticker（fork 把
+// 每请求一次 SQLite upsert 摊成每小时一行的降频效果，在 buddyhub 的
+// 「内存 + 防抖」架构里已经成立，这里只补维度）。
+func (r *Recorder) AddKeyUsage(id string, d Delta, ok bool, now time.Time) {
 	if r == nil || id == "" {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// KeyStat（终身累计）。Last 只朝前推（见 AddKey 原注释）。
 	k := r.keys[id]
 	if k == nil {
 		k = &KeyStat{ID: id}
@@ -236,10 +275,42 @@ func (r *Recorder) AddKey(id string, ok bool, now time.Time) {
 	if !ok {
 		k.Errors++
 	}
-	// 只朝前推：并发晚到的旧时间戳不能把「最近使用」拨回去——一把刚被调用的 Key
-	// 若显示「三天没动」，用户就会把它删掉。
 	if ms := now.UnixMilli(); ms > k.Last {
 		k.Last = ms
+	}
+	if d.HasPromptTokens {
+		k.PromptTokens += d.PromptTokens
+	}
+	if d.HasCompletion {
+		k.CompletionTokens += d.CompletionTokens
+	}
+	if d.HasTotal {
+		k.TotalTokens += d.TotalTokens
+	} else if d.HasPromptTokens || d.HasCompletion {
+		k.TotalTokens += d.PromptTokens + d.CompletionTokens
+	}
+
+	// keyBucket（小时片）。
+	scope := "h:" + now.Format(hourLayout)
+	bk := r.keyBuckets[id+"|"+scope]
+	if bk == nil {
+		bk = &keyBucket{KeyID: id, Scope: scope}
+		r.keyBuckets[id+"|"+scope] = bk
+	}
+	bk.Req++
+	if !ok {
+		bk.Err++
+	}
+	if d.HasPromptTokens {
+		bk.PT += d.PromptTokens
+	}
+	if d.HasCompletion {
+		bk.CT += d.CompletionTokens
+	}
+	if d.HasTotal {
+		bk.TT += d.TotalTokens
+	} else if d.HasPromptTokens || d.HasCompletion {
+		bk.TT += d.PromptTokens + d.CompletionTokens
 	}
 	r.dirty = true
 }
@@ -292,9 +363,37 @@ func (r *Recorder) Rollup(now time.Time) {
 		}
 		delete(r.buckets, m.from)
 	}
-	if len(moves) > 0 {
+
+	// key 桶同规则折叠（fork keyOwner 维度的小时保留期与主桶一致）。
+	keyMoves := 0
+	for k, b := range r.keyBuckets {
+		if !strings.HasPrefix(b.Scope, "h:") {
+			continue
+		}
+		ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(b.Scope, "h:"), time.Local)
+		if err != nil || !ts.Before(cutoff) {
+			continue
+		}
+		dayKey := b.KeyID + "|d:" + ts.Format(dayLayout)
+		src := r.keyBuckets[k]
+		dst := r.keyBuckets[dayKey]
+		if dst == nil {
+			cp := *src
+			cp.Scope = "d:" + ts.Format(dayLayout)
+			r.keyBuckets[dayKey] = &cp
+		} else {
+			dst.Req += src.Req
+			dst.Err += src.Err
+			dst.PT += src.PT
+			dst.CT += src.CT
+			dst.TT += src.TT
+		}
+		delete(r.keyBuckets, k)
+		keyMoves++
+	}
+	if len(moves) > 0 || keyMoves > 0 {
 		r.dirty = true
-		log.Printf("[usage] 折叠 %d 个小时桶为日桶（保留 %v 细粒度）", len(moves), hourlyKeep)
+		log.Printf("[usage] 折叠 %d 个小时桶为日桶（保留 %v 细粒度）", len(moves)+keyMoves, hourlyKeep)
 	}
 }
 
@@ -323,6 +422,14 @@ func (r *Recorder) load() error {
 			continue
 		}
 		r.keys[k.ID] = &k
+	}
+	// key 小时桶：旧版文件没有 key_buckets 字段，缺失即空（老文件照常加载）。
+	for i := range f.KeyBuckets {
+		b := f.KeyBuckets[i]
+		if b.KeyID == "" {
+			continue
+		}
+		r.keyBuckets[b.KeyID+"|"+b.Scope] = &b
 	}
 	log.Printf("[usage] 已恢复 %d 个用量桶（%s）", len(r.buckets), r.path)
 	return nil
@@ -353,6 +460,12 @@ func (r *Recorder) flush(force bool) {
 			snap.Keys = append(snap.Keys, *k)
 		}
 		sort.Slice(snap.Keys, func(i, j int) bool { return snap.Keys[i].ID < snap.Keys[j].ID })
+	}
+	if len(r.keyBuckets) > 0 {
+		snap.KeyBuckets = make([]keyBucket, 0, len(r.keyBuckets))
+		for _, b := range r.keyBuckets {
+			snap.KeyBuckets = append(snap.KeyBuckets, *b)
+		}
 	}
 	r.dirty = false
 	r.mu.Unlock()
@@ -611,6 +724,93 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	return snap
 }
 
+// KeySeries 单把 Key 的时序用量（读路径合并，fork usage-db 的 period 查询）。
+//
+// 口径与 Snapshot 完全一致（同一套窗口语义，不另立标准）：
+//   - hours>0：窗口 = [当前整点-(hours-1)小时, now]，小时桶按整点入窗；
+//     日桶（Rollup 折叠出的长期数据）按日起点入窗——小时保留期 90 天远大于
+//     窗口上限 60 天，故窗口内天然只有小时点；
+//   - hours<=0：全部历史（含已折叠日桶），日点在前 + 小时点在后拼连续时序。
+//
+// 输出按时间升序；空 id / nil recorder 返回 nil。
+func (r *Recorder) KeySeries(id string, hours int) []Point {
+	if r == nil || id == "" {
+		return nil
+	}
+	windowed := hours > 0
+	if windowed && hours > 24*60 {
+		hours = 24 * 60
+	}
+
+	r.mu.Lock()
+	bs := make([]keyBucket, 0, 64)
+	for _, b := range r.keyBuckets {
+		if b.KeyID == id {
+			bs = append(bs, *b)
+		}
+	}
+	r.mu.Unlock()
+
+	var hourFrom time.Time
+	if windowed {
+		nowHour := time.Now().Truncate(time.Hour)
+		hourFrom = nowHour.Add(-time.Duration(hours-1) * time.Hour)
+	}
+
+	hourSeries := map[string]*aggAcc{}
+	daySeries := map[string]*aggAcc{}
+	for i := range bs {
+		b := &bs[i]
+		if windowed {
+			var ts time.Time
+			var err error
+			if strings.HasPrefix(b.Scope, "h:") {
+				ts, err = time.ParseInLocation(hourLayout, strings.TrimPrefix(b.Scope, "h:"), time.Local)
+			} else {
+				ts, err = time.ParseInLocation(dayLayout, strings.TrimPrefix(b.Scope, "d:"), time.Local)
+			}
+			if err != nil || ts.Before(hourFrom) {
+				continue
+			}
+		}
+		// keyBucket 与 bucket 的时间/计数字段同构，借 aggAcc.add 复用同一套
+		// 累加与均值口径（不在两处各写一份）。
+		bb := &bucket{Scope: b.Scope, Req: b.Req, Err: b.Err, PT: b.PT, CT: b.CT, TT: b.TT}
+		if strings.HasPrefix(b.Scope, "h:") {
+			scope := strings.TrimPrefix(b.Scope, "h:")
+			if hourSeries[scope] == nil {
+				hourSeries[scope] = &aggAcc{}
+			}
+			hourSeries[scope].add(bb)
+		} else {
+			scope := strings.TrimPrefix(b.Scope, "d:")
+			if daySeries[scope] == nil {
+				daySeries[scope] = &aggAcc{}
+			}
+			daySeries[scope].add(bb)
+		}
+	}
+
+	out := make([]Point, 0, len(daySeries)+len(hourSeries))
+	dayKeys := make([]string, 0, len(daySeries))
+	for k := range daySeries {
+		dayKeys = append(dayKeys, k)
+	}
+	sort.Strings(dayKeys)
+	for _, k := range dayKeys {
+		out = append(out, Point{T: k, Scope: "day", Agg: daySeries[k].finish()})
+	}
+	hourKeys := make([]string, 0, len(hourSeries))
+	for k := range hourSeries {
+		hourKeys = append(hourKeys, k)
+	}
+	sort.Strings(hourKeys)
+	for _, k := range hourKeys {
+		out = append(out, Point{T: k, Scope: "hour", Agg: hourSeries[k].finish()})
+	}
+	return out
+}
+
 // DailySeries 单个账号最近 days 天的日粒度用量，供面板账号详情抽屉画「近 7 天曲线」。
 //
 // 为什么另走一个方法：Snapshot 的时序是**全池**口径（账号详情要看的是这一个号），
@@ -697,6 +897,7 @@ func (r *Recorder) Describe() string {
 	}
 	r.mu.Lock()
 	n := len(r.buckets)
+	nk := len(r.keyBuckets)
 	r.mu.Unlock()
 	var sz int64
 	if r.path != "" {
@@ -704,5 +905,5 @@ func (r *Recorder) Describe() string {
 			sz = fi.Size()
 		}
 	}
-	return fmt.Sprintf("%d buckets, file %d bytes", n, sz)
+	return fmt.Sprintf("%d buckets, %d key-buckets, file %d bytes", n, nk, sz)
 }
