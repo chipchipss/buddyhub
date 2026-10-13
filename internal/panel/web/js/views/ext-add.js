@@ -184,6 +184,17 @@ const FORMS = {
       'API Key 从 z.ai / bigmodel 控制台复制；JWT 从 ZCode 客户端凭据文件里取 access_token 字段。',
     ],
   },
+  cursor: {
+    fields: [
+      { k: 'access_token', label: 'Access Token（浏览器登录后取得）', required: true },
+    ],
+    fig: 'paste',
+    steps: [
+      '浏览器打开 cursor.com 登录，从开发者工具 Network 里取任意请求的 Authorization: Bearer <token>。',
+      'Cursor 的 refresh token 不能换新 access token，到期只能重新取一次。',
+      '也可填 API key 形如 key_xxx 的凭据（内部会兑换成 access token）。',
+    ],
+  },
 };
 
 /** hasCredFields(id) —— 该平台有没有「逐字段粘贴凭据」这条路径。

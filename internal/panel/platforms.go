@@ -116,6 +116,9 @@ var platforms = []Platform{
 		Renew: RenewStatic,
 		// Note 过渡态已解除：chat 桥接已接线（zcode_bridge.go），一致性测试重跑通过。
 		Note: "API key 永久 / Start Plan JWT 耗尽即弃"},
+	{ID: "cursor", Name: "Cursor", Group: GroupGateway, Vendor: "Cursor", Prefix: "cursor:", Login: LoginManual,
+		Renew: RenewManual,
+		Note:  "粘贴 access_token / API key；到期需重登（对话协议待接线）"},
 
 	// ── 积分 / 签到平台（无对话 API）──
 	{ID: "loomy-cli", Name: "Loomy（讯飞，密钥/短信）", Group: GroupPoints, Vendor: "讯飞", Login: LoginManual,

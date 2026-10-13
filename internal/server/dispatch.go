@@ -221,6 +221,21 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		return bridgeOutcome{matched: true, code: "no_zcode_account", detail: detail, lastErr: h.lastZcodeErr}
 	}
 
+	// Cursor 通道（cursor: 前缀模型）：Connect bidi-stream 协议本批未接线，
+	// 桥接做账号解析 + unary 连通性探测 + 如实报未接线（见 cursor_bridge.go）。
+	if isCursorModel(bareModel) {
+		bodyCU := body
+		m := strings.TrimPrefix(bareModel, cursorModelPrefix)
+		if m != bareModel {
+			bodyCU = rewriteModel(body, m)
+		}
+		if h.CursorChatStream(w, r, bodyCU, m) {
+			return bridgeOutcome{matched: true, served: true}
+		}
+		detail := bridgeDetail("没有可用的 Cursor 账号（面板-添加账号-外部平台-Cursor 浏览器登录）", "Cursor", h.lastCursorErr)
+		return bridgeOutcome{matched: true, code: "no_cursor_account", detail: detail, lastErr: h.lastCursorErr}
+	}
+
 	// Codex 订阅池直连（codex: 前缀）：本机 ~/.codex* 凭据 + Responses API。
 	if isCodexModel(bareModel) {
 		cm := strings.TrimPrefix(bareModel, codexModelPrefix)

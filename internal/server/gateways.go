@@ -37,6 +37,7 @@ var gatewayRoutes = []struct {
 	{imaModelPrefix, isIMAModel},
 	{marvisModelPrefix, isMarvisModel},
 	{zcodeModelPrefix, isZcodeModel},
+	{cursorModelPrefix, isCursorModel},
 }
 
 // GatewayPrefixes 导出全部**有对话桥接**的模型前缀。

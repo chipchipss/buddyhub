@@ -54,6 +54,7 @@ func PlatformOf(bare string) string {
 		{imaModelPrefix, "ima"},
 		{marvisModelPrefix, "marvis"},
 		{zcodeModelPrefix, "zcode"},
+		{cursorModelPrefix, "cursor"},
 	} {
 		if strings.HasPrefix(bare, p.prefix) {
 			return p.name

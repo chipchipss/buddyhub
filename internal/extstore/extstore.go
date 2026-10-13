@@ -59,6 +59,9 @@ const (
 	PMarvis = "marvis"
 	// PZCode ZCode / z.ai（magpie 二批；API key 永久 / Start Plan JWT 耗尽即弃）。
 	PZCode = "zcode"
+	// PCursor Cursor（magpie 二批；browser 登录 / API key 换取，"耗尽即弃"——
+	// fork 的 refresh token 不能换新 access token，到期只能重登）。
+	PCursor = "cursor"
 )
 
 // ExtAccount 一个外部平台账号。
