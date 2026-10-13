@@ -3,21 +3,23 @@
 // 移植自 9router-qoder-plus（HEAD 290c68c）：
 //   - POST /api/usage：src/app/api/usage/route.js（9 行全文，转
 //     queryCcSwitchUsage）+ src/lib/ccSwitchUsageRequest.js（135 行全文）
-//     + src/shared/services/ccSwitchUsage.js（buildCcSwitchUsage）；
+//   - src/shared/services/ccSwitchUsage.js（buildCcSwitchUsage）；
 //   - POST /user/balance：ccSwitchUsageRequest 的 includeActiveField 分支
 //     （is_active 字段）——CC-Switch 客户端探测 Key 有效性时用。
 //
 // CC-Switch 是第三方 Qoder 账号切换客户端，靠这两个端点读网关的额度视图。
 // 响应契约（fork buildCcSwitchUsage 返回形状，逐字段对齐）：
-//   {isValid, balance, remaining, total, used, unit:"credits",
-//    planName, extra}  + /user/balance 追加 is_active。
+//
+//	{isValid, balance, remaining, total, used, unit:"credits",
+//	 planName, extra}  + /user/balance 追加 is_active。
 //
 // 鉴权口径与 fork 一致：Bearer token（Authorization 头）或 x-api-key 头，
 // 走网关既有 withAuth（多 Key 体系命中即过）。额度数据源：
-//   1. 有分配上限（qoderLedger.alloc）：本地账本口径（不依赖上游查询，
-//      fork 注释原文"Even an expired account token cannot erase it"）；
-//   2. 无分配上限：账号级上游额度（buddyhub 侧由余额刷新线程观测，
-//      上游无 rows 时退化为 remainingQuota 单行）。
+//  1. 有分配上限（qoderLedger.alloc）：本地账本口径（不依赖上游查询，
+//     fork 注释原文"Even an expired account token cannot erase it"）；
+//  2. 无分配上限：账号级上游额度（buddyhub 侧由余额刷新线程观测，
+//     上游无 rows 时退化为 remainingQuota 单行）。
+//
 // 上游不可用 → quotaStatus:"unavailable" 计入 extra（不失败，与 fork 同）。
 package server
 
@@ -32,14 +34,14 @@ import (
 
 // ccSwitchUsageBody CC-Switch 用量响应（fork buildCcSwitchUsage 返回形状）。
 type ccSwitchUsageBody struct {
-	IsValid  bool   `json:"isValid"`
-	Balance  float64 `json:"balance"`
+	IsValid   bool    `json:"isValid"`
+	Balance   float64 `json:"balance"`
 	Remaining float64 `json:"remaining"`
-	Total    float64 `json:"total"`
-	Used     float64 `json:"used"`
-	Unit     string `json:"unit"`
-	PlanName string `json:"planName"`
-	Extra    string `json:"extra,omitempty"`
+	Total     float64 `json:"total"`
+	Used      float64 `json:"used"`
+	Unit      string  `json:"unit"`
+	PlanName  string  `json:"planName"`
+	Extra     string  `json:"extra,omitempty"`
 	// IsActive 仅 /user/balance 分支带（fork includeActiveField）。
 	IsActive *bool `json:"is_active,omitempty"`
 	// Error/InvalidMessage 不可用时的说明（fork 的 error/invalidMessage）。

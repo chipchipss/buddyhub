@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -87,5 +88,34 @@ func TestZcodeBridgeDualCredentialUsesAPIKey(t *testing.T) {
 	w := postZcode(t, h, "zcode:GLM-5.3", `{"model":"zcode:GLM-5.3","messages":[{"role":"user","content":"hi"}]}`)
 	if w.Code != http.StatusOK || hits != 1 {
 		t.Fatalf("dual credential must route on api key: status=%d hits=%d", w.Code, hits)
+	}
+}
+
+// Chief 裁定①流内版：SSE 流里的 error 事件（1113/1005）触发入账 + noteChat，
+// 事件本身照常透传（不消费流）。
+
+func TestZcodeBridgeStreamSpentCheck(t *testing.T) {
+	up := &fakeZcodeUpstream{status: 200,
+		body: "event: error\ndata: {\"type\":\"error\",\"error\":{\"code\":1113,\"message\":\"spent\"}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"tail\"}}\n\n",
+		contentType: "text/event-stream",
+		onRequest:   func() {}}
+	h := newZcodeBridgeHarness(t, up, zcode.Credential{APIKey: "sk"})
+	h.qoderLedger.SetAllocation(qoder.AccountKey("zcode", "zc0"), 5)
+
+	// 流式请求：客户端要流。
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"zcode:GLM-5.3","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if got := h.qoderLedger.UsedCredits(qoder.AccountKey("zcode", "zc0")); got != 1 {
+		t.Fatalf("stream spent not recorded: ledger = %v", got)
+	}
+	// 流照常透传（后续正文帧不丢）——error 事件本身被翻译泵丢弃是 zai 转换器
+	// 的既有行为（Anthropic error event 无 OpenAI chunk 对应），账本+冷却才是
+	// 流内耗尽的交付物。
+	if !strings.Contains(w.Body.String(), "tail") {
+		t.Fatalf("stream must continue after error event: %s", w.Body.String())
 	}
 }

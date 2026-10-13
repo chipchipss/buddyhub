@@ -18,13 +18,14 @@ import (
 /* ── ZCode chat 桥接（阶段②）──────────────────────────────── */
 
 type fakeZcodeUpstream struct {
-	mu         sync.Mutex
-	status     int
-	body       string
-	seenAuth   []string
-	seenXAPIKV []string
-	seenHost   []string
-	srv        *httptest.Server
+	mu          sync.Mutex
+	status      int
+	body        string
+	contentType string
+	seenAuth    []string
+	seenXAPIKV  []string
+	seenHost    []string
+	srv         *httptest.Server
 	// onRequest 每个上游请求前调（测试计数/拦截用）。
 	onRequest func()
 }
@@ -39,7 +40,11 @@ func (f *fakeZcodeUpstream) handler(w http.ResponseWriter, r *http.Request) {
 	f.seenHost = append(f.seenHost, r.URL.Host)
 	status, body := f.status, f.body
 	f.mu.Unlock()
-	w.Header().Set("Content-Type", "application/json")
+	if f.contentType != "" {
+		w.Header().Set("Content-Type", f.contentType)
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+	}
 	w.WriteHeader(status)
 	w.Write([]byte(body))
 }

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -106,6 +107,21 @@ func (p *Panel) extAccountAdd(w http.ResponseWriter, r *http.Request) {
 	if body.ID == "" || len(body.Cred) == 0 {
 		writeErr(w, http.StatusBadRequest, "id 与 cred 必填")
 		return
+	}
+	// ZCode 范围强制（Chief 裁定③）：本阶段只收 coding key（API key）——
+	// JWT-only 凭据走错上游路径（Start Plan 端点未接线），入库侧直接拒绝，
+	// 比运行时静默降级诚实。API key + JWT 并存可以（走 api key）。
+	if body.Provider == extstore.PZCode {
+		var probe struct {
+			APIKey      string `json:"api_key"`
+			AccessToken string `json:"access_token"`
+		}
+		if json.Unmarshal(body.Cred, &probe) == nil &&
+			strings.TrimSpace(probe.APIKey) == "" && strings.TrimSpace(probe.AccessToken) != "" {
+			writeErr(w, http.StatusBadRequest,
+				"ZCode 暂只支持 API Key 凭据：Start Plan JWT 通道未开放，请到 z.ai/bigmodel 控制台获取 API Key")
+			return
+		}
 	}
 	if body.Label == "" {
 		body.Label = body.ID

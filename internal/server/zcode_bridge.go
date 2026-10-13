@@ -20,6 +20,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -163,12 +164,19 @@ func (h *Handler) ZcodeChatStream(w http.ResponseWriter, r *http.Request, body [
 		log.Printf("zcode-bridge: acct=%s site=%s model=%s ctype=%s", a.ID, site, model, ctype)
 		if h.clientWantsStream(body) {
 			if isSSE {
-				h.proxyZaiSSE(w, resp.Body, model) // Anthropic SSE → OpenAI chunk（复用 zai 泵）
+				// Chief 裁定①：流内 200 body 命中 1113/1005 同样入账 + noteChat 冷却
+				//（扫描 SSE 事件不消费流——zai 泵本来就逐帧读，钩子在帧级别判）。
+				h.proxyZcodeSSEWithSpentCheck(w, resp.Body, model, a)
 			} else {
 				h.proxyZaiJSONAsSSE(w, resp.Body, model)
 			}
 		} else if isSSE {
-			writeJSON(w, http.StatusOK, zaiAggregateSSE(resp.Body, model))
+			// 非流式客户端收到 SSE：聚合前同样逐帧扫（聚合器本身读帧）。
+			agg := zaiAggregateSSEWithSpentCheck(resp.Body, model, func() {
+				h.zcodeRecordSpent(a)
+				h.noteChat(a.Provider, a.ID, errors.New("额度/配额耗尽（流内 200-body 1113/1005）"))
+			})
+			writeJSON(w, http.StatusOK, agg)
 			resp.Body.Close()
 		} else {
 			raw, rerr := io.ReadAll(resp.Body)
