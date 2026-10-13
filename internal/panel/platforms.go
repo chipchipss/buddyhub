@@ -113,7 +113,10 @@ var platforms = []Platform{
 	{ID: "marvis", Name: "Marvis（马维斯）", Group: GroupGateway, Vendor: "腾讯", Prefix: "marvis:", Login: LoginManual,
 		Renew: RenewManual, Note: "从已登录客户端抓包：mv_ token / openid / device_guid"},
 	{ID: "zcode", Name: "ZCode / z.ai", Group: GroupPoints, Vendor: "智谱", Login: LoginManual,
-		Renew: RenewStatic, Note: "API key 永久 / Start Plan JWT 耗尽即弃（chat 桥接接线中，暂只能入池）"},
+		Renew: RenewStatic,
+		// Note 过渡态标记：chat 桥接落地后须①归 GroupGateway + 声明 zcode: 前缀，
+		// ②跑 TestEveryGatewayPrefixIsRoutable / TestPlatformRegistryIsWellFormed。
+		Note: "API key 永久 / Start Plan JWT 耗尽即弃（chat 桥接接线中，暂只能入池）"},
 
 	// ── 积分 / 签到平台（无对话 API）──
 	{ID: "loomy-cli", Name: "Loomy（讯飞，密钥/短信）", Group: GroupPoints, Vendor: "讯飞", Login: LoginManual,
