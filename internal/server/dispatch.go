@@ -207,6 +207,20 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		return bridgeOutcome{matched: true, code: "no_ima_account", detail: detail, lastErr: h.lastIMAErr}
 	}
 
+	// ZCode 通道（zcode: 前缀模型）：Anthropic Messages 兼容端点（z.ai /
+	// bigmodel 双站点，zcode:cn/ 子前缀选 bigmodel），翻译复用 zai 桥。
+	if isZcodeModel(bareModel) {
+		bodyZC := body
+		if _, m := zcodeSiteFor(strings.TrimPrefix(bareModel, zcodeModelPrefix)); m != "" && m != bareModel {
+			bodyZC = rewriteModel(body, m)
+		}
+		if h.ZcodeChatStream(w, r, bodyZC, strings.TrimPrefix(bareModel, zcodeModelPrefix)) {
+			return bridgeOutcome{matched: true, served: true}
+		}
+		detail := bridgeDetail("没有可用的 ZCode 账号（面板-添加账号-外部平台-ZCode 填 API key / JWT）", "ZCode", h.lastZcodeErr)
+		return bridgeOutcome{matched: true, code: "no_zcode_account", detail: detail, lastErr: h.lastZcodeErr}
+	}
+
 	// Codex 订阅池直连（codex: 前缀）：本机 ~/.codex* 凭据 + Responses API。
 	if isCodexModel(bareModel) {
 		cm := strings.TrimPrefix(bareModel, codexModelPrefix)

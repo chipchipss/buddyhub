@@ -154,6 +154,7 @@ type Handler struct {
 	lastIMAErr      string
 	lastMarvisErr   string
 	lastCodeArtsErr string
+	lastZcodeErr    string
 
 	// clineFlights / autoclawFlights 续期单飞表。
 	// 两家的 refresh_token 都是一次性轮换语义：并发续期会互相作废并把人踢下线，

@@ -53,6 +53,7 @@ func PlatformOf(bare string) string {
 		{codeartsModelPrefix, "codearts"},
 		{imaModelPrefix, "ima"},
 		{marvisModelPrefix, "marvis"},
+		{zcodeModelPrefix, "zcode"},
 	} {
 		if strings.HasPrefix(bare, p.prefix) {
 			return p.name
