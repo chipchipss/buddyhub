@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/chipchipss/buddyhub/internal/auth"
+	"github.com/chipchipss/buddyhub/internal/contextbudget"
 	"github.com/chipchipss/buddyhub/internal/dingtalk"
 	"github.com/chipchipss/buddyhub/internal/extprovider/accio"
 	"github.com/chipchipss/buddyhub/internal/extprovider/autoclaw"
@@ -77,6 +78,12 @@ type Config struct {
 	PromptMode string
 	// PromptText custom 模式下注入的系统提示词文本（来自 config.PromptText）。
 	PromptText string
+
+	// ContextBudget provider 级上下文预算（token，<=0 关闭，默认关）。
+	// 出站前按 zcode-leech 语义裁剪 messages：只删不改（system/末条 user/
+	// 近期尾部必留 + 关键词逐字检索回填，tool_calls 与 tool 响应不拆散）。
+	// 裁剪发生在 prompt 改写之前（那会动 system 块，先裁再改语义更干净）。
+	ContextBudget int
 
 	// GlobalEnabled global realm 路由开关（config global.enabled，缺省 true）。
 	// handler 侧第三道闸（与 main 注入 auth 开关、upstream.GlobalEnabled 呼应）：
@@ -1087,6 +1094,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				TotalTokens:      delta.TotalTokens,
 				HasTotal:         delta.HasTotalTokens,
 			}, attemptOK, time.Now())
+		}
+	}
+
+	// provider 级上下文预算裁剪（出站前、prompt 改写前；每个请求一次）。
+	// 放在 prompt 改写**之前**：那会增删 system 块，先裁再改语义更干净
+	// （预算估的是客户端原生物学费，不含网关自有提示词）。
+	// budget<=0 = 关闭：PruneBody 原样返回，逐字透传零回归。
+	if h.cfg.ContextBudget > 0 {
+		if pruned, m := contextbudget.PruneBody(body, h.cfg.ContextBudget); m.Windowed {
+			log.Printf("ctx-budget: model=%s 裁剪 %d→%d token（保留 %d 条，检索回填 %d，预算 %d）",
+				peek.Model, m.OriginalTokens, m.WindowedTokens, m.Kept, m.Retrieved, m.Budget)
+			body = pruned
 		}
 	}
 

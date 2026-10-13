@@ -258,6 +258,12 @@ type Config struct {
 	// PromptText 解析后的系统提示词文本（custom/append 模式使用）。
 	PromptText string `json:"-"`
 
+	// ContextBudget provider 级上下文预算裁剪（zcode-leech 语义，默认关）。
+	// <=0 = 关闭（逐字透传，零回归）；>0 = 出站前把 messages 裁进该 token
+	// 预算（system/末条 user/近期尾部必留 + 关键词精确检索回填，tool 对不拆）。
+	// 只删不改：预算内逐字透传，绝不改写/摘要/重排任何消息。
+	ContextBudget int `json:"context_budget"`
+
 	Upstash struct {
 		URL   string `json:"url"`   // 空 = 纯内存模式；支持完整 rediss:// URL 或 https://xxx.upstash.io host
 		Token string `json:"token"` // url 非完整连接串时用于组装 rediss://default:<token>@<host>:6379
