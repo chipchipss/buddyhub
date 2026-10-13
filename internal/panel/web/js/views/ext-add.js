@@ -173,6 +173,17 @@ const FORMS = {
       'token 过期后自动续不了，要重新抓一次。',
     ],
   },
+  zcode: {
+    fields: [
+      { k: 'api_key', label: 'API Key（永久有效）', required: false },
+      { k: 'access_token', label: 'Start Plan JWT（耗尽即弃）', required: false },
+    ],
+    fig: 'paste',
+    steps: [
+      '两种凭据二选一：API Key 永久有效；Start Plan 的 JWT 到期后账号即耗尽，需重新获取。',
+      'API Key 从 z.ai / bigmodel 控制台复制；JWT 从 ZCode 客户端凭据文件里取 access_token 字段。',
+    ],
+  },
 };
 
 /** hasCredFields(id) —— 该平台有没有「逐字段粘贴凭据」这条路径。

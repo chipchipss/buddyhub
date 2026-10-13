@@ -57,6 +57,8 @@ const (
 	PIMA = "ima"
 	// PMarvis 腾讯 Marvis（马维斯，操作系统级 AI 助手；客户端抓包凭据入池）。
 	PMarvis = "marvis"
+	// PZCode ZCode / z.ai（magpie 二批；API key 永久 / Start Plan JWT 耗尽即弃）。
+	PZCode = "zcode"
 )
 
 // ExtAccount 一个外部平台账号。
