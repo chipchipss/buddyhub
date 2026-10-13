@@ -100,6 +100,14 @@ func (h *Handler) ZcodeChatStream(w http.ResponseWriter, r *http.Request, body [
 			h.noteChat(a.Provider, a.ID, errOf(lastErr))
 			continue
 		}
+		// 观察 3 收口（auxiliary 复核）：JWT-only 凭据会走错上游路径（fork 的
+		// JWT 走 START_BASE + startHeaders + dress()，本阶段未接）——把"只接
+		// coding key"的范围声明变成强制约束：JWT 形态直接跳过并提示。
+		if cred.APIKey == "" && cred.AccessToken != "" {
+			lastErr = "仅 JWT 凭据暂不支持对话（Start Plan 路径未接线），请配置 API Key"
+			h.noteChat(a.Provider, a.ID, errOf(lastErr))
+			continue
+		}
 		if cred.Lapsed(timeNow()) {
 			lastErr = "Start Plan JWT 已过期（耗尽即弃），请重新获取"
 			_ = h.extManager.MarkSignInExpired(a.Provider, a.ID, lastErr)
@@ -167,6 +175,16 @@ func (h *Handler) ZcodeChatStream(w http.ResponseWriter, r *http.Request, body [
 			resp.Body.Close()
 			if rerr != nil {
 				writeOpenAIError(w, http.StatusBadGateway, "upstream_read", rerr.Error())
+				return true
+			}
+			// 二相性观察 1（auxiliary 复核）：非流式 200 响应的 body 里也可能
+			// 藏着额度耗尽（code 1113/1005——fork spentUp 本来就在 200 body 上
+			// 判）。入账后回 429 语义给客户端（不让"耗尽"被当成成功空回合），
+			// 流式路径不读 body 的约束保留（Known-Limitations）。
+			if zcodeSpentUp(string(raw), resp.StatusCode) {
+				h.zcodeRecordSpent(a)
+				writeOpenAIError(w, http.StatusTooManyRequests, "quota_exhausted", "ZCode 额度/配额已耗尽（上游 200 + 1113/1005）")
+				log.Printf("zcode-bridge: acct=%s 200-body 额度耗尽（1113/1005），已入账", a.ID)
 				return true
 			}
 			out, terr := upstream.ZaiTranslateOutJSON(raw, model)

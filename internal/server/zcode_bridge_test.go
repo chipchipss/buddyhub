@@ -25,9 +25,14 @@ type fakeZcodeUpstream struct {
 	seenXAPIKV []string
 	seenHost   []string
 	srv        *httptest.Server
+	// onRequest 每个上游请求前调（测试计数/拦截用）。
+	onRequest func()
 }
 
 func (f *fakeZcodeUpstream) handler(w http.ResponseWriter, r *http.Request) {
+	if f.onRequest != nil {
+		f.onRequest()
+	}
 	f.mu.Lock()
 	f.seenAuth = append(f.seenAuth, r.Header.Get("Authorization"))
 	f.seenXAPIKV = append(f.seenXAPIKV, r.Header.Get("x-api-key"))
