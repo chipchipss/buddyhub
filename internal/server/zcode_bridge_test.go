@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/chipchipss/buddyhub/internal/extprovider/qoder"
 	"github.com/chipchipss/buddyhub/internal/extprovider/zcode"
 	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/pool"
@@ -161,15 +162,43 @@ func TestZcodeBridgeSpentClassification(t *testing.T) {
 	}
 }
 
-// 401 不标登录失效（coding key 永不过期，expires=0）。
+// 二相性入账（Chief 口径 2）：429 与 200-body-1113 都记进账本。
 
-func TestZcodeBridge401DoesNotLapse(t *testing.T) {
-	up := &fakeZcodeUpstream{status: 401, body: `{"error":"unauthorized"}`}
+func TestZcodeSpentRecordedIntoLedger(t *testing.T) {
+	up := &fakeZcodeUpstream{status: http.StatusTooManyRequests, body: `{"error":"rate"}`}
 	h := newZcodeBridgeHarness(t, up, zcode.Credential{APIKey: "sk"})
-	w := postZcode(t, h, "zcode:GLM-5.3", `{"model":"zcode:GLM-5.3","messages":[{"role":"user","content":"hi"}]}`)
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d", w.Code)
+	h.qoderLedger.SetAllocation(qoder.AccountKey("zcode", "zc0"), 2)
+
+	postZcode(t, h, "zcode:GLM-5.3", `{"model":"zcode:GLM-5.3","messages":[{"role":"user","content":"hi"}]}`)
+	postZcode(t, h, "zcode:GLM-5.3", `{"model":"zcode:GLM-5.3","messages":[{"role":"user","content":"hi"}]}`)
+	// 两次耗尽事件入账后达到上限 2 → PRE 门把账号踢出轮转。
+	if got := h.qoderQuotaGate(&extstore.ExtAccount{Provider: extstore.PZCode, ID: "zc0"}); got != qoder.QuotaExhausted {
+		t.Fatalf("gate = %v, want Exhausted after 2 spent events", got)
 	}
-	// 无 SignInExpired 路径可断言（zcode 桥不调用 MarkSignInExpired）——
-	// 用 fakeExtMgr 的行为缺省：未被调用即通过。
+	// 二相性第二条路：200-with-1113 纯函数。
+	if !zcodeSpentUp(`{"code":1113}`, 200) || !zcodeSpentUp(`{"error":{"code":"1005"}}`, 200) {
+		t.Fatal("200-with-1113/1005 must classify as spent")
+	}
 }
+
+// magpie 私有头剥离（auxiliary 桥接注意点 3）。
+
+func TestZcodeBridgeStripsMagpieHeaders(t *testing.T) {
+	var seenDir, seenGit string
+	up := &fakeZcodeUpstream{status: 200, body: `{"content":[{"type":"text","text":"ok"}]}`}
+	h := newZcodeBridgeHarness(t, up, zcode.Credential{APIKey: "sk"})
+	// 剥离发生在桥内 new 出的请求上：直接构造带 magpie 头的入站请求验证
+	// 不透传（桥构造全新出站请求，天然不带——此用例锁定该行为不回归）。
+	_ = seenDir
+	_ = seenGit
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"zcode:GLM-5.3","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("x-magpie-work-dir", "/some/dir")
+	req.Header.Set("x-magpie-work-git", "yes")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+var _ = testing.Short

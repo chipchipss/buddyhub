@@ -119,6 +119,11 @@ func (h *Handler) ZcodeChatStream(w http.ResponseWriter, r *http.Request, body [
 		req.Header.Set("anthropic-version", upstream.AnthropicVersion)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
+		// magpie 私有头剥离（auxiliary 桥接注意点 3）：x-magpie-work-* 是
+		// magpie 对自己插件的指示头，绝不外发上游。
+		for _, hh := range []string{"x-magpie-work-dir", "x-magpie-work-git"} {
+			req.Header.Del(hh)
+		}
 
 		resp, derr := http.DefaultClient.Do(req)
 		if derr != nil {
@@ -133,6 +138,10 @@ func (h *Handler) ZcodeChatStream(w http.ResponseWriter, r *http.Request, body [
 			// zcode 的 401 不标登录失效（coding key 永不过期）。
 			if resp.StatusCode == http.StatusTooManyRequests || zcodeSpentUp(string(raw), resp.StatusCode) {
 				lastErr = fmt.Sprintf("额度/限流（HTTP %d）", resp.StatusCode)
+				// 二相性入账（Chief 口径 2）：额度耗尽事件记进积分账本（若该账号
+				// 配了分配上限）——PRE 门槛据此把账号踢出轮转，二相性两条路
+				// （HTTP 429 / 200-body code）都汇到这里，单一事实源。
+				h.zcodeRecordSpent(a)
 			} else {
 				lastErr = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncateStr(string(raw), 200))
 			}
@@ -194,6 +203,17 @@ func zcodeSpentUp(body string, status int) bool {
 	code := fmt.Sprint(doc.Code)
 	ecode := fmt.Sprint(doc.Error.Code)
 	return code == "1113" || code == "1005" || ecode == "1113" || ecode == "1005"
+}
+
+// zcodeRecordSpent 额度耗尽事件入账（Chief 口径 2）：账本以"每次耗尽 +1 次计"
+// 记录（zcode 上游不明示消耗 credits 数，二相性只暴露"耗尽"这一事实）。
+// 有分配上限时 PRE 门槛据此拦截；无上限时仅作观测。复用 qoder.CreditLedger
+// 的计数语义（"provider/id" 键与 qoder 共用一个账本实例）。
+func (h *Handler) zcodeRecordSpent(a *extstore.ExtAccount) {
+	if h.qoderLedger == nil {
+		return
+	}
+	h.qoderLedger.RecordCredits(qoder.AccountKey(string(a.Provider), a.ID), 1)
 }
 
 // qzRedact 日志脱敏（复用 qoder 包的规则——同为 token 形态串）。
