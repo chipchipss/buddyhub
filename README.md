@@ -1277,6 +1277,8 @@ python import_codearts.py <accessKeys.csv>   # CodeArts AK/SK 批量导入面板
 | 600 字符 dangling 口径 | **刻意偏离 fork** | fork 用 JS `length > 600`（UTF-16 code unit，中文约 200 字即触顶）；buddyhub 用 rune 计数（中文 600 字触顶），对多字节文本更正确。经裁定保留，测试有注释固化，回归勿按"对齐 fork"改回 |
 | Qoder CN 企业 VPC 路由 | **未实现（有意）** | magpie-plugins qoder index.mjs L198-247/L1310-1325 支持企业实例（`<instance>.vpc.qoder.com.cn` 等 host 重写）。buddyhub 当前只接 public 双站点（qoder.com / qoder.cn）。注意 fail-closed 语义：若后续支持，VPC 实例名校验失败必须 SignInGone，**绝不能静默回落 public host**（会把企业 token 发到公网端点） |
 | COSY 请求签名 | **不适用** | magpie 的 api3.qoder.sh 链路要求 COSY envelope 签名（RSA 包裹 AES key + md5，index.mjs L86-110）；buddyhub 走 api2-v2 的 OpenAI 兼容端点（Bearer 直连，qoderclicn@1.1.16 协议），**不需要 COSY**。仅当未来切换到 api3 COSY 端点时才需补此实现 |
+| ZCode 额度耗尽无 60s blocked 冷却 | **备查（风险已被 PRE 门覆盖）** | fork 的 gift 路径对耗尽账号有 60s 冷却（index.mjs L1566-68）防重复敲；buddyhub 的耗尽事件走账本入账，PRE 门随即把账号踢出轮转，实际不重复敲。若后续观察到 failover 重入路径反复打上游再补 |
+| ZCode Start Plan JWT 路径 | **未实现（有意）** | fork 的 JWT 走 START_BASE + startHeaders（整套客户端标识头）+ dress() body 改写（index.mjs L1533-44/L1371-1420），本阶段只接 coding key；面板入库侧已硬拒 JWT-only 凭据（比运行时静默降级诚实）。Start Plan 账号后续按需补 |
 
 ### 上游端点
 
