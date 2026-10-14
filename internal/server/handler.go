@@ -19,6 +19,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extprovider/accio"
 	"github.com/chipchipss/buddyhub/internal/extprovider/autoclaw"
 	"github.com/chipchipss/buddyhub/internal/extprovider/cline"
+	"github.com/chipchipss/buddyhub/internal/extprovider/cursor"
 	"github.com/chipchipss/buddyhub/internal/extprovider/ima"
 	"github.com/chipchipss/buddyhub/internal/extprovider/keypool"
 	"github.com/chipchipss/buddyhub/internal/extprovider/qclaw"
@@ -223,6 +224,13 @@ type Handler struct {
 	qoderIdle     *dingtalk.IdleState
 	qoderKeyQuota *dingtalk.KeyQuotaState
 	dingTalk      *dingtalk.Sender
+
+	// cursorCatalogs Cursor 模型目录缓存（fork usable 的 lists Map：按 token
+	// 摘要存，ModelsKeep 内不重复拉）。零值可用，无需装配。
+	cursorCatalogs cursor.CatalogCache
+	// cursorMaxOnly 曾被上游拒 "Max Mode Required" 的模型 id（fork maxOnly
+	// Set L2145：进程级、记下来以后直接带 Max Mode，不再每次先撞一次拒）。
+	cursorMaxOnly sync.Map // id → struct{}{}
 }
 
 // NewHandler 构建 handler。
@@ -828,6 +836,9 @@ func (h *Handler) modelList() []map[string]any {
 			})
 		}
 	}
+	// Cursor 模型名单（cursor: 前缀）：条目构造在 cursor_bridge.go，
+	// 与桥接解析模型名共用同一条 request() 路径（列得出就发得出）。
+	out = append(out, h.cursorModelEntries()...)
 	return out
 }
 

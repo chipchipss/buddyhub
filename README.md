@@ -1311,7 +1311,7 @@ python import_codearts.py <accessKeys.csv>   # CodeArts AK/SK 批量导入面板
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| 模型目录与 effort/fast 变体选择 | **未接（如实）** | fork 拉 Cursor 模型目录，把 `claude-opus-5-high` 这类请求名解析成变体自己的 legacySlug + parameters + max_mode（L660-826 的 pick/named/request）。buddyhub 只走 fork 的**兜底分支**：目录外的名字原样送（`auto`→`default`），maxMode=false、无参数。因此点名要高推理档、或 id 只存在于某变体时，可能拿到上游 invalid_argument。补法：接模型列表 + 移植 request()/pick() |
+| 模型目录与 effort/fast 变体选择 | **已接**（第 5 步） | 桥接先拉 `AiService/AvailableModels`（`useModelParameters`）+ `GetUsableModels`（按账号裁掉没被服务的变体），把请求名解析成**变体自己的 legacySlug + 参数 + max_mode**（fork pick/named/request L660-827）。`reasoning_effort` 给档位、`service_tier=priority|fast` 开 fast；目录里没有的 Cursor 自有 id 走 named 解析（家族 id 自带 effort、`fast || old.fast`）；目录也没有的名字走兜底原样送（`auto`→`default`）。目录按 token 缓存 10 分钟（fork MODELS_KEEP），拉不到**不阻塞对话**、退化成原样送；上游拒 "Max Mode Required" 的 id 记进进程级 maxOnly，之后直接带 Max Mode（fork L2145/L2198-2199）。端到端验法：从 BidiAppend 上行负载里还原 run_request 的 protobuf，直接查里面发的是不是解析后的变体 id（cursor_bridge_catalog_test.go） |
 | HTTP/2 bidi（主路径 AgentService/Run） | **未实现（有意）** | fork 首选 H2 bidi、失败降级 H1（L1631-1698 的 open/h2Blocked 与 h1Until 冷却）。buddyhub 直取 H1：Go 标准库写 H2 双向流成本高，且 cursor-agent 在代理环境本就走 H1。若上游未来收紧 H1 支持，按 fork L1649-1662 的判定补 H2 路径 |
 | usage 账本（ledger 回查） | **未实现** | fork 对工具步用 dashboard usage events 回查补数（L1440-1543，Run 关闭后 ~2.5s 事件才出现）。buddyhub 的 runDecoder 只用流内 TurnEndedUpdate + said/estimate 估算兜底；`Hooks` 扩展位（StepUsage/OwedUsage）在移植注释里声明，接入时在事件循环外补 |
 | ServerConfigService 区域路由 | **未实现** | fork 按团队查 agent 网关 host（AGENT 常量只是兜底）；buddyhub 固定 api2。区域限制的团队会拿到 region 错误分类（connectStatus 已透出"重登无用"措辞） |

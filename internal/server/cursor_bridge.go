@@ -63,10 +63,8 @@ func (h *Handler) CursorChatStream(w http.ResponseWriter, r *http.Request, body 
 		return false
 	}
 	model := strings.TrimPrefix(bareModel, cursorModelPrefix)
-	runModel := model // fork request() 兜底：目录外的名字原样送
-	if runModel == "auto" {
-		runModel = "default"
-	}
+	// 目录解析前的原始请求名：目录里有它 → 解析成变体 id（effort/fast/maxMode
+	// 都由目录决定）；目录里没有/没拿到目录 → 原样送（fork request() 兜底）。
 
 	var accounts []*extstore.ExtAccount
 	for _, a := range h.cfg.ExtAccounts() {
@@ -80,11 +78,8 @@ func (h *Handler) CursorChatStream(w http.ResponseWriter, r *http.Request, body 
 	}
 
 	// 对话构造（纯函数，一次即可，不随换号重做）。第三返回值是解析后的
-	// 原始请求 map（供需要 temperature/top_p 这类附加字段的调用方取用）：
-	// **桥故意丢弃它**——Cursor 的 AgentRunRequest 没有采样参数位
-	// （fork buildRun 也不送），取回来无处安放，与其接成"看似生效实为
-	// 丢弃"的假旋钮，不如如实声明不支持（见 README Cursor KNOWN-LIMITATIONS）。
-	conv, tools, _, err := cursor.BuildConversation(body)
+	// 原始请求 map（取 reasoning_effort / service_tier 给模型目录用）。
+	conv, tools, chat, err := cursor.BuildConversation(body)
 	if err != nil || conv == nil || len(conv.Msgs) == 0 {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "Cursor：请求体里没有可用的对话消息")
 		return true
@@ -93,6 +88,18 @@ func (h *Handler) CursorChatStream(w http.ResponseWriter, r *http.Request, body 
 	// 请求路由到缓存了这份 prompt 的机器）。无键时空串，每次 Run 新建。
 	convID := cursor.ConversationID(body)
 	wantStream := h.clientWantsStream(body)
+
+	// 模型目录 + effort/fast 变体（fork answerOf L2162-2174）：
+	//   - effort = 请求的 reasoning_effort（Codex 侧的推理档）
+	//   - fast   = service_tier 为 priority/fast 时开
+	// 目录**按账号 token 解析**（fork 的 usable 就是按 token 缓存的清单），
+	// 拉不到时走兜底（名字原样送、auto→default）——与 fork 的
+	// `try { raw = await usable(tok) } catch {}` 同款语义，不阻塞对话。
+	effort, _ := chat["reasoning_effort"].(string)
+	fast := false
+	if tier, _ := chat["service_tier"].(string); tier == "priority" || tier == "fast" {
+		fast = true
+	}
 
 	lastErr := ""
 	for _, a := range accounts {
@@ -130,8 +137,13 @@ func (h *Handler) CursorChatStream(w http.ResponseWriter, r *http.Request, body 
 		}
 
 		cli := cursor.New()
-		run := func(maxMode bool) (*cursor.ChatStream, cursor.Event, bool) {
-			return h.cursorOpenRun(r, cli, cred.AccessToken, conv, tools, runModel, convID, maxMode)
+		// 目录按账号解析（fork usable 就是按 token 缓存）：拉不到时
+		// variant=nil → 走兜底（名字原样送），不阻塞对话。
+		v := h.cursorVariant(r, cli, cred.AccessToken, model, effort, fast)
+		// 目录解析出的目标已含 maxMode；这里只在上游**仍然**拒 Max Mode 时
+		// 强制重发一次（fork 的 maxOnly.has(id) 那一路）。
+		run := func(forceMax bool) (*cursor.ChatStream, cursor.Event, bool) {
+			return h.cursorOpenRun(r, cli, cred.AccessToken, conv, tools, v, convID, forceMax)
 		}
 		stream, first, ok := run(false)
 		if !ok {
@@ -139,9 +151,15 @@ func (h *Handler) CursorChatStream(w http.ResponseWriter, r *http.Request, body 
 			if lastErr == "" {
 				lastErr = "cursor: 建流失败"
 			}
-			// Max Mode 拒名字：换模式重发一次（fork 同款，仍算同一个账号）。
-			if maxModeRequired(lastErr) {
-				log.Printf("cursor-bridge: acct=%s 上游要求 Max Mode，重发 model=%s", a.ID, runModel)
+			// Max Mode 拒名字：换模式重发一次（fork 同款，仍算同一个账号），
+			// 并记下该 id 以后直接带 Max Mode（fork L2198-2199 的
+			// maxMode=true + maxOnly.add(id)——不记的话每个请求都要先撞一次拒）。
+			if maxModeRequired(lastErr) && !v.MaxMode {
+				log.Printf("cursor-bridge: acct=%s 上游要求 Max Mode，重发 model=%s", a.ID, model)
+				h.cursorMarkNeedsMax(model)
+				if v.ID != model {
+					h.cursorMarkNeedsMax(v.ID)
+				}
 				if s2, f2, ok2 := run(true); ok2 {
 					stream, first, ok = s2, f2, true
 				} else {
@@ -162,19 +180,149 @@ func (h *Handler) CursorChatStream(w http.ResponseWriter, r *http.Request, body 
 	return false
 }
 
+// cursorVariant 用该账号的模型目录把请求模型名解析成目标变体
+// （fork answerOf L2162-2174 的 usable+request 两步）。
+// 目录拉不到时走兜底（名字原样送、auto→default）——不阻塞对话。
+func (h *Handler) cursorVariant(r *http.Request, cli *cursor.Client, token, model, effort string, fast bool) cursor.Variant {
+	cat, err := h.cursorCatalogs.Get(r.Context(), cli, token)
+	if err != nil {
+		log.Printf("cursor-bridge: 模型目录拉取失败（走兜底原样送）: %s", err)
+		return cursorFallbackVariant(model)
+	}
+	v := cat.Request(model, effort, fast)
+	// 该 id 曾被上游拒过 "Max Mode Required"：以后直接带 Max Mode，
+	// 不再每次先撞一次拒（fork maxOnly Set L2145 + L2174）。
+	if h.cursorNeedsMax(model) || h.cursorNeedsMax(v.ID) {
+		v.MaxMode = true
+	}
+	log.Printf("cursor-bridge: model=%s effort=%q fast=%v → id=%s maxMode=%v params=%d",
+		model, effort, fast, v.ID, v.MaxMode, len(v.Params))
+	return v
+}
+
+// cursorFallbackVariant 目录缺失时的兜底目标（fork request() 第三分支）。
+func cursorFallbackVariant(model string) cursor.Variant {
+	run := model
+	if run == "auto" {
+		run = "default"
+	}
+	return cursor.Variant{ID: run}
+}
+
+// cursorNeedsMax 该 id 是否已被上游拒过 "Max Mode Required"（fork maxOnly.has）。
+func (h *Handler) cursorNeedsMax(id string) bool {
+	if id == "" {
+		return false
+	}
+	_, ok := h.cursorMaxOnly.Load(id)
+	return ok
+}
+
+// cursorModelEntries /v1/models 的 cursor: 条目（模型清单与桥接解析同源：
+// 都走目录的 request() 路径，列得出的名字就发得出对应变体）。
+// 目录不可用时返回 nil —— 整段跳过，不编造名单。
+func (h *Handler) cursorModelEntries() []map[string]any {
+	models := h.cursorCatalog()
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(models))
+	for _, m := range models {
+		if m.ID == "" {
+			continue
+		}
+		entry := map[string]any{
+			"id":             cursorModelPrefix + m.ID,
+			"object":         "model",
+			"created":        1753600000,
+			"owned_by":       "cursor",
+			"context_length": m.Context,
+		}
+		if m.Name != "" && m.Name != m.ID {
+			entry["description"] = m.Name
+		}
+		if len(m.Efforts) > 0 {
+			// 按档位序输出（不给前端留 map 的随机序）。
+			efforts := make([]string, 0, len(m.Efforts))
+			for _, l := range []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"} {
+				if _, ok := m.Efforts[l]; ok {
+					efforts = append(efforts, l)
+				}
+			}
+			entry["reasoning_supported_efforts"] = efforts
+		}
+		if m.Fast {
+			entry["fast_supported"] = true
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// cursorCatalog 列某账号可用的模型（fork usable 的对外面）。供
+// /v1/models 列 cursor: 名单用：**任何失败都返回 nil**——模型清单
+// 是增强信息，拉不到目录不该让整个 /v1/models 报错或卡住（与
+// copilot/cline/autoclaw catalog 同款降级）。缓存走 handler 级
+// cursorCatalogs，ModelsKeep（10 分钟）内不重复打上游。
+//
+// 冷启动这一次会真打上游（picker 30s / usable 8s 各自有超时，这里再加
+// 一层 35s 上限兜底）：与其他 provider 的"实时拉目录 + 10 分钟缓存"
+// 同一口径，不为此另立异步预取。
+func (h *Handler) cursorCatalog() []cursor.Model {
+	if h.cfg.ExtAccounts == nil {
+		return nil
+	}
+	var tok string
+	for _, a := range h.cfg.ExtAccounts() {
+		if a.Provider != extstore.PCursor || a.Disabled || a.SignInState == "expired" {
+			continue
+		}
+		var cred cursor.Credential
+		if json.Unmarshal(a.Cred, &cred) != nil || strings.TrimSpace(cred.AccessToken) == "" {
+			continue
+		}
+		if cred.Lapsed(time.Now()) {
+			continue
+		}
+		tok = cred.AccessToken
+		break
+	}
+	if tok == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	cat, err := h.cursorCatalogs.Get(ctx, cursor.New(), tok)
+	if err != nil {
+		log.Printf("cursor: 模型目录不可用（清单跳过 cursor: 条目）: %v", err)
+		return nil
+	}
+	return cat.Models()
+}
+
+// cursorMarkNeedsMax 记下该 id 只能跑 Max Mode（fork maxOnly.add）。
+func (h *Handler) cursorMarkNeedsMax(id string) {
+	if id != "" {
+		h.cursorMaxOnly.Store(id, struct{}{})
+	}
+}
+
 // cursorOpenRun 发起一次 Run 并**先读一帧**（fork runOnce 的 head-value
 // 语义：首帧是错误就不算建流成功，调用方才能换号/换模式重试）。
 // 返回 (流, 首帧, 成功)。失败时首帧带错误内容供分类。
+// v 是模型目录解析出的目标（id/params/maxMode）。
 func (h *Handler) cursorOpenRun(r *http.Request, cli *cursor.Client, token string,
-	conv *cursor.Conversation, tools []cursor.Tool, model, convID string, maxMode bool) (*cursor.ChatStream, cursor.Event, bool) {
-	stream, err := cli.ChatRun(r.Context(), cursor.ChatRequest{
+	conv *cursor.Conversation, tools []cursor.Tool, v cursor.Variant, convID string, forceMax bool) (*cursor.ChatStream, cursor.Event, bool) {
+	req := cursor.ChatRequest{
 		Token:   token,
-		Model:   model,
+		Model:   v.ID,
 		Conv:    conv,
 		Tools:   tools,
 		ConvID:  convID,
-		MaxMode: maxMode,
-	})
+		Params:  v.Params,
+		MaxMode: v.MaxMode || forceMax,
+	}
+	stream, err := cli.ChatRun(r.Context(), req)
 	if err != nil {
 		return nil, cursor.Event{Kind: cursor.EventError, Err: err}, false
 	}
