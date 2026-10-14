@@ -65,14 +65,32 @@ internal/zai/          Z.AI 专用栈（JWT/验证码/额度）
 
 ### 3.2 MiniMax 网关接线（未开工，范围已定，auxiliary 负责）
 
-客户端已移植（`internal/extprovider/minimax`，device flow + 刷新 + 登出判定，双站点 CN/Global），缺网关四件套：
+**实测现状（auxiliary grep 核过，修正原「只差一座桥」的误判）**：`internal/extprovider/minimax`
+只有设备登录四件事（`StartDevice`/`Poll`/`WaitDevice`/`Refresh`，双站点、含 fork 的两个
+变体坑）；**没有请求签名、没有 chat 端点、没有模型清单、没有每日签到**，而且**全仓无人
+引用这个包**（extstore 无 `PMiniMax`、面板注册表无条目、登录无挂点）——**连"登录能用"都
+还没成立**。另有一个坑：`minimax.go` L14 包注释把"请求签名 x-mini-max-*（md5）"列进了
+「协议要点（对齐 fork）」，但包里没有任何实现（全仓 grep 该符号只命中那行注释本身）——
+读注释会误判已就绪；实现后请顺手把注释改成实际状态。
 
-1. `internal/server/minimax_bridge.go`：OpenAI 请求 → MiniMax agent 端点，流式/聚合两路（照 `zcode_bridge.go` 骨架）
-2. dispatch/gatewayRoutes/PlatformOf 注册（`minimax:` 前缀）
-3. `/v1/models` 列 `minimax:` 名单（双站点）
-4. 面板账号侧核对（客户端签名/登录已就绪，桥只消费）
+按此现状，施工顺序（不是"四件套"那么轻）：
 
-两条已定口径：每日签到积分看客户端 `CheckinDaily` 与 extstore 现状决定是否进 `checkinCapable`；tool 语义若端点不支持则**如实报错不静默降级**（与 Cursor 桥同口径）。
+1. **先挂登录**：extstore 加 `PMiniMax` + 面板注册表条目 + `extlogin` 入口，让账号能入池
+2. **补客户端**：`signed()` 的 md5 签名口径（fork L318/L22/L55）→ chat 端点与流式
+   （fork `api()` L53；NPM 是 `@ai-sdk/anthropic`，可复用 `upstream.ZaiTranslateIn/OutJSON`
+   那套 Anthropic 翻译）→ 模型清单（fork `liveModels` L161/`parseModels` L129）
+3. **再上桥**：`internal/server/minimax_bridge.go`（流式/聚合两路，照 `zcode_bridge.go` 骨架，
+   守"流式已输出绝不换号重放"）+ dispatch/gatewayRoutes/PlatformOf 注册 `minimax:` 前缀
+   （**四处一致性测试交叉校验，漏一处必红**）
+4. **最后清单与账号视图**：`/v1/models` 列 `minimax:` 名单 + `ViewOne` 分支
+
+口径（两处易误判，已 grep 核实）：
+- **每日签到**：minimax 客户端没有 `CheckinDaily`（该能力只有 lobsterai/codearts/
+  autoclaw/traework/loomy 五家有）；**fork 自己也不领**——`packages/minimax/index.mjs`
+  L701 明写 "nothing is claimed (no check-in)"，它只**读**积分与套餐（`usage()`）。
+  所以"接 MiniMax 就要做签到"是错的：签到属**新增能力**，不是补漏；要做必须同步登记
+  `extstore.checkinCapable` + `CheckinOne` 分支（`platforms_test.go` 交叉校验，漏一处必红）。
+- **tool 语义**：若端点不支持则**如实报错，不静默降级**（与 Cursor 桥同口径）。
 
 ### 3.3 后续队列（Chief 已排）
 
@@ -95,7 +113,7 @@ internal/zai/          Z.AI 专用栈（JWT/验证码/额度）
 | Cursor | experimental 假流验证级（真连被取消）；HTTP/1.1 降级路径；模型目录已接（10min TTL 缓存，冷启动同步拉有 35s 上限）；usage 无 ledger 回查（工具步偏低）；采样参数不支持（上游无此位，如实丢弃） |
 | Qoder | CN 企业 VPC 路由未实现（若做必须 fail-closed）；流内定时 keepalive 未实现；COSY 签名不适用（api2-v2 Bearer 链路） |
 | ZCode | Start Plan JWT 路径未实现（入库侧硬拒）；无 60s blocked 冷却（PRE 门覆盖） |
-| MiniMax | 客户端就绪，网关未接线（进行中，见 3.2） |
+| MiniMax | **仅设备登录四件事，且全仓无人引用**（无签名/无 chat/无清单/无签到；extstore 与面板均未挂）——登录未成立，见 3.2 |
 | 全局 | `context_budget_by_provider` 装配期解析（重启生效）；Qoder 出站裁剪钳制 ≤900K |
 
 ## 6. 参考源码（fork 克隆，MIT）
