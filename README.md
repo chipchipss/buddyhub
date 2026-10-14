@@ -1280,6 +1280,43 @@ python import_codearts.py <accessKeys.csv>   # CodeArts AK/SK 批量导入面板
 | ZCode 额度耗尽无 60s blocked 冷却 | **备查（风险已被 PRE 门覆盖）** | fork 的 gift 路径对耗尽账号有 60s 冷却（index.mjs L1566-68）防重复敲；buddyhub 的耗尽事件走账本入账，PRE 门随即把账号踢出轮转，实际不重复敲。若后续观察到 failover 重入路径反复打上游再补 |
 | ZCode Start Plan JWT 路径 | **未实现（有意）** | fork 的 JWT 走 START_BASE + startHeaders（整套客户端标识头）+ dress() body 改写（index.mjs L1533-44/L1371-1420），本阶段只接 coding key；面板入库侧已硬拒 JWT-only 凭据（比运行时静默降级诚实）。Start Plan 账号后续按需补 |
 
+#### Cursor 通道 KNOWN-LIMITATIONS（对话协议第 3 步交付范围）
+
+对话客户端（`internal/extprovider/cursor/run.go`，fork L1700-1799/L1803-1887/L1891-2122 移植）
+当前是 **HTTP/1.1 降级路径**（RunSSE 下行 + BidiAppend 逐条上行），已按**假流验证级**交付：
+本地 httptest 同时扮演两条通道，端到端钉死正文/用量/空回复/end 帧错误/blob 索要/
+工具调用/Close 幂等七类行为（run_test.go）。以下为范围边界：
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| HTTP/2 bidi（主路径 AgentService/Run） | **未实现（有意）** | fork 首选 H2 bidi、失败降级 H1（L1631-1698 的 open/h2Blocked 与 h1Until 冷却）。buddyhub 直取 H1：Go 标准库写 H2 双向流成本高，且 cursor-agent 在代理环境本就走 H1。若上游未来收紧 H1 支持，按 fork L1649-1662 的判定补 H2 路径 |
+| usage 账本（ledger 回查） | **未实现** | fork 对工具步用 dashboard usage events 回查补数（L1440-1543，Run 关闭后 ~2.5s 事件才出现）。buddyhub 的 runDecoder 只用流内 TurnEndedUpdate + said/estimate 估算兜底；`Hooks` 扩展位（StepUsage/OwedUsage）在移植注释里声明，接入时在事件循环外补 |
+| ServerConfigService 区域路由 | **未实现** | fork 按团队查 agent 网关 host（AGENT 常量只是兜底）；buddyhub 固定 api2。区域限制的团队会拿到 region 错误分类（connectStatus 已透出"重登无用"措辞） |
+| x-cursor-client-version 探测 | **固定值** | fork 探测本机 cursor-agent 版本（L88-108），探不到才用 VERSION_FALLBACK；buddyhub 不探测，恒发 `2026.09.23-86fc751`。上游若把版本与工具行为绑定并收紧校验，需改为可配置 |
+
+**真连最小验证步骤**（补验的人照做即可，不需要代码改动）：
+
+1. 面板 → 添加账号 → 外部平台 → Cursor，走浏览器登录拿到 access token（约 2 个月有效）。
+2. 单轮纯文本请求（不带 tools、不带图片）：
+   ```
+   curl -s http://127.0.0.1:8080/v1/chat/completions \
+     -H 'Content-Type: application/json' -H 'Authorization: Bearer <buddyhub入口key>' \
+     -d '{"model":"cursor:<模型名>","messages":[{"role":"user","content":"只回复两个字：收到"}]}'
+   ```
+   **预期响应特征**：标准 `chat.completion` JSON；`choices[0].message.content` 含短回复；
+   `usage` 三字段非零（无流内 TurnEndedUpdate 时为 said/estimate 估算值——非零即符合预期）；
+   finish_reason=`stop`。流式版加 `"stream":true`：应看到 ≥1 条 `chat.completion.chunk`
+   delta 文本、以带 usage 的 finish chunk 和 `data: [DONE]` 收尾。
+3. 成功判据：HTTP 200 且拿到非空 content。失败时按错误分类排查：401=token 过期（重登，
+   Cursor 的 refresh 不能换 access token）；429=配额（"usage limit reached"前缀）；
+   403 含 region=团队区域限制（重登无用，换网络/换团队）；502"空回复"=可重试，
+   括注里带回合出现过什么（thinking 长度/refused 工具号），照抄给维护者即可定位。
+4. 工具调用一轮（可选，验证 exec/kv 双向）：带一个简单 function 的 `tools` 发起请求，
+   预期 finish_reason=`tool_calls` 且 `tool_calls[0].name` 是工具名；把结果按
+   tool 消息回填再发第二轮，预期第二轮能续上对话。
+5. 若第 2 步就断在"流在终局前结束"（502）：抓 RunSSE 响应头与首批字节（`x-cursor-streaming`
+   回显、content-type），对照 fork frames 的 flags 语义排查（run.go readFrames 处注释有链路）。
+
 ### 上游端点
 
 上游接口均为 CodeBuddy 官方 CLI / 插件使用的**非公开 / 逆向接口**，未见公开 API 文档；路径及 Host 以代码内常量为准（见文末出处表）。两类 base：
