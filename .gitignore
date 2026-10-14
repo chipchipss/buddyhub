@@ -36,6 +36,10 @@ docs/
 # 设计/计划文档（但 README.md 必须进版本库）
 *.md
 !README.md
+# 转接文档与移植对照：接手的人（或转接 agent）从仓库直接读才能开工，
+# 与 README 同级待遇。设计/计划类 .md 仍按上面的规则忽略。
+!HANDOFF.md
+!REFERENCES.md
 
 # Windows binaries
 /buddyhub.exe
