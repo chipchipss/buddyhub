@@ -140,6 +140,50 @@ func TestConnectFrameOversize(t *testing.T) {
 	}
 }
 
+// 前向兼容（coder 的观察）：上游新增**未知字段号**但用标准 wire type 时，
+// 解析必须按 wire type 跳过、后面的已知字段照常读到——手写 pb 最容易
+// 在这里崩，必须钉死而不是等连真实上游才暴露。
+func TestPBUnknownFieldSkippedByWiretype(t *testing.T) {
+	// 手工拼一条消息：field 99(varint) + field 100(bytes) + 已知 field 1(str)
+	// + field 101(fixed64) + 已知 field 2(varint)。
+	b := PB().Tag(99, WireVarint).UV(4242).
+		Tag(100, WireBytes).UV(3).Bytes([]byte("xxx")).
+		Str(1, "known").
+		Tag(101, WireFixed64).Bytes(make([]byte, 8)).
+		Varint(2, 7).
+		Raw()
+	fs := Fields(b)
+	if Str(fs, 1) != "known" {
+		t.Fatalf("已知 str 字段被未知字段带崩: %q", Str(fs, 1))
+	}
+	if Num(fs, 2) != 7 {
+		t.Fatalf("已知 varint 字段丢失（未知 fixed64 之后的字段读不到）: %+v", fs)
+	}
+	// 未知字段本身应完整保留在结果里（供需要时透传），不是被丢弃。
+	if Find(fs, 99) == nil || Find(fs, 100) == nil || Find(fs, 101) == nil {
+		t.Fatalf("未知字段应解析保留: %+v", fs)
+	}
+}
+
+// 未知 **wire type**（3/4，protobuf 已废弃的 group）：与 fork 同一口径
+// ——丢尾部保已解析（fork fields L945-946 `default: return out`）。
+// 我们逐字移植 fork，上游是 proto3（不使用 group），此处把"与 fork 一致"
+// 钉死：若将来要支持 group 跳过，这条会提醒改了语义。
+func TestPBUnknownWireTypeMatchesFork(t *testing.T) {
+	good := PB().Str(1, "ok").Raw()
+	// 追加一个 wire type 3（group start）的头：解析应在此停住。
+	bad := append(append([]byte{}, good...), 0x0B) // num=1, wire=3
+	fs := Fields(bad)
+	if len(fs) != 1 || Str(fs, 1) != "ok" {
+		t.Fatalf("未知 wire type 应保留已解析字段: %+v", fs)
+	}
+	// group 型 wire 4（end）同理。
+	bad2 := append(append([]byte{}, good...), 0x0C) // num=1, wire=4
+	if len(Fields(bad2)) != 1 {
+		t.Fatal("wire=4 应同样停住")
+	}
+}
+
 // google.protobuf.Value 互转：五种 JSON 形态全覆盖（fork pbValue/pbAny）。
 func TestPBValueRoundtrip(t *testing.T) {
 	cases := []any{
