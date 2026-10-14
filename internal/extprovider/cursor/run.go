@@ -142,7 +142,7 @@ func (c *Client) ChatRun(ctx context.Context, req ChatRequest) (*ChatStream, err
 
 	runCtx, cancel := context.WithCancel(ctx)
 	evs := make(chan Event, 32)
-	sender := newAppendSender(c, runCtx, base, req.Token, id)
+	sender := newAppendSender(c, runCtx, base, req.Token, id, cancel)
 	stream := &ChatStream{Events: evs, cancel: cancel, done: make(chan struct{}), sender: sender}
 
 	go c.pumpRun(runCtx, cancel, base, req, id, parts, evs, sender, stream.done)
@@ -202,7 +202,7 @@ func (c *Client) pumpRun(ctx context.Context, cancel context.CancelFunc, base st
 	defer resp.Body.Close()
 
 	// 首帧前先发出 run_request（fork：send(first) 走 append #0）。
-	if err := sender.send(ctx, parts.First); err != nil {
+	if err := sender.send(parts.First); err != nil {
 		emitEvent(evs, Event{Kind: EventError, Err: err, Status: http.StatusBadGateway, Code: "upstream_error"})
 		return
 	}
@@ -214,7 +214,9 @@ func (c *Client) pumpRun(ctx context.Context, cancel context.CancelFunc, base st
 		return
 	}
 
-	// 心跳：客户端还在（fork L1834，5s 一次 field 7 空消息）。
+	// 心跳：客户端还在（fork L1834，5s 一次 field 7 空消息）。与解码应答
+	// 同走 appendSender 的 wire 串行锁：上一条完成才发下一条（fork L1729
+	// chain 语义），不会乱序上线。
 	hb := time.NewTicker(heartbeatEvery)
 	defer hb.Stop()
 	hbDone := make(chan struct{})
@@ -227,7 +229,7 @@ func (c *Client) pumpRun(ctx context.Context, cancel context.CancelFunc, base st
 			case <-ctx.Done():
 				return
 			case <-hb.C:
-				_ = sender.send(ctx, PB().BytesField(7, nil).Raw())
+				_ = sender.send(PB().BytesField(7, nil).Raw())
 			}
 		}
 	}()
@@ -241,9 +243,17 @@ func (c *Client) pumpRun(ctx context.Context, cancel context.CancelFunc, base st
 		estimate: req.Conv.Estimate,
 	}
 	err = d.readStream(ctx, resp.Body)
+	// append 失败票优先（fork end() 语义：失败即终局 Run）：fail() 已取消
+	// runCtx，readStream 会带 Canceled 返回，这里把真实病因放成事件。
+	if ferr := sender.failure(); ferr != nil && !d.settled {
+		d.settled = true
+		emitEvent(evs, Event{Kind: EventError, Err: ferr, Status: http.StatusBadGateway, Code: "upstream_error"})
+		return
+	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		// 读流失败但已经给过终局事件时不重复报。
 		if !d.settled {
+			d.settled = true
 			emitEvent(evs, Event{Kind: EventError, Err: err, Status: http.StatusBadGateway, Code: "upstream_error"})
 		}
 	}
@@ -265,21 +275,30 @@ func emitEvent(evs chan Event, e Event) {
 // ── 上行：BidiAppend 串行队列（fork L1721-1771 的 chain 语义）─────────
 
 // appendSender 逐条上行；序号从 0 起、严格串行（乱序上游会拒）。
+// 串行化是 fork chain 语义的移植（L1729：上一条**完成**才发下一条）：
+// wire 锁覆盖"领号 + HTTP 全程"，序号即上线顺序；心跳与解码应答同走此队。
+// 失败语义同 fork（L1766-1770）：非取消的 append 失败记票并终局整个 Run，
+// 调用方吞错只是"已记票"的表象——pumpRun 读完后优先放票成 EventError。
 type appendSender struct {
-	c     *Client
-	ctx   context.Context
-	base  string
-	token string
-	reqID string
+	c      *Client
+	ctx    context.Context
+	base   string
+	token  string
+	reqID  string
+	cancel context.CancelFunc
 
 	mu     sync.Mutex
 	seq    int
 	closed bool
 	defs   map[string]string // execID → 工具定义缓存（未使用，留扩展）
+
+	wire  sync.Mutex // 全程串行锁（领号到 HTTP 完成）
+	fOnce sync.Once
+	fErr  error
 }
 
-func newAppendSender(c *Client, ctx context.Context, base, token, reqID string) *appendSender {
-	return &appendSender{c: c, ctx: ctx, base: base, token: token, reqID: reqID, defs: map[string]string{}}
+func newAppendSender(c *Client, ctx context.Context, base, token, reqID string, cancel context.CancelFunc) *appendSender {
+	return &appendSender{c: c, ctx: ctx, base: base, token: token, reqID: reqID, cancel: cancel, defs: map[string]string{}}
 }
 
 func (a *appendSender) close() {
@@ -288,9 +307,19 @@ func (a *appendSender) close() {
 	a.mu.Unlock()
 }
 
+// failure 取 append 失败票（无票 = nil）。
+func (a *appendSender) failure() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.fErr
+}
+
 // send 一条消息（msg 是**裸消息体**，不带 5 字节帧头——fork 在 Duplex 的
 // write 里 subarray(5) 剥掉头再 hex 化，L1727）。
-func (a *appendSender) send(ctx context.Context, msg []byte) error {
+func (a *appendSender) send(msg []byte) error {
+	a.wire.Lock()
+	defer a.wire.Unlock()
+
 	a.mu.Lock()
 	if a.closed {
 		a.mu.Unlock()
@@ -305,12 +334,12 @@ func (a *appendSender) send(ctx context.Context, msg []byte) error {
 
 	// 超时随体积放宽（fork L1755：60s + 每 64KB 加 1s）。
 	wait := appendWaitBase + time.Duration((len(payload)+appendWaitPer-1)/appendWaitPer)*time.Second
-	cctx, cancel := context.WithTimeout(ctx, wait)
+	cctx, cancel := context.WithTimeout(a.ctx, wait)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(cctx, http.MethodPost, a.base+pathBidiAppend, bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return a.fail(fmt.Errorf("BidiAppend: %w", err))
 	}
 	for k, v := range runHeaders(a.token, a.reqID) {
 		req.Header.Set(k, v)
@@ -321,17 +350,28 @@ func (a *appendSender) send(ctx context.Context, msg []byte) error {
 
 	resp, err := a.c.do(req)
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil // 已被取消：静默
+		if a.ctx.Err() != nil {
+			return nil // 已被取消（Close/客户端断连）：静默
 		}
-		return fmt.Errorf("BidiAppend: %w", err)
+		return a.fail(fmt.Errorf("BidiAppend: %w", err))
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("BidiAppend HTTP %d", resp.StatusCode)
+		return a.fail(fmt.Errorf("BidiAppend HTTP %d", resp.StatusCode))
 	}
 	return nil
+}
+
+// fail 记票一次并终局 Run（fork 的 end() 语义：end 帧让读流者收到错误）。
+func (a *appendSender) fail(err error) error {
+	a.fOnce.Do(func() {
+		a.mu.Lock()
+		a.fErr = err
+		a.mu.Unlock()
+		a.cancel()
+	})
+	return err
 }
 
 // ── 下行：帧读取 + 消息解码（fork frames + decode）────────────────────
@@ -505,9 +545,9 @@ func (d *runDecoder) execMessage(data []byte) {
 	execID := Str(es, 15)
 	answer := func(num int, res *Builder) {
 		inner := PB().Varint(1, id).Str(15, execID).BytesField(num, res.Raw())
-		_ = d.sender.send(context.Background(), PB().BytesField(2, inner.Raw()).Raw())
+		_ = d.sender.send(PB().BytesField(2, inner.Raw()).Raw())
 		// answer 自带收尾（fork L2082-2085 的 closeExec）：应答与关闭是两条消息。
-		_ = d.sender.send(context.Background(), PB().BytesField(5, PB().Sub(1, PB().Varint(1, id)).Raw()).Raw())
+		_ = d.sender.send(PB().BytesField(5, PB().Sub(1, PB().Varint(1, id)).Raw()).Raw())
 	}
 
 	for _, e := range es {
@@ -590,7 +630,7 @@ func (d *runDecoder) execMessage(data []byte) {
 	}
 	_ = kind
 	refused := PB().Varint(1, id).Str(2, "not available")
-	_ = d.sender.send(context.Background(), PB().BytesField(5, PB().BytesField(2, refused.Raw()).Raw()).Raw())
+	_ = d.sender.send(PB().BytesField(5, PB().BytesField(2, refused.Raw()).Raw()).Raw())
 }
 
 // kvMessage blob 索要/存储应答（fork L2016-2030）。
@@ -613,10 +653,10 @@ func (d *runDecoder) kvMessage(data []byte) {
 				res = PB().BytesField(2, PB().Str(1, "blob not found").Raw())
 			}
 			inner := PB().Varint(1, id).BytesField(2, res.Raw())
-			_ = d.sender.send(context.Background(), PB().BytesField(3, inner.Raw()).Raw())
+			_ = d.sender.send(PB().BytesField(3, inner.Raw()).Raw())
 		case 3: // 服务端自己的回合记录：回执即可
 			inner := PB().Varint(1, id).BytesField(3, nil)
-			_ = d.sender.send(context.Background(), PB().BytesField(3, inner.Raw()).Raw())
+			_ = d.sender.send(PB().BytesField(3, inner.Raw()).Raw())
 		}
 	}
 }

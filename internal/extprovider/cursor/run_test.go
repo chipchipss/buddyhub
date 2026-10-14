@@ -281,3 +281,129 @@ func TestChatRunCloseIdempotent(t *testing.T) {
 	s.Close()
 	s.Close() // 幂等，panic 即失败
 }
+
+// append 失败终局 Run（fork end() 语义 L1764-1770）：服务端 500 的
+// BidiAppend 必须把真实病因（HTTP 500）作为 EventError 放出来，而不是
+// 吞掉后卡在"流在终局前结束"。
+func TestChatRunAppendFailureEndsRun(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case pathBidiAppend:
+			w.WriteHeader(http.StatusInternalServerError)
+		case pathRunSSE:
+			// 立即给响应头（让建流成功），然后挂着不回 end 帧：
+			// 上行失败后必须由 fail() 取消 runCtx 来终局。
+			w.WriteHeader(http.StatusOK)
+			if fl, ok := w.(http.Flusher); ok {
+				fl.Flush()
+			}
+			<-r.Context().Done()
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := New()
+	c.APIBase = srv.URL
+
+	s, err := c.ChatRun(context.Background(), req("hi"))
+	if err != nil {
+		t.Fatalf("ChatRun: %v", err)
+	}
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case e, ok := <-s.Events:
+			if !ok {
+				t.Fatal("stream closed without an error event")
+			}
+			if e.Kind == EventError {
+				if !strings.Contains(e.Err.Error(), "BidiAppend HTTP 500") {
+					t.Fatalf("error should name the append failure: %v", e.Err)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("append failure did not end the Run within 5s")
+		}
+	}
+}
+
+// 上行严格串行（coder 双验缺口回归钉死）：每条 BidiAppend 都必须是
+// 开始→完成→下一条，序号 0,1,2… 连续无重叠（fork L1729 chain 语义——
+// 上一条完成才发下一条，心跳/应答/首帧同队）。
+func TestAppendsStrictlySerialized(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		inFlight  int
+		overlaped bool
+		seqs      []int
+	)
+	conv := testConv("hi")
+	want := sha256.Sum256(conv.Msgs[0])
+	kvReq := PB().Sub(4, PB().Varint(1, 7).Sub(2, PB().BytesField(1, want[:]))).Raw()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == pathRunSSE {
+			fl, _ := w.(http.Flusher)
+			_, _ = w.Write(frame(kvReq, false))
+			if fl != nil {
+				fl.Flush()
+			}
+			time.Sleep(10 * time.Millisecond)
+			_, _ = w.Write(frame([]byte(`{}`), true))
+			if fl != nil {
+				fl.Flush()
+			}
+			return
+		}
+		// BidiAppend：记录并发窗口与序号
+		mu.Lock()
+		inFlight++
+		if inFlight > 1 {
+			overlaped = true
+		}
+		mu.Unlock()
+		body := make([]byte, 0, 4096)
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Body.Read(buf)
+			body = append(body, buf[:n]...)
+			if err != nil {
+				break
+			}
+		}
+		fs := Fields(body)
+		mu.Lock()
+		seqs = append(seqs, int(Num(fs, 3)))
+		mu.Unlock()
+		time.Sleep(2 * time.Millisecond) // 放大并发窗口：乱序在此现形
+		w.WriteHeader(http.StatusOK)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+	}))
+	defer srv.Close()
+	c := New()
+	c.APIBase = srv.URL
+
+	s, err := c.ChatRun(context.Background(), ChatRequest{Token: "tok", Model: "gpt-5", Conv: conv})
+	if err != nil {
+		t.Fatalf("ChatRun: %v", err)
+	}
+	drain(t, s, 5*time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if overlaped {
+		t.Fatal("BidiAppend overlapped: 上行必须串行（fork chain 语义）")
+	}
+	if len(seqs) == 0 {
+		t.Fatal("no appends seen")
+	}
+	for i, n := range seqs {
+		if n != i {
+			t.Fatalf("seq out of order at %d: got %d", i, n)
+		}
+	}
+}
