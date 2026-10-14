@@ -102,23 +102,23 @@ buddyhub 主体，属既定裁定）。
 | 请求签名 | `x-mini-max-*` 头的 md5 口径，fork `signed()` L318 / `SIGN_SECRET` L22 / `md5` L55。**注意坑**：包注释把"请求签名"列进了"协议要点（对齐 fork）"（`minimax.go` L14），但**包里没有任何签名实现**（全仓 grep 该符号只命中那行注释）——读注释会误以为已就绪。接线时先实现，再把注释改成"未实现/待接"，别让下一位再踩一次。 |
 | chat 端点与流式 | fork `api()` L53 = `<agent>/mavis/api/v1/llm/v1`，Anthropic 兼容形状？需自行核实（fork 的 `NPM = "@ai-sdk/anthropic"` L23 提示走 anthropic 消息协议，与 zai/zcode 桥同一套翻译可复用 `upstream.ZaiTranslateIn/OutJSON`） |
 | 模型清单 | fork `liveModels` L161 / `parseModels` L129 / `MODELS` L69 |
-| 每日签到 | fork 有"每日签到积分"（账号 credits），Go 侧**完全没有** `CheckinDaily`；若要做，还要同步登记 `extstore.checkinCapable` + `CheckinOne` 分支（两处一致性由 `platforms_test.go` 交叉校验，漏一处会红） |
+| 每日签到 | Go 侧无 `CheckinDaily`（该能力只有 lobsterai/codearts/autoclaw/traework/loomy 五家有）。**且 fork 自己也不领**：`packages/minimax/index.mjs` L701 明写 "nothing is claimed (no check-in)"，`usage()` 只**读**积分与套餐（`op_credit_summary`/balance，L385-499）。所以"接 MiniMax 就要补签到"是误判——它是**新增能力**不是补漏；真要做才需同步登记 `extstore.checkinCapable` + `CheckinOne` 分支（`platforms_test.go` 交叉校验，漏一处会红） |
 
-**接线四件套（照 zcode 的成功路径抄形状）**：
-1. `internal/extprovider/minimax/`：补签名 + chat 客户端 + 模型清单（先做签名与 chat）。
-2. `internal/server/minimax_bridge.go`：OpenAI 请求 → MiniMax 端点，流式 + 非流式两条路径
-   都要（`h.clientWantsStream` 分流）；参考 `zcode_bridge.go`（约 257 行）的结构，
-   含"流式已输出绝不换号重放"。
-3. 注册三处：`dispatch.go` 分支、`gateways.go` 的 `gatewayRoutes`、
-   `resolve_model.go` 的 `PlatformOf`（+ 前缀常量 `minimax:`）；
-   面板 `internal/panel/platforms.go` 加条目 —— **一致性测试会交叉校验这四处，
-   漏一处必红**。
-4. 账号侧：`extstore` 加 `PMiniMax` 常量 + `ViewOne` 分支；`/v1/models` 列
-   `minimax:` 名单（双站点 cn/global）。
+**施工顺序（按上面实测现状重排——不是"只差一座桥"）**：
+1. **先挂登录**：`extstore` 加 `PMiniMax` 常量 + 面板 `platforms.go` 条目 +
+   `extlogin.go` 入口 —— 目前这个包全仓无人引用，账号根本进不了池。
+2. **补客户端**：签名（md5）→ chat 端点与流式 → 模型清单。
+3. **再上桥**：`internal/server/minimax_bridge.go`（OpenAI 请求 → MiniMax 端点，
+   流式 + 非流式两路都要，`h.clientWantsStream` 分流；照 `zcode_bridge.go` 约 257 行
+   的结构，含"流式已输出绝不换号重放"）。
+4. **注册与清单**：`dispatch.go` 分支、`gateways.go` 的 `gatewayRoutes`、
+   `resolve_model.go` 的 `PlatformOf`（+ 前缀常量 `minimax:`）、面板注册表条目
+   —— **一致性测试交叉校验这四处，漏一处必红**；`/v1/models` 列 `minimax:` 名单
+   （双站点 cn/global）+ `ViewOne` 分支。
 
-**边界照实声明**：MiniMax 的 tools 是"tools→system 编码"那套（与 zcode-leech 同源，
-fork `_toolcalls.py`）；若请求带 tools 而端点不支持，**如实报错、不静默降级**
-（与 Cursor 桥同口径）。
+**边界照实声明**：MiniMax 的 tools 语义**尚未核实**（fork 侧走 `@ai-sdk/anthropic`
+形态，未见 zcode-leech 那套 tools→system 编码的对应实现，别照抄那句结论）；接线时
+先验端点是否吃 tools，不支持就**如实报错、不静默降级**（与 Cursor 桥同口径）。
 
 ### 2.3 已知边界（README `KNOWN-LIMITATIONS` 各节都有明细，此处只列名）
 - Cursor 保持 **experimental + 假流验证级**：真连验证因用户无账号已搁置。真连时

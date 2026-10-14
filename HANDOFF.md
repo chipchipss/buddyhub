@@ -77,8 +77,9 @@ internal/zai/          Z.AI 专用栈（JWT/验证码/额度）
 
 1. **先挂登录**：extstore 加 `PMiniMax` + 面板注册表条目 + `extlogin` 入口，让账号能入池
 2. **补客户端**：`signed()` 的 md5 签名口径（fork L318/L22/L55）→ chat 端点与流式
-   （fork `api()` L53；NPM 是 `@ai-sdk/anthropic`，可复用 `upstream.ZaiTranslateIn/OutJSON`
-   那套 Anthropic 翻译）→ 模型清单（fork `liveModels` L161/`parseModels` L129）
+   （fork `api()` L53；`NPM = "@ai-sdk/anthropic"` L23 **提示**它可能是 Anthropic 消息
+   协议、可复用 `upstream.ZaiTranslateIn/OutJSON` —— **此为推断，动手前先抓一次真实
+   请求核实**）→ 模型清单（fork `liveModels` L161/`parseModels` L129）
 3. **再上桥**：`internal/server/minimax_bridge.go`（流式/聚合两路，照 `zcode_bridge.go` 骨架，
    守"流式已输出绝不换号重放"）+ dispatch/gatewayRoutes/PlatformOf 注册 `minimax:` 前缀
    （**四处一致性测试交叉校验，漏一处必红**）
