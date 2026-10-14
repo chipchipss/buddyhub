@@ -337,6 +337,11 @@ func TestChatRunAppendFailureEndsRun(t *testing.T) {
 // **真的并发**——心跳周期经 HeartbeatEvery 钩子压到毫秒级，RunSSE 保持
 // 打开直到攒够多条上行（含数个心跳）才发 end 帧。修复前的"锁外 HTTP"
 // 写法在此构造下必然出现 inFlight>1（重叠）或序号乱序。
+//
+// **灵敏度已验证（勿删此段）**：临时把 appendSender.send 的 wire 锁
+// 注释掉重跑，本用例稳定 FAIL（"BidiAppend overlapped"）；恢复后
+// -count=3 全过（2026-10-14，见 00fab99）。即它可证明钉住串行性，
+// 不是"碰巧通过"的摆设——后人改动 send/心跳结构后照此法重验一次。
 func TestAppendsStrictlySerialized(t *testing.T) {
 	var (
 		mu        sync.Mutex
