@@ -957,6 +957,15 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `schedule.zai.quota_refresh_minutes` | `5` | 后台额度刷新间隔（分钟，`0` = 关闭）。⚠️ 上游 WAF 对 billing 族敏感 |
 | `schedule.zai.claim_round_minutes` | `10` | 后台套餐领取轮间隔（分钟，`0` = 关闭） |
 
+### 上下文预算裁剪（zcode-leech 语义）
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `context_budget` | `0`（关） | 全局出站预算（token）：>0 时请求出站前把 messages 裁进预算（只删不改：system/末条 user/近期尾部必留 + 关键词逐字回填，tool 对不拆；预算内逐字透传零回归） |
+| `context_budget_by_provider` | 空 | 按平台覆盖：`{"zcode":120000,"cursor":100000}`（key = 平台 id，与面板平台注册表同口径）。解析优先级 **per-provider 命中 > 全局 > 关**；显式配 `0`/负 = 该平台单独关。Qoder 特例：任何来源的预算都被钳到 ≤900K——Qoder 的 1M/900K 压缩线在客户端协议层（compaction 桥接），网关出站裁剪是物理层，不得比协议线更狠 |
+
+装配期解析（重启生效，同 `context_budget` 既有语义），配置页在线改需重启。
+
 ### 上游超时语义（三段各归其位）
 
 | 字段 | 作用对象 | 默认 | 行为 |
@@ -1150,11 +1159,11 @@ web/
 |---|---|---|
 | **首页** | 首页 | 状态条（账号 x/y、积分、粘性会话、运行时长）+ 池健康瓷贴 + 批量操作 + 平台分布 + 最近动态 |
 | **账号** | 账号 / 调用统计 / 积分构成 | 所有平台账号的**唯一管理地**：账号行（状态、积分、成功失败）+ 详情抽屉（用量曲线 / 任务 / 操作：签到 / 余额 / 解冻 / 禁用 / 移除）+ 多选批量操作；调用统计（时序堆叠图 + 按账号 / 模型 / 域三张表）与积分构成（逐包对比）也在本页 |
-| **网关** | 调用统计 / 模型与档位 / API 密钥 | 模型档位（积分倍率牌价 vs 生效价、可按倍率/上下文/最大输出**排序**、只看免费/打折、点模型名复制完整 ID、实测钳制告警）；API 密钥（多把 Key、全平台/指定平台单选 + 可搜索多选、每把记调用量与最近使用、生成后一次性完整展示） |
+| **网关** | 调用统计 / 模型与档位 / API 密钥 | 模型档位（积分倍率牌价 vs 生效价、可按倍率/上下文/最大输出**排序**、只看免费/打折、点模型名复制完整 ID、实测钳制告警）；API 密钥（多把 Key、全平台/指定平台单选 + 可搜索多选、每把记调用量与最近使用、**按 Key 的 token 用量小时片**（用量页「按 Key」卡片，支持按 Key 名过滤，可答「这把 Key 这一小时用了多少 token」）、生成后一次性完整展示） |
 | **自动化** | 任务 / 执行记录 | 纯任务工作台：**检查并执行**（扫描待办 → 排队执行，账号内串行、账号间并发；外部平台待办同一队列）、排程时间线 + 下次运行时间；执行记录页按**频道 / 级别 / 搜索 / 账号 / 平台**五路筛选，长行折叠、滚动离开时新日志提示「↓ N 条新日志」 |
 | **设置** | 配置 | 在线编辑 config.json：左侧吸附目录 + 搜索配置项（名字 / 用途 / 字段路径），开关和标签同行、每项有小字说明，时长为数字 + 单位下拉，每项可恢复默认，高级项默认折叠，有改动时底部保存栏 + 改动小点 + 重启提示；主题切换也在这里 |
 
-**添加账号**（顶栏按钮）是右侧抽屉，**覆盖全部平台**——五个分段：腾讯 OAuth 设备授权（显示授权链接 + 自动轮询，凭证落盘后**热加载进池，免重启**）· Loomy（客户端自动检测 / 手机号密码 / 短信验证码 / 手动 Token）· Z.AI（OAuth 免密登录 / JWT / API Key）· 外部平台（**小浣熊微信扫码 · Qoder 设备授权 · Copilot 设备码** 三种一键入池，LobsterAI / CodeArts 逐字段填写，有登录方式的平台保留「手动填写凭据」折叠区兜底）· 手动 JSON 批量导入。账号卡上的「任务」同样以抽屉展开：全部任务的进度、奖励与状态，支持「全部接受」与**一键完成**（覆盖 17 个任务，推进进度 + 异步计分等待 + 自动领奖，幂等可重复点）。
+**添加账号**（顶栏按钮）是右侧抽屉，**覆盖全部平台**——五个分段：腾讯 OAuth 设备授权（显示授权链接 + 自动轮询，凭证落盘后**热加载进池，免重启**）· Loomy（客户端自动检测 / 手机号密码 / 短信验证码 / 手动 Token）· Z.AI（OAuth 免密登录 / JWT / API Key）· 外部平台（**小浣熊微信扫码 · Qoder 设备授权 · Copilot 设备码** 三种一键入池，LobsterAI / CodeArts 逐字段填写，有登录方式的平台保留「手动填写凭据」折叠区兜底）· 手动 JSON 批量导入。**Qoder PAT 批量导入**：`POST /panel/api/import/qoder-pat`，body `{"accounts":[{"email":"…","pat":"…"}]}`，返回 `{total, imported, skipped, errors}`（与 cockpit 导入同形状；同账号幂等覆盖，出自 qoder-farm `inject_qoder_pat.py` 同口径）。账号卡上的「任务」同样以抽屉展开：全部任务的进度、奖励与状态，支持「全部接受」与**一键完成**（覆盖 17 个任务，推进进度 + 异步计分等待 + 自动领奖，幂等可重复点）。
 
 **移动端**：窗口窄于 900px 时侧栏换成**底部 tab 栏**（五个一级页），状态栏隐藏、顶部出现大号搜索按钮；窄于 640px 时账号行变**卡片**、操作菜单变**底部弹出层**；`100dvh` 与安全区（`env(safe-area-inset-*)`）避免地址栏 / 刘海裁切；触屏输入框字号 16px 防 iOS 聚焦缩放；悬停效果一律限定在精确指针设备上。
 
@@ -1219,6 +1228,8 @@ web/
 | `qoder:` | Qoder（阿里） | `data/ext-accounts.json`（provider `qoder`） | — |
 | `raccoon:` | 小浣熊（商汤，**OpenAI 兼容直连**） | `data/ext-accounts.json`（provider `raccoon`） | — |
 | `codearts:` | CodeArts（华为云，**模型分 agent / benefit 两条签名通道**） | `data/ext-accounts.json`（provider `codearts`） | [模型与签名口径](#-外部通道排障速查) |
+| `zcode:` | ZCode / z.ai（GLM Coding Plan API key；Start Plan JWT 未开放） | `data/ext-accounts.json`（provider `zcode`） | [Z.AI 账号池](#-zai--zcode-账号池) |
+| `cursor:` | Cursor（**experimental**：假流验证级，从未连真实上游） | `data/ext-accounts.json`（provider `cursor`） | [Cursor 通道 KNOWN-LIMITATIONS](#cursor-通道-known-limitations对话协议第-34-步交付范围) |
 | `ima:` | ima（腾讯知识管家，会话式协议，**凭据自动续期**） | `data/ext-accounts.json`（provider `ima`） | [ima 通道](#-ima-通道腾讯-ima-copilot-知识管家) |
 | `marvis:` | Marvis（马维斯，标准 OpenAI 直通） | `data/ext-accounts.json`（provider `marvis`，凭据从客户端抓包） | — |
 | `codex:` | Codex 订阅池 | 本机 `~/.codex*` 凭据 | — |
@@ -1263,6 +1274,10 @@ python import_codearts.py <accessKeys.csv>   # CodeArts AK/SK 批量导入面板
 - 出站请求强制 `stream:true`；SSE 帧按 OpenAI 规范**白名单重建**（`reasoning_content` 保留、工具调用按 index 合并、未知字段剥离）
 - 保证恰好一个 `data: [DONE]`（上游漏发时兜底补写）；空流先写一帧 `error` 再补 `[DONE]`
 - 非流式请求由本地聚合完整 SSE 流为单 `chat.completion` 响应（含 `reasoning_content` / `tool_calls`）
+
+#### MiniMax 平台登录（客户端已移植，网关未接线）
+
+`internal/extprovider/minimax`（magpie-plugins minimax/index.mjs 移植）：双站点（CN/Global）标准 OAuth device flow + PKCE，user_code 轮询变体、expired_in 毫秒歧义、slow_down 罚时、登出只认 invalid_grant+400——客户端与测试已随 authcore 底座交付。**未接面板登录入口与 dispatch 桥接**：`minimax:` 模型名当前不可路由。接入时按 Qoder/Cursor 的既有四件套填空（extstore provider 枚举 + 平台注册表 + bridge + 面板登录段），参考 authcore 里的状态机原语。
 
 #### Qoder 通道弹性层 KNOWN-LIMITATIONS（阶段 1+2 交付范围外）
 
