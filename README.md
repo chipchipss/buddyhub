@@ -1285,10 +1285,14 @@ python import_codearts.py <accessKeys.csv>   # CodeArts AK/SK 批量导入面板
 对话客户端（`internal/extprovider/cursor/run.go`，fork L1700-1799/L1803-1887/L1891-2122 移植）
 当前是 **HTTP/1.1 降级路径**（RunSSE 下行 + BidiAppend 逐条上行），已按**假流验证级**交付：
 本地 httptest 同时扮演两条通道，端到端钉死正文/用量/空回复/end 帧错误/blob 索要/
-工具调用/Close 幂等七类行为（run_test.go）。以下为范围边界：
+工具调用/Close 幂等七类行为（run_test.go）。桥接（`internal/server/cursor_bridge.go`）
+已接线到 dispatch：`cursor:` 前缀模型走真实对话，不再返回 501 unwired；假上游同样
+说协议帧，验的是「桥接 + 协议层 + chunk 转换」三段串联（cursor_bridge_test.go）。
+以下为范围边界：
 
 | 项 | 状态 | 说明 |
 |---|---|---|
+| 模型目录与 effort/fast 变体选择 | **未接（如实）** | fork 拉 Cursor 模型目录，把 `claude-opus-5-high` 这类请求名解析成变体自己的 legacySlug + parameters + max_mode（L660-826 的 pick/named/request）。buddyhub 只走 fork 的**兜底分支**：目录外的名字原样送（`auto`→`default`），maxMode=false、无参数。因此点名要高推理档、或 id 只存在于某变体时，可能拿到上游 invalid_argument。补法：接模型列表 + 移植 request()/pick() |
 | HTTP/2 bidi（主路径 AgentService/Run） | **未实现（有意）** | fork 首选 H2 bidi、失败降级 H1（L1631-1698 的 open/h2Blocked 与 h1Until 冷却）。buddyhub 直取 H1：Go 标准库写 H2 双向流成本高，且 cursor-agent 在代理环境本就走 H1。若上游未来收紧 H1 支持，按 fork L1649-1662 的判定补 H2 路径 |
 | usage 账本（ledger 回查） | **未实现** | fork 对工具步用 dashboard usage events 回查补数（L1440-1543，Run 关闭后 ~2.5s 事件才出现）。buddyhub 的 runDecoder 只用流内 TurnEndedUpdate + said/estimate 估算兜底；`Hooks` 扩展位（StepUsage/OwedUsage）在移植注释里声明，接入时在事件循环外补 |
 | ServerConfigService 区域路由 | **未实现** | fork 按团队查 agent 网关 host（AGENT 常量只是兜底）；buddyhub 固定 api2。区域限制的团队会拿到 region 错误分类（connectStatus 已透出"重登无用"措辞） |
