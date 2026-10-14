@@ -217,7 +217,11 @@ func (c *Client) pumpRun(ctx context.Context, cancel context.CancelFunc, base st
 	// 心跳：客户端还在（fork L1834，5s 一次 field 7 空消息）。与解码应答
 	// 同走 appendSender 的 wire 串行锁：上一条完成才发下一条（fork L1729
 	// chain 语义），不会乱序上线。
-	hb := time.NewTicker(heartbeatEvery)
+	beat := heartbeatEvery
+	if c.HeartbeatEvery != nil && *c.HeartbeatEvery > 0 {
+		beat = *c.HeartbeatEvery
+	}
+	hb := time.NewTicker(beat)
 	defer hb.Stop()
 	hbDone := make(chan struct{})
 	defer close(hbDone)

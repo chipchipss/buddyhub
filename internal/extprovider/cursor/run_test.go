@@ -332,6 +332,11 @@ func TestChatRunAppendFailureEndsRun(t *testing.T) {
 // 上行严格串行（coder 双验缺口回归钉死）：每条 BidiAppend 都必须是
 // 开始→完成→下一条，序号 0,1,2… 连续无重叠（fork L1729 chain 语义——
 // 上一条完成才发下一条，心跳/应答/首帧同队）。
+//
+// 关键：心跳 goroutine（pumpRun 之外）与解码应答（pumpRun 之内）必须
+// **真的并发**——心跳周期经 HeartbeatEvery 钩子压到毫秒级，RunSSE 保持
+// 打开直到攒够多条上行（含数个心跳）才发 end 帧。修复前的"锁外 HTTP"
+// 写法在此构造下必然出现 inFlight>1（重叠）或序号乱序。
 func TestAppendsStrictlySerialized(t *testing.T) {
 	var (
 		mu        sync.Mutex
@@ -339,18 +344,31 @@ func TestAppendsStrictlySerialized(t *testing.T) {
 		overlaped bool
 		seqs      []int
 	)
+	appendCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(seqs)
+	}
+
 	conv := testConv("hi")
 	want := sha256.Sum256(conv.Msgs[0])
 	kvReq := PB().Sub(4, PB().Varint(1, 7).Sub(2, PB().BytesField(1, want[:]))).Raw()
+	// 再要一次工具清单（36 类应答，同 goroutine 但多一条上行）。
+	stateReq := PB().Sub(2, PB().Varint(1, 12).Sub(36, PB().Sub(1, PB().Str(1, "q")))).Raw()
 
+	const wantAppends = 6 // 首帧 + kv 应答 + 清单应答 + ≥3 个心跳
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == pathRunSSE {
 			fl, _ := w.(http.Flusher)
 			_, _ = w.Write(frame(kvReq, false))
+			_, _ = w.Write(frame(stateReq, false))
 			if fl != nil {
 				fl.Flush()
 			}
-			time.Sleep(10 * time.Millisecond)
+			// 攒够上行（心跳持续在发）再收流。
+			for i := 0; i < 200 && appendCount() < wantAppends; i++ {
+				time.Sleep(5 * time.Millisecond)
+			}
 			_, _ = w.Write(frame([]byte(`{}`), true))
 			if fl != nil {
 				fl.Flush()
@@ -386,20 +404,22 @@ func TestAppendsStrictlySerialized(t *testing.T) {
 	defer srv.Close()
 	c := New()
 	c.APIBase = srv.URL
+	beat := 2 * time.Millisecond // 跨 goroutine 并发源（心跳）压到毫秒级
+	c.HeartbeatEvery = &beat
 
 	s, err := c.ChatRun(context.Background(), ChatRequest{Token: "tok", Model: "gpt-5", Conv: conv})
 	if err != nil {
 		t.Fatalf("ChatRun: %v", err)
 	}
-	drain(t, s, 5*time.Second)
+	drain(t, s, 10*time.Second)
 
 	mu.Lock()
 	defer mu.Unlock()
+	if len(seqs) < wantAppends {
+		t.Fatalf("only %d appends — 心跳没参与，用例没压到跨 goroutine 并发", len(seqs))
+	}
 	if overlaped {
 		t.Fatal("BidiAppend overlapped: 上行必须串行（fork chain 语义）")
-	}
-	if len(seqs) == 0 {
-		t.Fatal("no appends seen")
 	}
 	for i, n := range seqs {
 		if n != i {

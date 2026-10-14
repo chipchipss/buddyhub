@@ -73,6 +73,11 @@ type Client struct {
 	// Sleep 轮询退避等待（测试注入零时跳过；nil = time.After）。
 	// 150 轮 × 封顶 10s 的实测等待会让"超时用例"跑 25 分钟——注入后毫秒级。
 	Sleep func(ctx context.Context, d time.Duration) bool
+
+	// HeartbeatEvery Run 心跳周期（nil = 5s，fork L1834）。测试注入毫秒级
+	// 把心跳与解码应答的跨 goroutine 并发压到真实交错上（wire 锁串行性
+	// 回归用例依赖它）。
+	HeartbeatEvery *time.Duration
 }
 
 // New 建（默认 http.DefaultClient.Do）。
