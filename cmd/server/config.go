@@ -264,6 +264,15 @@ type Config struct {
 	// 只删不改：预算内逐字透传，绝不改写/摘要/重排任何消息。
 	ContextBudget int `json:"context_budget"`
 
+	// ContextBudgetByProvider 按 provider 的预算覆盖（per-provider 配置化）。
+	// key = 平台 id（qoder / workbuddy / zcode / cursor ...，与面板平台注册表
+	// 同口径），value 同 ContextBudget 语义。解析优先级：
+	//   per-provider 命中 > 全局 ContextBudget > 关闭。
+	// nil/空 map = 行为与引入前逐字一致（零回归）。
+	// Qoder 特例：配 qoder 时钳到 ≤900K——Qoder 的 1M/900K 压缩线是客户端
+	// 协议层（compaction 桥接）的事，网关出站裁剪不该比它更狠。
+	ContextBudgetByProvider map[string]int `json:"context_budget_by_provider"`
+
 	Upstash struct {
 		URL   string `json:"url"`   // 空 = 纯内存模式；支持完整 rediss:// URL 或 https://xxx.upstash.io host
 		Token string `json:"token"` // url 非完整连接串时用于组装 rediss://default:<token>@<host>:6379

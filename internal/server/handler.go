@@ -37,6 +37,34 @@ import (
 	"github.com/chipchipss/buddyhub/internal/zai"
 )
 
+// resolveContextBudget 解析本次请求的生效上下文预算（token；<=0 = 关闭）。
+//
+// 优先级（config context_budget_by_provider 配置化）：
+//  1. per-provider 命中（PlatformOf(bareModel) 按平台注册表识别，含各桥前缀）;
+//  2. 全局 ContextBudget；
+//  3. 0 = 关闭（逐字透传）。
+//
+// Qoder 特例（Chief 派工口径：别和 900K 压缩线打架）：配 qoder 时钳到
+// ≤900K。Qoder 的 1M/900K 压缩线在客户端协议层（compaction 桥接，客户端
+// 发起），网关出站裁剪是物理层——误配把 Qoder 裁得比压缩线还低会让客户端
+// 的 compact 永远等不到触发，所以物理预算不得超过协议线。
+func (h *Handler) resolveContextBudget(model string) int {
+	budget := h.cfg.ContextBudget
+	if len(h.cfg.ContextBudgetByProvider) > 0 {
+		if v, ok := h.cfg.ContextBudgetByProvider[PlatformOf(model)]; ok {
+			budget = v
+		}
+	}
+	if PlatformOf(model) == "qoder" && budget > qoderCompactTokenLimit {
+		budget = qoderCompactTokenLimit
+	}
+	return budget
+}
+
+// qoderCompactTokenLimit Qoder 自动压缩线（900K，fork codexCompat.js）——
+// 网关出站裁剪对 Qoder 的硬顶，理由见 resolveContextBudget 注释。
+const qoderCompactTokenLimit = 900_000
+
 // Config handler 依赖。
 type Config struct {
 	Pool      *pool.Pool
@@ -84,6 +112,11 @@ type Config struct {
 	// 近期尾部必留 + 关键词逐字检索回填，tool_calls 与 tool 响应不拆散）。
 	// 裁剪发生在 prompt 改写之前（那会动 system 块，先裁再改语义更干净）。
 	ContextBudget int
+
+	// ContextBudgetByProvider 按 provider 的预算覆盖（config
+	// context_budget_by_provider）。nil = 无覆盖，行为与引入前一致。
+	// 生效口径：resolveContextBudget——per-provider 命中 > 全局 > 关闭。
+	ContextBudgetByProvider map[string]int
 
 	// GlobalEnabled global realm 路由开关（config global.enabled，缺省 true）。
 	// handler 侧第三道闸（与 main 注入 auth 开关、upstream.GlobalEnabled 呼应）：
@@ -1101,10 +1134,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 放在 prompt 改写**之前**：那会增删 system 块，先裁再改语义更干净
 	// （预算估的是客户端原生物学费，不含网关自有提示词）。
 	// budget<=0 = 关闭：PruneBody 原样返回，逐字透传零回归。
-	if h.cfg.ContextBudget > 0 {
-		if pruned, m := contextbudget.PruneBody(body, h.cfg.ContextBudget); m.Windowed {
-			log.Printf("ctx-budget: model=%s 裁剪 %d→%d token（保留 %d 条，检索回填 %d，预算 %d）",
-				peek.Model, m.OriginalTokens, m.WindowedTokens, m.Kept, m.Retrieved, m.Budget)
+	// per-provider 覆盖优先于全局值（config context_budget_by_provider）。
+	if budget := h.resolveContextBudget(peek.Model); budget > 0 {
+		if pruned, m := contextbudget.PruneBody(body, budget); m.Windowed {
+			log.Printf("ctx-budget: model=%s budget=%d 裁剪 %d→%d token（保留 %d 条，检索回填 %d）",
+				peek.Model, budget, m.OriginalTokens, m.WindowedTokens, m.Kept, m.Retrieved)
 			body = pruned
 		}
 	}

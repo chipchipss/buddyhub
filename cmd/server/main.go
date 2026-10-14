@@ -477,6 +477,8 @@ func main() {
 		PromptText: cfg.PromptText,
 		// provider 级上下文预算（config.context_budget；<=0 关，默认关）。
 		ContextBudget: cfg.ContextBudget,
+		// per-provider 覆盖（config.context_budget_by_provider；nil = 无覆盖）。
+		ContextBudgetByProvider: cfg.ContextBudgetByProvider,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
 		// 阶段 5：钉钉告警配置（config.dingtalk 缺省 enabled=false 全关）。
