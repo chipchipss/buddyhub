@@ -79,7 +79,11 @@ func (h *Handler) CursorChatStream(w http.ResponseWriter, r *http.Request, body 
 		return false
 	}
 
-	// 对话构造（纯函数，一次即可，不随换号重做）。
+	// 对话构造（纯函数，一次即可，不随换号重做）。第三返回值是解析后的
+	// 原始请求 map（供需要 temperature/top_p 这类附加字段的调用方取用）：
+	// **桥故意丢弃它**——Cursor 的 AgentRunRequest 没有采样参数位
+	// （fork buildRun 也不送），取回来无处安放，与其接成"看似生效实为
+	// 丢弃"的假旋钮，不如如实声明不支持（见 README Cursor KNOWN-LIMITATIONS）。
 	conv, tools, _, err := cursor.BuildConversation(body)
 	if err != nil || conv == nil || len(conv.Msgs) == 0 {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "Cursor：请求体里没有可用的对话消息")
@@ -239,18 +243,15 @@ func (h *Handler) cursorPump(r *http.Request, w http.ResponseWriter, stream *cur
 		switch ev.Kind {
 		case cursor.EventReasoning:
 			if ev.Reasoning != "" {
-				st.wroteAny = true
 				// 与 qoder/zai 泵同款口径：思考走非标准 reasoning_content，
 				// 不混进正文（Codex/Claude 客户端都读这个字段）。
 				st.delta(map[string]any{"reasoning_content": ev.Reasoning}, nil)
 			}
 		case cursor.EventText:
 			if ev.Text != "" {
-				st.wroteAny = true
 				st.delta(map[string]any{"content": ev.Text}, nil)
 			}
 		case cursor.EventTool:
-			st.wroteAny = true
 			st.delta(map[string]any{
 				"tool_calls": []any{map[string]any{
 					"index": ev.Tool.Index,
@@ -308,12 +309,11 @@ func (h *Handler) cursorPump(r *http.Request, w http.ResponseWriter, stream *cur
 
 // cursorChunker OpenAI chunk 写入器。
 type cursorChunker struct {
-	w        io.Writer
-	flusher  http.Flusher
-	id       string
-	created  int64
-	model    string
-	wroteAny bool
+	w       io.Writer
+	flusher http.Flusher
+	id      string
+	created int64
+	model   string
 }
 
 func (s *cursorChunker) delta(delta map[string]any, finish *string) {

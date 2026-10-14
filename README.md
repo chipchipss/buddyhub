@@ -1300,6 +1300,8 @@ python import_codearts.py <accessKeys.csv>   # CodeArts AK/SK 批量导入面板
 | HTTP/2 bidi（主路径 AgentService/Run） | **未实现（有意）** | fork 首选 H2 bidi、失败降级 H1（L1631-1698 的 open/h2Blocked 与 h1Until 冷却）。buddyhub 直取 H1：Go 标准库写 H2 双向流成本高，且 cursor-agent 在代理环境本就走 H1。若上游未来收紧 H1 支持，按 fork L1649-1662 的判定补 H2 路径 |
 | usage 账本（ledger 回查） | **未实现** | fork 对工具步用 dashboard usage events 回查补数（L1440-1543，Run 关闭后 ~2.5s 事件才出现）。buddyhub 的 runDecoder 只用流内 TurnEndedUpdate + said/estimate 估算兜底；`Hooks` 扩展位（StepUsage/OwedUsage）在移植注释里声明，接入时在事件循环外补 |
 | ServerConfigService 区域路由 | **未实现** | fork 按团队查 agent 网关 host（AGENT 常量只是兜底）；buddyhub 固定 api2。区域限制的团队会拿到 region 错误分类（connectStatus 已透出"重登无用"措辞） |
+| 采样参数（temperature / top_p 等） | **不支持（有意）** | Cursor 的 AgentRunRequest 没有采样参数位（fork buildRun 也不送）。桥故意丢弃 BuildConversation 的第三返回值（原始请求 map）——与其接成"看起来生效、实际被上游忽略"的假旋钮，不如如实声明：客户端传的 temperature 对 Cursor 通道无效 |
+| 上游 401 不标记账号 lapsed | **对齐 fork（勿改）** | fork index.mjs L2126-2128 明写："The built-in marked no Cursor account lapsed, **not for a 401** nor for any 'expired'（token/session/trial 都不标）"。buddyhub 只在本地 ExpireAtMS 到期时标 lapsed，上游 401 走错误分类提示重登但**不改账号状态**——这是 fork 语义，不是遗漏（双验有建议补 MarkSignInExpired，按此条裁定驳回） |
 | x-cursor-client-version 探测 | **固定值** | fork 探测本机 cursor-agent 版本（L88-108），探不到才用 VERSION_FALLBACK；buddyhub 不探测，恒发 `2026.09.23-86fc751`。上游若把版本与工具行为绑定并收紧校验，需改为可配置 |
 
 **真连最小验证步骤**（补验的人照做即可，不需要代码改动）：
