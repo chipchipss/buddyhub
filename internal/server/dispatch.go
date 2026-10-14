@@ -221,8 +221,9 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		return bridgeOutcome{matched: true, code: "no_zcode_account", detail: detail, lastErr: h.lastZcodeErr}
 	}
 
-	// Cursor 通道（cursor: 前缀模型）：Connect bidi-stream 协议本批未接线，
-	// 桥接做账号解析 + unary 连通性探测 + 如实报未接线（见 cursor_bridge.go）。
+	// Cursor 通道（cursor: 前缀模型）：对话已接线（RunSSE/BidiAppend +
+	// OpenAI chunk 转换，见 cursor_bridge.go）。**experimental**：假流端到端
+	// 验证过但未连过真实上游，真连步骤见 README 的 Cursor KNOWN-LIMITATIONS。
 	if isCursorModel(bareModel) {
 		bodyCU := body
 		m := strings.TrimPrefix(bareModel, cursorModelPrefix)

@@ -1280,7 +1280,11 @@ python import_codearts.py <accessKeys.csv>   # CodeArts AK/SK 批量导入面板
 | ZCode 额度耗尽无 60s blocked 冷却 | **备查（风险已被 PRE 门覆盖）** | fork 的 gift 路径对耗尽账号有 60s 冷却（index.mjs L1566-68）防重复敲；buddyhub 的耗尽事件走账本入账，PRE 门随即把账号踢出轮转，实际不重复敲。若后续观察到 failover 重入路径反复打上游再补 |
 | ZCode Start Plan JWT 路径 | **未实现（有意）** | fork 的 JWT 走 START_BASE + startHeaders（整套客户端标识头）+ dress() body 改写（index.mjs L1533-44/L1371-1420），本阶段只接 coding key；面板入库侧已硬拒 JWT-only 凭据（比运行时静默降级诚实）。Start Plan 账号后续按需补 |
 
-#### Cursor 通道 KNOWN-LIMITATIONS（对话协议第 3 步交付范围）
+#### Cursor 通道 KNOWN-LIMITATIONS（对话协议第 3~4 步交付范围）
+
+**状态：experimental**。对话链路已端到端接线（协议层 + 桥接 + chunk 转换 + usage
+记账），假上游测试 15 例全绿，但**从未连过真实 Cursor 上游**——真连最小验证
+步骤见本节末尾，通过前请按实验特性对待。
 
 对话客户端（`internal/extprovider/cursor/run.go`，fork L1700-1799/L1803-1887/L1891-2122 移植）
 当前是 **HTTP/1.1 降级路径**（RunSSE 下行 + BidiAppend 逐条上行），已按**假流验证级**交付：

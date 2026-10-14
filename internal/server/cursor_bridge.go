@@ -34,6 +34,7 @@ import (
 
 	"github.com/chipchipss/buddyhub/internal/extprovider/cursor"
 	"github.com/chipchipss/buddyhub/internal/extstore"
+	"github.com/chipchipss/buddyhub/internal/usage"
 )
 
 // cursorModelPrefix Cursor 路由前缀。
@@ -150,7 +151,7 @@ func (h *Handler) CursorChatStream(w http.ResponseWriter, r *http.Request, body 
 			}
 		}
 		h.noteChat(a.Provider, a.ID, nil)
-		h.cursorPump(w, stream, first, model, a, wantStream)
+		h.cursorPump(r, w, stream, first, model, a, wantStream)
 		return true
 	}
 	h.lastCursorErr = lastErr
@@ -199,7 +200,7 @@ func firstErrText(ev cursor.Event) string {
 
 // cursorPump 协议事件 → OpenAI chat.completion.chunk（流式）或聚合 JSON
 // （非流式客户端）。first 是已读出但没发出去的首帧，从这里接着发。
-func (h *Handler) cursorPump(w http.ResponseWriter, stream *cursor.ChatStream, first cursor.Event,
+func (h *Handler) cursorPump(r *http.Request, w http.ResponseWriter, stream *cursor.ChatStream, first cursor.Event,
 	model string, a *extstore.ExtAccount, wantStream bool) {
 	defer stream.Close()
 
@@ -209,6 +210,7 @@ func (h *Handler) cursorPump(w http.ResponseWriter, stream *cursor.ChatStream, f
 		if e, isErr := agg["error"]; isErr && e != nil {
 			h.noteChat(a.Provider, a.ID, errOf(fmt.Sprint(e)))
 		}
+		h.cursorRecordUsage(r, a, model, aggUsage(agg))
 		raw, _ := json.Marshal(agg)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -278,6 +280,7 @@ func (h *Handler) cursorPump(w http.ResponseWriter, stream *cursor.ChatStream, f
 			if finish == "" {
 				finish = "stop"
 			}
+			h.cursorRecordUsage(r, a, model, ev.Usage)
 			if ev.Usage != nil {
 				st.finishWithUsage(finish, ev.Usage)
 			} else {
@@ -438,6 +441,60 @@ func cursorAggregate(events <-chan cursor.Event, first cursor.Event, model strin
 		out["usage"] = usage
 	}
 	return out
+}
+
+// cursorRecordUsage 终局记账（与 qoderRecordUsage 同模板、同口径差异声明）：
+//  1. per-Key 小时桶先记（keyID 取调用方 API Key 摘要，空则不记；ext 通道
+//     的失败尝试走 noteChat 账号级退避，不进 per-key 错误列）；
+//  2. 账号维度桶后记（realm=ext，uid=provider/id，与腾讯池同源）。
+//
+// fire-and-forget：记账失败不影响已完成的响应。usage=nil（无终局用量）时
+// per-Key 仍记一次调用、账号桶不记 token——与 qoder 桥同款语义。
+func (h *Handler) cursorRecordUsage(r *http.Request, a *extstore.ExtAccount, model string, u *cursor.Usage) {
+	if h.cfg.Usage == nil {
+		return
+	}
+	keyID := h.callerKeyID(r)
+	var d usage.Delta
+	if u != nil {
+		d = usage.Delta{
+			PromptTokens:     u.PromptTokens,
+			HasPromptTokens:  u.PromptTokens > 0,
+			CompletionTokens: u.CompletionTokens,
+			HasCompletion:    u.CompletionTokens > 0,
+			TotalTokens:      u.TotalTokens,
+			HasTotal:         u.TotalTokens > 0,
+		}
+	}
+	if keyID != "" {
+		h.cfg.Usage.AddKeyUsage(keyID, d, true, time.Now())
+	}
+	if u == nil {
+		return
+	}
+	h.cfg.Usage.Add(time.Now(), "ext", string(a.Provider)+"/"+a.ID, model, d, true)
+}
+
+// aggUsage 从聚合响应里取 usage 段（cursorAggregate 无终局用量时不带）。
+func aggUsage(agg map[string]any) *cursor.Usage {
+	raw, ok := agg["usage"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	num := func(k string) int64 {
+		switch v := raw[k].(type) {
+		case int64: // cursorAggregate 直接构造的 map（未经 JSON 往返）
+			return v
+		case float64: // 防御：若调用方给的是解码后的 map
+			return int64(v)
+		}
+		return 0
+	}
+	return &cursor.Usage{
+		PromptTokens:     num("prompt_tokens"),
+		CompletionTokens: num("completion_tokens"),
+		TotalTokens:      num("total_tokens"),
+	}
 }
 
 // cursorProbeResult unary 探测结果。

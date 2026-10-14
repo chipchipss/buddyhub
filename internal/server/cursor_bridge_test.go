@@ -17,6 +17,7 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extstore"
 	"github.com/chipchipss/buddyhub/internal/pool"
 	"github.com/chipchipss/buddyhub/internal/upstream"
+	"github.com/chipchipss/buddyhub/internal/usage"
 )
 
 // ── 假上游 ────────────────────────────────────────────────────────────
@@ -443,5 +444,83 @@ func TestCursorBridgeNoAccountShape(t *testing.T) {
 	}
 	if w.Code == 200 {
 		t.Fatalf("无账号不该成功: %s", w.Body.String())
+	}
+}
+
+// ── usage 记账（Chief 五条之"接 usage.Recorder"，qoderRecordUsage 同模板）──
+
+// cursorUsageMsg 一条回合结束帧（fork usageOf 字段：1=input 总数、
+// 2=output、3=cacheRead、4=cacheWrite）：input 净量 = 100-20-5 = 75。
+func cursorUsageMsg() []byte {
+	turn := cursor.PB().Sub(14, cursor.PB().Varint(1, 100).Varint(2, 30).Varint(3, 20).Varint(4, 5))
+	return cursor.PB().Sub(1, turn).Raw()
+}
+
+// 流式：终局 usage 事件要进 usage.Recorder 账号桶（per-Key 断言见下面的
+// 直接调用用例——集成路径没配入口 Key，keyID 为空不记 per-Key，这是
+// 与 qoder 桥一致的既定口径，不是缺陷）。
+func TestCursorBridgeStreamRecordsUsage(t *testing.T) {
+	up := &fakeCursorUpstream{runBodies: [][]byte{
+		cursorFrames(cursorTextMsg("你好"), cursorUsageMsg()),
+	}}
+	h := newCursorBridgeHarness(t, up, cursor.Credential{AccessToken: "tok-ok"})
+	rec := usage.New("")
+	h.cfg.Usage = rec
+	w := postCursor(h, `{"model":"cursor:gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != 200 {
+		t.Fatalf("code = %d body = %s", w.Code, w.Body.String())
+	}
+	snap := rec.Snapshot(1, nil)
+	if snap.Totals.Requests == 0 {
+		t.Fatalf("账号桶没记: %+v", snap.Totals)
+	}
+	if snap.Totals.TotalTokens != 130 || snap.Totals.PromptTokens != 100 || snap.Totals.CompletionTok != 30 {
+		t.Fatalf("token 口径 = %+v want prompt=100 completion=30 total=130", snap.Totals)
+	}
+}
+
+// per-Key 小时桶：直接调用记账函数（qoder_bridge_stage3 同款手法），
+// 钉死 keyID 非空时 AddKeyUsage + KeySeries 都有数。
+func TestCursorRecordUsagePerKey(t *testing.T) {
+	rec := usage.New("")
+	h := NewHandler(Config{Usage: rec, APIKey: "sk-gw-test"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}"))
+	a := &extstore.ExtAccount{Provider: extstore.PCursor, ID: "cu0"}
+	h.cursorRecordUsage(req, a, "gpt-5", &cursor.Usage{PromptTokens: 100, CompletionTokens: 30, TotalTokens: 130})
+
+	snap := rec.Snapshot(0, nil)
+	if len(snap.ByKey) == 0 || snap.ByKey[0].TotalTokens != 130 {
+		t.Fatalf("per-Key 桶没记: %+v", snap.ByKey)
+	}
+	// 期望 keyID = 主 Key 的摘要（callerKeyID 的兜底路径）。
+	kid := h.callerKeyID(req)
+	if kid == "" {
+		t.Fatal("callerKeyID 应兜底到主 Key")
+	}
+	if pts := rec.KeySeries(kid, 24); len(pts) != 1 || pts[0].TotalTokens != 130 {
+		t.Fatalf("KeySeries = %+v", pts)
+	}
+	// 零用量：per-Key 记一次调用，账号桶不写（qoder 同口径）。
+	h.cursorRecordUsage(req, a, "gpt-5", nil)
+	if got := rec.Snapshot(0, nil).ByKey[0].Calls; got != 2 {
+		t.Fatalf("零用量仍要计一次调用: calls = %d", got)
+	}
+}
+
+// 非流式：聚合响应同样要落账（aggUsage 双形态取值路径）。
+func TestCursorBridgeNonStreamRecordsUsage(t *testing.T) {
+	up := &fakeCursorUpstream{runBodies: [][]byte{
+		cursorFrames(cursorTextMsg("AB"), cursorUsageMsg()),
+	}}
+	h := newCursorBridgeHarness(t, up, cursor.Credential{AccessToken: "tok-ok"})
+	rec := usage.New("")
+	h.cfg.Usage = rec
+	w := postCursor(h, `{"model":"cursor:gpt-5","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != 200 {
+		t.Fatalf("code = %d body = %s", w.Code, w.Body.String())
+	}
+	snap := rec.Snapshot(1, nil)
+	if snap.Totals.TotalTokens != 130 {
+		t.Fatalf("非流式没记账: %+v", snap.Totals)
 	}
 }

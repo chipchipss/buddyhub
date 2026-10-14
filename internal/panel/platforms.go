@@ -118,7 +118,10 @@ var platforms = []Platform{
 		Note: "API key 永久 / Start Plan JWT 耗尽即弃"},
 	{ID: "cursor", Name: "Cursor", Group: GroupGateway, Vendor: "Cursor", Prefix: "cursor:", Login: LoginManual,
 		Renew: RenewManual,
-		Note:  "粘贴 access_token / API key；到期需重登（对话协议待接线）"},
+		// 对话已接线（cursor_bridge.go，假流端到端验证过）；但**从未连过真实
+		// 上游**，真连补验前按 experimental 对待（步骤见 README 的 Cursor
+		// KNOWN-LIMITATIONS）。前端动态读 note 字段，故标记走文案不加新字段。
+		Note: "experimental（已接线，待真连验证）；粘贴 access_token / API key，到期需重登"},
 
 	// ── 积分 / 签到平台（无对话 API）──
 	{ID: "loomy-cli", Name: "Loomy（讯飞，密钥/短信）", Group: GroupPoints, Vendor: "讯飞", Login: LoginManual,
