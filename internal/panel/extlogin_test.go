@@ -782,3 +782,25 @@ func TestExtLoginSessionWindowDefaultsToTTL(t *testing.T) {
 		t.Errorf("应使用上游窗口，得到 %v", s.window())
 	}
 }
+
+/* ── Loomy 密码登录：短手机号回归 ─────────────────────────────── */
+
+// 手机号只校验了非空没校验长度，登录失败路径的日志曾直接切 body.Phone[:3]，
+// 把"phone 传 2 个字符"变成 handler panic → 连接被重置（不是 500），前端只见
+// network error。脱敏交给 upstream.MaskPhone（自带长度守卫），短号原样输出。
+func TestLoomyLoginPasswordShortPhoneDoesNotPanic(t *testing.T) {
+	p := loginTestPanel(t)
+	req := httptest.NewRequest(http.MethodPost, "/panel/api/ext/loomy/login_password",
+		strings.NewReader(`{"phone":"ab","password":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	p.ServeHTTP(rec, req) // 修复前：panic → 测试进程崩
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("短手机号登录失败应回 401，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "ab") {
+		t.Logf("上游错误信息原样透出: %s", rec.Body.String())
+	}
+}

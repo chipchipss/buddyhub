@@ -315,7 +315,7 @@ func (p *Panel) extLoginLoomyPassword(w http.ResponseWriter, r *http.Request) {
 	cli := loomy.NewClient()
 	res, err := cli.LoginByPassword(body.Phone, body.Password, nil)
 	if err != nil {
-		log.Printf("panel: Loomy 密码登录失败 %s***: %v", body.Phone[:3], err)
+		log.Printf("panel: Loomy 密码登录失败 %s: %v", upstream.MaskPhone(body.Phone), err)
 		writeErr(w, http.StatusUnauthorized, err.Error())
 		return
 	}
