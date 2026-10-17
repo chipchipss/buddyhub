@@ -279,8 +279,26 @@ func BuildChatRequest(cred *Credential, model string, payload []byte, stream boo
 	return endpoint, signed, body, nil
 }
 
+// chatHTTP 对话用的客户端。
+//
+// Client 字段是导出的，宿主可以手填 `&codearts.Client{HTTP: …}`；ChatHTTP
+// 为零值时回落到包级对话客户端（而不是用短请求的 httpClient，也不是 panic）。
+//
+// **刻意不回落 httpClient**：那是 Timeout: 30s 的短请求客户端，对话走它
+// P1-5 就原样复发，而且调用方完全看不出区别——只会表现为长流偶发断在
+// 30s。回落包级 chatHTTP 至少保住「对话永不被总时长腰斩」这条契约。
+func (c *Client) chatHTTP() *http.Client {
+	if c != nil && c.ChatHTTP != nil {
+		return c.ChatHTTP
+	}
+	return chatHTTP
+}
+
 // Chat 发一次对话，返回上游原始响应（SSE 或 JSON，由 body 的 stream 决定）。
 // 返回的 resp 由调用方 Close。
+//
+// 走 ChatHTTP（Timeout: 0），**不是** HTTP：HTTP 的 30s 是含读 body 的总时
+// 长上限，会把长回答整条流在第 30 秒切断（见 chatHTTP 注释）。
 func (c *Client) Chat(ctx context.Context, cred *Credential, model string, payload []byte, stream bool, opts ChatOptions) (*http.Response, error) {
 	endpoint, headers, body, err := BuildChatRequest(cred, model, payload, stream, opts)
 	if err != nil {
@@ -293,7 +311,7 @@ func (c *Client) Chat(ctx context.Context, cred *Credential, model string, paylo
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.chatHTTP().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("对话请求失败：%w", err)
 	}

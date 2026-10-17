@@ -41,6 +41,9 @@ const (
 	opsChannel      = "IDE"
 	dailyLoginType  = "USER_LOGIN"
 	requestTimeout  = 30 * time.Second
+	// chatRequestTimeout 对话的**首字节**上限（不是总时长）：对齐仓库内其它
+	// extprovider 的 120s。流已开始后不受它约束，腰斩与否交给调用方 ctx。
+	chatRequestTimeout = 120 * time.Second
 )
 
 // claimedStatuses 活动 status 中表示已领取/已确认/已核销的取值
@@ -59,25 +62,123 @@ type Credential struct {
 
 // Client CodeArts 积分客户端。
 type Client struct {
-	HTTP *http.Client
+	HTTP     *http.Client // 短请求（签到/余额/领取确认）：总时长 30s
+	ChatHTTP *http.Client // 对话：无总时长，首字节由 ResponseHeaderTimeout 管
 }
 
-// httpClient 包级客户端（默认值；SetHTTPClient 可整体替换）。
+// httpClient 短请求包级客户端（默认值；SetHTTPClient 可整体替换）。
 //
 // 新建一个 Client 就换一次 http.Client 会让**连接池失效**（每条请求都重建
 // TCP/TLS），且测试没有注入点——与 raccoon/qoder/trae 同一套做法。
 var httpClient = &http.Client{Timeout: requestTimeout}
 
-// New 创建客户端（共享包级 HTTP 客户端与连接池）。
-func New() *Client {
-	return &Client{HTTP: httpClient}
+// chatHTTP 对话包级客户端。
+//
+// **必须 Timeout: 0**：http.Client.Timeout 是整个请求生命周期的上限，包含读
+// 响应体。对话返回的是 SSE 流（codearts_bridge 直接透传/聚合），CodeArts 上
+// 的长回答——慢模型、长上下文、思维链——会在 30s 处被 transport 硬切，长流
+// 全部腰斩。首字节延迟由 Transport.ResponseHeaderTimeout 单独管（值对齐仓库
+// 其它 extprovider 的 120s），流中空闲则由调用方的 ctx 兜底。
+//
+// 与自签短请求共用同一个连接池目标（同域 SnapEngineURL），但刻意保留两个
+// 独立客户端：短请求该被 30s 硬切，对话不该——一套超时策略满足不了两种请求。
+var chatHTTP = defaultChatClient()
+
+// defaultChatClient 构造对话用的默认客户端（出厂配置）。
+//
+// 拆成函数而不是内联在 var 里：测试要断言出厂值（Timeout:0 + 首字节上限），
+// 而包级 chatHTTP 会被 SetHTTPClient 注入顶掉——直接断言全局变量等于让测试
+// 结果取决于别的用例先跑过什么。
+func defaultChatClient() *http.Client {
+	return &http.Client{Timeout: 0, Transport: defaultChatTransport()}
 }
 
-// SetHTTPClient 替换包级 HTTP 客户端（测试注入 mock 上游；nil 忽略）。
-func SetHTTPClient(c *http.Client) {
-	if c != nil {
-		httpClient = c
+// defaultChatTransport 对话用的默认 transport：唯一一份连接池/超时配置。
+// SetChatHTTPClient 在注入缺首字节上限的 transport 时，构造的是同一个函数，
+// 保证「对话永不被总时长腰斩」与「首字节有界」这两条契约只有一处定义。
+func defaultChatTransport() *http.Transport {
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		MaxIdleConns:          32,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: chatRequestTimeout,
 	}
+}
+
+// New 创建客户端（共享包级 HTTP 客户端与连接池）。
+func New() *Client {
+	return &Client{HTTP: httpClient, ChatHTTP: chatHTTP}
+}
+
+// SetHTTPClient 替换短请求的包级 HTTP 客户端（测试注入 mock 上游；nil 忽略）。
+//
+// 对**对话**同样生效（测试只有一处注入点，不该为长流再开一个）：
+// SetHTTPClient(x) 把 x 的 Transport 搬到 ChatHTTP，测试注入的 mock transport
+// 因此覆盖签到与对话两条链路——否则注入只覆盖签到，对话仍打真网。
+//
+// 刻意**不搬** x.Timeout：对话客户端恒为 Timeout: 0。搬过来的话，任何带
+// Timeout 的注入（比如 30s）都会悄悄把 P1-5 修掉的长流腰斩又放回来，而且
+// 调用方看不出区别。要给对话单独配总时长请用 SetChatHTTPClient。
+//
+// Transport 的兜底与 SetChatHTTPClient 同一哲学（omp 终审备注 A）：注入的
+// transport 缺首字节上限就 Clone 后补上（nil 则换默认对话 transport）——
+// Timeout:0 的对话流首字节必须由 ResponseHeaderTimeout 单独兜底，两条注入
+// 路径的契约不能一条有界一条无界。
+func SetHTTPClient(c *http.Client) {
+	if c == nil {
+		return
+	}
+	httpClient = c
+	chatHTTP = normalizeChatClient(&http.Client{
+		Timeout:       0, // 恒为 0，不搬 c.Timeout（见 SetHTTPClient 注释）
+		Transport:     c.Transport,
+		CheckRedirect: c.CheckRedirect,
+		Jar:           c.Jar,
+	})
+}
+
+// SetChatHTTPClient 单独替换对话客户端（宿主想给对话配不同 transport 时用）；
+// 传 nil 还原出厂默认（defaultChatClient）——与 SetHTTPClient 的 nil 语义对齐，
+// 避免「还原」这条最常用的路径反而退化成无首字节上限的裸客户端。
+//
+// 两处兜底，都是为了让「对话永不被总时长腰斩」这个契约不会在注入时被悄悄
+// 破坏（调用方看不出区别，只会表现为长流偶发断掉）：
+//   - c.Timeout 一律归 0（与 SetHTTPClient 同款处理，理由见其注释）；
+//   - c.Transport 为 nil 时补 http.DefaultTransport，且**缺失
+//     ResponseHeaderTimeout 的 transport 补上 chatRequestTimeout**。
+//
+// 为什么必须补首字节上限：Timeout: 0 意味着「永不被总时长腰斩」，那首字节
+// 就必须由 ResponseHeaderTimeout 单独兜底，否则上游只连上不吐头时对话流
+// 会无限挂等（既不报错也不结束，goroutine 和连接一起泄漏）。
+func SetChatHTTPClient(c *http.Client) {
+	if c == nil {
+		chatHTTP = defaultChatClient()
+		return
+	}
+	chatHTTP = normalizeChatClient(c)
+}
+
+// normalizeChatClient 把注入的对话 client 归一到两条硬契约上：总时长恒 0、
+// 首字节有界。SetHTTPClient 与 SetChatHTTPClient 共用，保证两条注入路径的
+// 契约对称（omp 终审备注 A）。
+func normalizeChatClient(c *http.Client) *http.Client {
+	c.Timeout = 0
+	// 自定义 transport 且缺首字节上限时，克隆一份再补——**绝不能就地改**：
+	// http.DefaultTransport 是全局共享的，在它身上设 ResponseHeaderTimeout
+	// 会影响这个进程里所有用它的请求（别的 provider、别的包）。
+	switch tr := c.Transport.(type) {
+	case nil:
+		c.Transport = defaultChatTransport()
+	case *http.Transport:
+		if tr.ResponseHeaderTimeout == 0 {
+			clone := tr.Clone()
+			clone.ResponseHeaderTimeout = chatRequestTimeout
+			c.Transport = clone
+		}
+	}
+	return c
 }
 
 // signRequestHuawei SDK-HMAC-SHA256 签名（对齐 Jet-Hub sign.ts 与华为 Rust 参考实现）。
