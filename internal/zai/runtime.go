@@ -164,7 +164,6 @@ func (c *Client) Do(ctx context.Context, body []byte) (*Result, error) {
 
 		url, headers, outBody := BuildRequest(acc, body, verifyParam, verifyRegion, forceFallback, c.SystemBlocks)
 		usedPlan := !forceFallback && acc.HasJWTPath()
-		acc.MarkUsed()
 
 		resp, err := postMessages(ctx, url, headers, outBody)
 		if err != nil {
@@ -178,6 +177,10 @@ func (c *Client) Do(ctx context.Context, body []byte) (*Result, error) {
 		if resp.StatusCode == http.StatusOK {
 			c.Pool.Release(acc.ID)
 			_ = c.Pool.Store().Update(acc.ID, func(a *Account) {
+				// MarkUsed 必须在 Store 的真身上调：Pick 返回的是深拷贝
+				// （store.List → cloneAccount），在克隆上自增 UseCount 等于
+				// 每次成功都丢一次——面板「调用次数」与「最近使用」会恒为 0。
+				a.MarkUsed()
 				a.MarkOK()
 				a.ClearModelPenalty(model)
 			})

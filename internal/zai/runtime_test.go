@@ -406,3 +406,54 @@ func TestDoReturnsErrorWhenAllDisabled(t *testing.T) {
 
 // b64 生成 JWT payload 段（测试夹具用）。
 func b64(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+
+/* ── MarkUsed 必须写回 Store（面板「调用次数」读的是 Store） ─────────── */
+
+// Pick 返回的是深拷贝（store.List → cloneAccount）。成功路径曾在**克隆**上调
+// MarkUsed()，UseCount++ 与 LastUsedAt 从没落回 Store，于是面板「调用」列对所有
+// Z.AI 账号恒显示 0、LastUsedAt 恒空——「看起来有字段，值恒错」比没有更糟。
+func TestDoRecordsUseCountInStore(t *testing.T) {
+	up := newMockUpstream(t, mockStep{status: 200, body: `{"ok":true}`})
+	SetEndpoints(up.server.URL+"/plan", up.server.URL+"/fallback", "", "")
+
+	a := NewAccount("号一", "sk-aaaaaaaaaaaa")
+	client, st := newTestClient(t, a)
+
+	res, err := client.Do(context.Background(), []byte(`{"model":"glm-5.3","messages":[]}`))
+	if err != nil {
+		t.Fatalf("应成功建流: %v", err)
+	}
+	defer res.Resp.Body.Close()
+
+	live := st.Get(a.ID) // Get 也走 cloneAccount，但读的是 Store 里的真身计数
+	if live.UseCount != 1 {
+		t.Errorf("成功后 Store 的 UseCount = %d, want 1（MarkUsed 写在了 Pick 返回的克隆上，没写回 Store）", live.UseCount)
+	}
+	if live.LastUsedAt.IsZero() {
+		t.Error("成功后 Store 的 LastUsedAt 是零值，want 非零（同样没写回 Store）")
+	}
+}
+
+// 连打两次：计数要累加，而不是停在 1 或被覆盖。
+func TestDoAccumulatesUseCountAcrossCalls(t *testing.T) {
+	up := newMockUpstream(t,
+		mockStep{status: 200, body: `{"ok":true}`},
+		mockStep{status: 200, body: `{"ok":true}`},
+	)
+	SetEndpoints(up.server.URL+"/plan", up.server.URL+"/fallback", "", "")
+
+	a := NewAccount("号一", "sk-aaaaaaaaaaaa")
+	client, st := newTestClient(t, a)
+
+	for i := 0; i < 2; i++ {
+		res, err := client.Do(context.Background(), []byte(`{"model":"glm-5.3","messages":[]}`))
+		if err != nil {
+			t.Fatalf("第 %d 次应成功建流: %v", i+1, err)
+		}
+		res.Resp.Body.Close()
+	}
+
+	if got := st.Get(a.ID).UseCount; got != 2 {
+		t.Errorf("两次成功后 UseCount = %d, want 2", got)
+	}
+}
