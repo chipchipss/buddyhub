@@ -58,11 +58,17 @@ func zcodeMessagesURL(site string) string {
 }
 
 // ZcodeChatStream ZCode 通道：OpenAI 请求 → Anthropic messages（复用 zai 翻译）
-// → coding-key 双头直连 → 反译回 OpenAI。返回 false = 无可用账号。
-func (h *Handler) ZcodeChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
-	h.lastZcodeErr = ""
+// → coding-key 双头直连 → 反译回 OpenAI。
+//
+// 返回的 outcome：served=已写响应（成功 / 桥接内部的 400/429/502）；matched 且
+// 未 served = 什么都没写，调用方按 code/detail/lastErr 报错，**不回落腾讯池**。
+//
+// lastErr 是**本请求**的失败原因（请求级局部量，不是 Handler 字段）：
+// 并发请求各拿各的，A 的 503 文案里不会出现 B 的上游错误。
+func (h *Handler) ZcodeChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bridgeOutcome {
 	if h.cfg.ExtAccounts == nil {
-		return false
+		return bridgeMiss("no_zcode_account",
+			"没有可用的 ZCode 账号（面板-添加账号-外部平台-ZCode 填 API key / JWT）", "ZCode", "")
 	}
 	site, model := zcodeSiteFor(bareModel)
 	// 剥 zcode:/cn/ 前缀后重写 body 模型名（与其他桥接同款）。
@@ -77,14 +83,15 @@ func (h *Handler) ZcodeChatStream(w http.ResponseWriter, r *http.Request, body [
 		}
 	}
 	if len(accounts) == 0 {
-		h.lastZcodeErr = "没有可用的 ZCode 账号（面板添加 zcode 凭据）"
-		return false
+		return bridgeMiss("no_zcode_account",
+			"没有可用的 ZCode 账号（面板-添加账号-外部平台-ZCode 填 API key / JWT）", "ZCode",
+			"没有可用的 ZCode 账号（面板-添加账号-外部平台-ZCode 填 API key / JWT）")
 	}
 
 	anthBody, _, err := upstream.ZaiTranslateIn(body)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return true
+		return bridgeServed()
 	}
 
 	lastErr := ""
@@ -183,7 +190,7 @@ func (h *Handler) ZcodeChatStream(w http.ResponseWriter, r *http.Request, body [
 			resp.Body.Close()
 			if rerr != nil {
 				writeOpenAIError(w, http.StatusBadGateway, "upstream_read", rerr.Error())
-				return true
+				return bridgeServed()
 			}
 			// 二相性观察 1（auxiliary 复核）：非流式 200 响应的 body 里也可能
 			// 藏着额度耗尽（code 1113/1005——fork spentUp 本来就在 200 body 上
@@ -193,22 +200,22 @@ func (h *Handler) ZcodeChatStream(w http.ResponseWriter, r *http.Request, body [
 				h.zcodeRecordSpent(a)
 				writeOpenAIError(w, http.StatusTooManyRequests, "quota_exhausted", "ZCode 额度/配额已耗尽（上游 200 + 1113/1005）")
 				log.Printf("zcode-bridge: acct=%s 200-body 额度耗尽（1113/1005），已入账", a.ID)
-				return true
+				return bridgeServed()
 			}
 			out, terr := upstream.ZaiTranslateOutJSON(raw, model)
 			if terr != nil {
 				writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", terr.Error())
-				return true
+				return bridgeServed()
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(out)
 		}
 		h.noteChat(a.Provider, a.ID, nil)
-		return true
+		return bridgeServed()
 	}
-	h.lastZcodeErr = lastErr
-	return false
+	return bridgeMiss("no_zcode_account",
+		"没有可用的 ZCode 账号（面板-添加账号-外部平台-ZCode 填 API key / JWT）", "ZCode", lastErr)
 }
 
 // zcodeSpentUp fork spentUp（index.mjs L247-255）：HTTP 429 恒为额度类；

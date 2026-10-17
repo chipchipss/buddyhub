@@ -56,11 +56,17 @@ func maxModeRequired(msg string) bool {
 	return strings.Contains(low, "max mode required") || strings.Contains(low, "max_mode required")
 }
 
-// CursorChatStream Cursor 通道入口。返回 false = 无可用账号。
-func (h *Handler) CursorChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
-	h.lastCursorErr = ""
+// CursorChatStream Cursor 通道入口。
+//
+// 返回的 outcome：served=已写响应（成功 / 桥接内部的 400）；matched 且未 served
+// = 什么都没写，调用方按 code/detail/lastErr 报错，**不回落腾讯池**。
+//
+// lastErr 是**本请求**的失败原因（请求级局部量，不是 Handler 字段）：
+// 并发请求各拿各的，A 的 503 文案里不会出现 B 的上游错误。
+func (h *Handler) CursorChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bridgeOutcome {
 	if h.cfg.ExtAccounts == nil {
-		return false
+		return bridgeMiss("no_cursor_account",
+			"没有可用的 Cursor 账号（面板-添加账号-外部平台-Cursor 浏览器登录）", "Cursor", "")
 	}
 	model := strings.TrimPrefix(bareModel, cursorModelPrefix)
 	// 目录解析前的原始请求名：目录里有它 → 解析成变体 id（effort/fast/maxMode
@@ -73,8 +79,9 @@ func (h *Handler) CursorChatStream(w http.ResponseWriter, r *http.Request, body 
 		}
 	}
 	if len(accounts) == 0 {
-		h.lastCursorErr = "没有可用的 Cursor 账号（面板-添加账号-外部平台-Cursor）"
-		return false
+		return bridgeMiss("no_cursor_account",
+			"没有可用的 Cursor 账号（面板-添加账号-外部平台-Cursor 浏览器登录）", "Cursor",
+			"没有可用的 Cursor 账号（面板-添加账号-外部平台-Cursor 浏览器登录）")
 	}
 
 	// 对话构造（纯函数，一次即可，不随换号重做）。第三返回值是解析后的
@@ -82,7 +89,7 @@ func (h *Handler) CursorChatStream(w http.ResponseWriter, r *http.Request, body 
 	conv, tools, chat, err := cursor.BuildConversation(body)
 	if err != nil || conv == nil || len(conv.Msgs) == 0 {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "Cursor：请求体里没有可用的对话消息")
-		return true
+		return bridgeServed()
 	}
 	// 会话稳定 id（同 prompt_cache_key + 同首条 user → 同 id：Cursor 按它把
 	// 请求路由到缓存了这份 prompt 的机器）。无键时空串，每次 Run 新建。
@@ -174,10 +181,10 @@ func (h *Handler) CursorChatStream(w http.ResponseWriter, r *http.Request, body 
 		}
 		h.noteChat(a.Provider, a.ID, nil)
 		h.cursorPump(r, w, stream, first, model, a, wantStream)
-		return true
+		return bridgeServed()
 	}
-	h.lastCursorErr = lastErr
-	return false
+	return bridgeMiss("no_cursor_account",
+		"没有可用的 Cursor 账号（面板-添加账号-外部平台-Cursor 浏览器登录）", "Cursor", lastErr)
 }
 
 // cursorVariant 用该账号的模型目录把请求模型名解析成目标变体

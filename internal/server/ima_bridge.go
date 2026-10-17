@@ -27,12 +27,15 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extstore"
 )
 
-// imaChatStream 转发到 ima。返回 false = 无可用账号。
-func (h *Handler) imaBridgeChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
-	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
-	h.lastIMAErr = ""
+// imaChatStream 转发到 ima。
+//
+// 返回的 outcome：served=已写响应；matched 且未 served = 什么都没写，
+// 调用方按 code/detail/lastErr 报错，**不回落腾讯池**。
+// lastErr 是**本请求**的失败原因（请求级局部量，不跨请求共享）。
+func (h *Handler) imaBridgeChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bridgeOutcome {
 	if h.cfg.ExtAccounts == nil {
-		return false
+		return bridgeMiss("no_ima_account",
+			"没有可用的 ima 账号（面板-添加账号-外部平台-ima 粘贴 Cookie 后重试）", "ima", "")
 	}
 	var accounts []*extstore.ExtAccount
 	for _, a := range h.cfg.ExtAccounts() {
@@ -41,7 +44,8 @@ func (h *Handler) imaBridgeChatStream(w http.ResponseWriter, r *http.Request, bo
 		}
 	}
 	if len(accounts) == 0 {
-		return false
+		return bridgeMiss("no_ima_account",
+			"没有可用的 ima 账号（面板-添加账号-外部平台-ima 粘贴 Cookie 后重试）", "ima", "")
 	}
 
 	// 模型名 → (type, id)；未知名字回落默认（上游自己也有路由层）
@@ -55,7 +59,7 @@ func (h *Handler) imaBridgeChatStream(w http.ResponseWriter, r *http.Request, bo
 	question := lastUserText(body)
 	if question == "" {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "messages 里没有 user 轮次")
-		return true
+		return bridgeServed()
 	}
 	// 会话键：客户端的 conversation_id（粘性）或请求级随机
 	convID := conversationIDOf(body)
@@ -138,10 +142,10 @@ func (h *Handler) imaBridgeChatStream(w http.ResponseWriter, r *http.Request, bo
 			writeJSON(w, http.StatusOK, doc)
 		}
 		h.noteChat(a.Provider, a.ID, nil)
-		return true
+		return bridgeServed()
 	}
-	h.lastIMAErr = lastErr
-	return false
+	return bridgeMiss("no_ima_account",
+		"没有可用的 ima 账号（面板-添加账号-外部平台-ima 粘贴 Cookie 后重试）", "ima", lastErr)
 }
 
 // refreshIMACred 换新 IMA-TOKEN + 回写账号表。

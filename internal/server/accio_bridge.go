@@ -19,12 +19,15 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extstore"
 )
 
-// accioChatStream 转发到 Accio。返回 false = 无可用账号。
-func (h *Handler) accioChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
-	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
-	h.lastAccioErr = ""
+// accioChatStream 转发到 Accio。
+//
+// 返回的 outcome：served=已写响应；matched 且未 served = 什么都没写，
+// 调用方按 code/detail/lastErr 报错，**不回落腾讯池**。
+// lastErr 是**本请求**的失败原因（请求级局部量，不跨请求共享）。
+func (h *Handler) accioChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bridgeOutcome {
 	if h.cfg.ExtAccounts == nil {
-		return false
+		return bridgeMiss("no_accio_account",
+			"没有可用的 Accio 账号（面板-添加账号-外部平台-Accio 浏览器授权后重试）", "Accio", "")
 	}
 	var accounts []*extstore.ExtAccount
 	for _, a := range h.cfg.ExtAccounts() {
@@ -33,7 +36,8 @@ func (h *Handler) accioChatStream(w http.ResponseWriter, r *http.Request, body [
 		}
 	}
 	if len(accounts) == 0 {
-		return false
+		return bridgeMiss("no_accio_account",
+			"没有可用的 Accio 账号（面板-添加账号-外部平台-Accio 浏览器授权后重试）", "Accio", "")
 	}
 
 	lastErr := ""
@@ -60,7 +64,7 @@ func (h *Handler) accioChatStream(w http.ResponseWriter, r *http.Request, body [
 		outBody, perr := accio.BuildUpstreamBody(body, bareModel, cred.AccessToken, reqID, cred.DeviceID)
 		if perr != nil {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", perr.Error())
-			return true
+			return bridgeServed()
 		}
 
 		resp, cerr := accio.Chat(r.Context(), &cred, outBody, reqID)
@@ -111,14 +115,13 @@ func (h *Handler) accioChatStream(w http.ResponseWriter, r *http.Request, body [
 		// 所以流内错误只记账、不换号重试。
 		if terr := h.translateAccio(w, resp, body, bareModel); terr != nil {
 			h.noteChat(a.Provider, a.ID, terr)
-			h.lastAccioErr = terr.Error()
-			return true
+			return bridgeServedWithReason(terr.Error())
 		}
 		h.noteChat(a.Provider, a.ID, nil)
-		return true
+		return bridgeServed()
 	}
-	h.lastAccioErr = lastErr
-	return false
+	return bridgeMiss("no_accio_account",
+		"没有可用的 Accio 账号（面板-添加账号-外部平台-Accio 浏览器授权后重试）", "Accio", lastErr)
 }
 
 // refreshAccioCred 单飞续期 + 回写账号表。

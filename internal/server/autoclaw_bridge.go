@@ -24,12 +24,15 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extstore"
 )
 
-// autoclawChatStream 转发到 AutoClaw。返回 false = 无可用账号。
-func (h *Handler) autoclawChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
-	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
-	h.lastAutoClawErr = ""
+// autoclawChatStream 转发到 AutoClaw。
+//
+// 返回的 outcome：served=已写响应；matched 且未 served = 什么都没写，
+// 调用方按 code/detail/lastErr 报错，**不回落腾讯池**。
+// lastErr 是**本请求**的失败原因（请求级局部量，不跨请求共享）。
+func (h *Handler) autoclawChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bridgeOutcome {
 	if h.cfg.ExtAccounts == nil {
-		return false
+		return bridgeMiss("no_autoclaw_account",
+			"没有可用的 AutoClaw 账号（面板-添加账号-外部平台-AutoClaw 手机号登录后重试）", "AutoClaw", "")
 	}
 	var accounts []*extstore.ExtAccount
 	for _, a := range h.cfg.ExtAccounts() {
@@ -38,7 +41,8 @@ func (h *Handler) autoclawChatStream(w http.ResponseWriter, r *http.Request, bod
 		}
 	}
 	if len(accounts) == 0 {
-		return false
+		return bridgeMiss("no_autoclaw_account",
+			"没有可用的 AutoClaw 账号（面板-添加账号-外部平台-AutoClaw 手机号登录后重试）", "AutoClaw", "")
 	}
 
 	lastErr := ""
@@ -130,10 +134,10 @@ func (h *Handler) autoclawChatStream(w http.ResponseWriter, r *http.Request, bod
 		log.Printf("autoclaw-bridge: acct=%s region=%s model=%s 建流成功",
 			a.ID, autoclaw.ParseRegion(string(cred.Region)).Label(), bareModel)
 		h.passThroughAutoClaw(w, resp, h.clientWantsStream(body))
-		return true
+		return bridgeServed()
 	}
-	h.lastAutoClawErr = lastErr
-	return false
+	return bridgeMiss("no_autoclaw_account",
+		"没有可用的 AutoClaw 账号（面板-添加账号-外部平台-AutoClaw 手机号登录后重试）", "AutoClaw", lastErr)
 }
 
 // refreshAutoClawCred 单飞续期 + 回写账号表。

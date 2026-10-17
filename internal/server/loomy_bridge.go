@@ -80,13 +80,15 @@ func loomyAccounts(h *Handler) []loomyAccount {
 }
 
 // LoomyChatStream Loomy 模型网关直连：多号轮换 + 401/403 换号。
-// 返回 false = 无可用账号（调用方报错，不回落腾讯池）。
-func (h *Handler) LoomyChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
-	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
-	h.lastLoomyErr = ""
+//
+// 返回的 outcome：served=已写响应；matched 且未 served = 什么都没写，
+// 调用方按 code/detail/lastErr 报错，**不回落腾讯池**。
+// lastErr 是**本请求**的失败原因（请求级局部量，不跨请求共享）。
+func (h *Handler) LoomyChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bridgeOutcome {
 	accounts := loomyAccounts(h)
 	if len(accounts) == 0 {
-		return false
+		return bridgeMiss("no_loomy_account",
+			"没有可用的 Loomy 账号（面板-添加账号-Loomy 登录后重试）", "Loomy", "")
 	}
 	m := strings.TrimPrefix(bareModel, loomyModelPrefix)
 	outBody := rewriteModel(body, m)
@@ -120,7 +122,7 @@ func (h *Handler) LoomyChatStream(w http.ResponseWriter, r *http.Request, body [
 				if status == http.StatusBadRequest || status == http.StatusNotFound || status == http.StatusUnprocessableEntity {
 					// 请求本身的问题，换号无意义
 					writeOpenAIError(w, status, "upstream_error", lastErr)
-					return true
+					return bridgeServedWithReason(lastErr)
 				}
 				continue
 			}
@@ -144,7 +146,7 @@ func (h *Handler) LoomyChatStream(w http.ResponseWriter, r *http.Request, body [
 				raw, rerr := io.ReadAll(rc)
 				if rerr != nil {
 					writeOpenAIError(w, http.StatusBadGateway, "upstream_read", rerr.Error())
-					return true
+					return bridgeServed()
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
@@ -154,10 +156,10 @@ func (h *Handler) LoomyChatStream(w http.ResponseWriter, r *http.Request, body [
 		// session-file 兜底账号 ExtID 为空，上报会被 extstore 忽略——正确：
 		// 它不在外部账号表里，没有可冷却的对象。
 		h.noteChat(extstore.PLoomyCLI, acc.ExtID, nil)
-		return true
+		return bridgeServed()
 	}
-	h.lastLoomyErr = lastErr
-	return false
+	return bridgeMiss("no_loomy_account",
+		"没有可用的 Loomy 账号（面板-添加账号-Loomy 登录后重试）", "Loomy", lastErr)
 }
 
 // proxyLoomySSE 逐帧透传（上游 SSE 帧即标准 OpenAI chat.completion.chunk，

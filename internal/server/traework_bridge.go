@@ -18,17 +18,20 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extstore"
 )
 
-// traeworkChatStream 转发到 TraeWork。返回 false = 无可用账号。
-func (h *Handler) traeworkChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
-	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
-	h.lastTraeWorkErr = ""
+// traeworkChatStream 转发到 TraeWork。
+//
+// 返回的 outcome：served=已写响应；matched 且未 served = 什么都没写，
+// 调用方按 code/detail/lastErr 报错，**不回落腾讯池**。
+// lastErr 是**本请求**的失败原因（请求级局部量，不跨请求共享）。
+func (h *Handler) traeworkChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bridgeOutcome {
 	if h.cfg.ExtAccounts == nil {
-		return false
+		return bridgeMiss("no_traework_account",
+			"没有可用的 TraeWork 账号（面板-添加账号-外部平台-TraeWork 粘贴客户端凭据）", "TraeWork", "")
 	}
 	prompt := lastUserText(body)
 	if prompt == "" {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "messages 里没有 user 轮次")
-		return true
+		return bridgeServed()
 	}
 
 	var accounts []*extstore.ExtAccount
@@ -38,7 +41,8 @@ func (h *Handler) traeworkChatStream(w http.ResponseWriter, r *http.Request, bod
 		}
 	}
 	if len(accounts) == 0 {
-		return false
+		return bridgeMiss("no_traework_account",
+			"没有可用的 TraeWork 账号（面板-添加账号-外部平台-TraeWork 粘贴客户端凭据）", "TraeWork", "")
 	}
 
 	lastErr := ""
@@ -58,7 +62,7 @@ func (h *Handler) traeworkChatStream(w http.ResponseWriter, r *http.Request, bod
 		if h.clientWantsStream(body) {
 			h.streamTraeWork(w, r, &cred, prompt, bareModel)
 			h.noteChat(a.Provider, a.ID, nil)
-			return true
+			return bridgeServed()
 		}
 
 		turn, err := traework.RunTurn(r.Context(), &cred, prompt, nil)
@@ -70,10 +74,10 @@ func (h *Handler) traeworkChatStream(w http.ResponseWriter, r *http.Request, bod
 		}
 		writeJSON(w, http.StatusOK, buildTraeWorkCompletion(turn, bareModel))
 		h.noteChat(a.Provider, a.ID, nil)
-		return true
+		return bridgeServed()
 	}
-	h.lastTraeWorkErr = lastErr
-	return false
+	return bridgeMiss("no_traework_account",
+		"没有可用的 TraeWork 账号（面板-添加账号-外部平台-TraeWork 粘贴客户端凭据）", "TraeWork", lastErr)
 }
 
 // streamTraeWork 把会话事件流边收边转成 OpenAI SSE。

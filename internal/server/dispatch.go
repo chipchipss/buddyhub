@@ -17,12 +17,54 @@ import (
 //   - matched: true ⇒ 有桥接认这个前缀但没服务成（**什么都没写**），调用方可
 //     写 503，或在判定为额度耗尽时换候选再试
 //   - 两者皆 false ⇒ 没有前缀匹配 → 落到腾讯池（裸名路径）
+//
+// ── 为什么 lastErr 由桥接自己返回，而不是写在 Handler 字段上 ──────────────
+// 早先每条桥接把「本次失败原因」写进挂在 *Handler 单例上的 last<Provider>Err
+// 字段，dispatch 再读回来拼 503 文案。那是个**跨请求共享的字段**：两个并发
+// 请求同时写同一条通道时，B 的失败原因会盖掉 A 的（A 的 503 文案里出现 B 的
+// 上游错误），并且每次读写都是一次数据竞争（`go test -race` 实测复现，
+// 见 lasterr_race_test.go 的并发回归用例）。
+//
+// 现在每个桥接返回自己的 bridgeOutcome（含本请求的 lastErr），dispatch 只做
+// 前缀识别 + 出站体重写 + 原样转发。请求级局部量天然满足两条原语义：
+//   - 「本请求从零开始记」：每次调用新建 outcome，不存在上一次的残留；
+//   - 「上一位用户的失败原因不挂进这一次」：A 与 B 各拿各的 outcome，
+//     互不可见。
 type bridgeOutcome struct {
 	matched bool
 	served  bool
 	code    string
 	detail  string
-	lastErr string // 该平台的最近失败原因，供 isExhausted 判定是否该跨平台降级
+	lastErr string // 该平台**本次**失败原因，供 isExhausted 判定是否该跨平台降级
+}
+
+// bridgeServed 桥接已写响应（成功、503、以及埋在桥接内部的 400/404 全算），
+// 调用方直接 return，**不可重试**。
+func bridgeServed() bridgeOutcome {
+	return bridgeOutcome{matched: true, served: true}
+}
+
+// bridgeServedWithReason 同上，另把本次失败原因带回来。
+//
+// 「模型不存在 / 未配置账号」这类**提前 return true** 的路径也走它：虽然
+// dispatch 在 served=true 时不读 lastErr，但原因一旦丢掉就没处可查——
+// 迁移前这些路径同样会写 Handler 上的共享 Err 字段，这里保持等价。
+func bridgeServedWithReason(reason string) bridgeOutcome {
+	return bridgeOutcome{matched: true, served: true, lastErr: reason}
+}
+
+// bridgeMiss 桥接认了这个前缀但没服务成（**什么都没写**）：调用方可写 503，
+// 或在判定为额度耗尽时换候选再试。
+//
+// noAccountMsg / label / code 是该平台的固定口径，随桥接一起搬迁到这里；
+// lastErr 是本次请求级的失败原因（空 = 一次上游都没碰过）。
+func bridgeMiss(code, noAccountMsg, label, lastErr string) bridgeOutcome {
+	return bridgeOutcome{
+		matched: true,
+		code:    code,
+		detail:  bridgeDetail(noAccountMsg, label, lastErr),
+		lastErr: lastErr,
+	}
 }
 
 // tryBridge 按前缀把请求交给对应桥接。bareModel 是**带前缀**的模型名
@@ -37,11 +79,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if qm != bareModel {
 			bodyQM = rewriteModel(body, qm)
 		}
-		if h.qoderChatStream(w, r, bodyQM, qm) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的 Qoder 账号（面板-外部积分账号中添加 qoder 凭据后重试）", "Qoder", h.lastQoderErr)
-		return bridgeOutcome{matched: true, code: "no_qoder_account", detail: detail, lastErr: h.lastQoderErr}
+		return h.qoderChatStream(w, r, bodyQM, qm)
 	}
 
 	// GitHub Copilot 直连通道（copilot: 前缀模型）：独立于腾讯池，走 extstore 里的
@@ -53,11 +91,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if cm != bareModel {
 			bodyCM = rewriteModel(body, cm)
 		}
-		if h.copilotChatStream(w, r, bodyCM, cm) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的 GitHub Copilot 账号（面板-自动化-外部平台中添加后重试）", "GitHub Copilot", h.lastCopilotErr)
-		return bridgeOutcome{matched: true, code: "no_copilot_account", detail: detail, lastErr: h.lastCopilotErr}
+		return h.copilotChatStream(w, r, bodyCM, cm)
 	}
 
 	// Cline 直连通道（cline: 前缀模型）：独立于腾讯池，走 extstore 里的 Cline
@@ -69,11 +103,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if cm != bareModel {
 			bodyCM = rewriteModel(body, cm)
 		}
-		if h.clineChatStream(w, r, bodyCM, cm) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的 Cline 账号（面板-添加账号-外部平台-Cline 授权后重试）", "Cline", h.lastClineErr)
-		return bridgeOutcome{matched: true, code: "no_cline_account", detail: detail, lastErr: h.lastClineErr}
+		return h.clineChatStream(w, r, bodyCM, cm)
 	}
 
 	// AutoClaw 直连通道（autoclaw: 前缀模型）：走 extstore 里的 AutoClaw 账号。
@@ -84,11 +114,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if am != bareModel {
 			bodyAM = rewriteModel(body, am)
 		}
-		if h.autoclawChatStream(w, r, bodyAM, am) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的 AutoClaw 账号（面板-添加账号-外部平台-AutoClaw 手机号登录后重试）", "AutoClaw", h.lastAutoClawErr)
-		return bridgeOutcome{matched: true, code: "no_autoclaw_account", detail: detail, lastErr: h.lastAutoClawErr}
+		return h.autoclawChatStream(w, r, bodyAM, am)
 	}
 
 	// QClaw 直连通道（qclaw: 前缀模型）：走 extstore 里的 QClaw 账号
@@ -99,11 +125,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if qm != bareModel {
 			bodyQM = rewriteModel(body, qm)
 		}
-		if h.qclawChatStream(w, r, bodyQM, qm) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的 QClaw 账号（面板-添加账号-外部平台-QClaw 微信扫码后重试）", "QClaw", h.lastQClawErr)
-		return bridgeOutcome{matched: true, code: "no_qclaw_account", detail: detail, lastErr: h.lastQClawErr}
+		return h.qclawChatStream(w, r, bodyQM, qm)
 	}
 
 	// Trae 直连通道（trae: 前缀模型）：走 extstore 里的 Trae 账号（本机回调授权）。
@@ -114,11 +136,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if tm != bareModel {
 			bodyTM = rewriteModel(body, tm)
 		}
-		if h.traeChatStream(w, r, bodyTM, tm) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的 Trae 账号（面板-添加账号-外部平台-Trae 浏览器授权后重试）", "Trae", h.lastTraeErr)
-		return bridgeOutcome{matched: true, code: "no_trae_account", detail: detail, lastErr: h.lastTraeErr}
+		return h.traeChatStream(w, r, bodyTM, tm)
 	}
 
 	// 小浣熊直连通道（raccoon: 前缀模型）：上游本身就是 OpenAI 兼容，
@@ -129,11 +147,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if rm != bareModel {
 			bodyRM = rewriteModel(body, rm)
 		}
-		if h.raccoonChatStream(w, r, bodyRM, rm) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的小浣熊账号（面板-添加账号-外部平台-小浣熊 微信扫码后重试）", "小浣熊", h.lastRaccoonErr)
-		return bridgeOutcome{matched: true, code: "no_raccoon_account", detail: detail, lastErr: h.lastRaccoonErr}
+		return h.raccoonChatStream(w, r, bodyRM, rm)
 	}
 
 	// CodeArts 直连通道（codearts: 前缀模型）：签名口径与积分/签到那条链路
@@ -144,11 +158,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if cm != bareModel {
 			bodyCM = rewriteModel(body, cm)
 		}
-		if h.codeartsChatStream(w, r, bodyCM, cm) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的 CodeArts 账号（面板-添加账号-外部平台-CodeArts 填 AK/SK 后重试）", "CodeArts", h.lastCodeArtsErr)
-		return bridgeOutcome{matched: true, code: "no_codearts_account", detail: detail, lastErr: h.lastCodeArtsErr}
+		return h.codeartsChatStream(w, r, bodyCM, cm)
 	}
 
 	// Accio 直连通道（accio: 前缀模型）：上游是 ADK（Gemini 风格）信封，
@@ -159,11 +169,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if am != bareModel {
 			bodyAM = rewriteModel(body, am)
 		}
-		if h.accioChatStream(w, r, bodyAM, am) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的 Accio 账号（面板-添加账号-外部平台-Accio 浏览器授权后重试）", "Accio", h.lastAccioErr)
-		return bridgeOutcome{matched: true, code: "no_accio_account", detail: detail, lastErr: h.lastAccioErr}
+		return h.accioChatStream(w, r, bodyAM, am)
 	}
 
 	// TraeWork 直连通道（traework: 前缀模型）：上游是会话式协议
@@ -174,11 +180,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if twm != bareModel {
 			bodyTW = rewriteModel(body, twm)
 		}
-		if h.traeworkChatStream(w, r, bodyTW, twm) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的 TraeWork 账号（面板-添加账号-外部平台-TraeWork 粘贴客户端凭据）", "TraeWork", h.lastTraeWorkErr)
-		return bridgeOutcome{matched: true, code: "no_traework_account", detail: detail, lastErr: h.lastTraeWorkErr}
+		return h.traeworkChatStream(w, r, bodyTW, twm)
 	}
 
 	// Marvis 直连通道（marvis: 前缀模型）：上游是标准 OpenAI 协议直通。
@@ -189,22 +191,14 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if mm != bareModel {
 			bodyMM = rewriteModel(body, mm)
 		}
-		if h.marvisChatStream(w, r, bodyMM, mm) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的 Marvis 账号（需从已登录的 Marvis 客户端抓包获取凭据后，在面板手工添加）", "Marvis", h.lastMarvisErr)
-		return bridgeOutcome{matched: true, code: "no_marvis_account", detail: detail, lastErr: h.lastMarvisErr}
+		return h.marvisChatStream(w, r, bodyMM, mm)
 	}
 
 	// ima 直连通道（ima: 前缀模型）：会话式协议（先 init_session 再问答），
 	// 自定义 SSE，事件名全大写——两侧都要转换，见 ima_bridge.go。
 	// 桥接自己剥 ima: 前缀（模型清单查询需要完整名字）。
 	if isIMAModel(bareModel) {
-		if h.imaBridgeChatStream(w, r, body, bareModel) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的 ima 账号（面板-添加账号-外部平台-ima 粘贴 Cookie 后重试）", "ima", h.lastIMAErr)
-		return bridgeOutcome{matched: true, code: "no_ima_account", detail: detail, lastErr: h.lastIMAErr}
+		return h.imaBridgeChatStream(w, r, body, bareModel)
 	}
 
 	// ZCode 通道（zcode: 前缀模型）：Anthropic Messages 兼容端点（z.ai /
@@ -214,11 +208,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if _, m := zcodeSiteFor(strings.TrimPrefix(bareModel, zcodeModelPrefix)); m != "" && m != bareModel {
 			bodyZC = rewriteModel(body, m)
 		}
-		if h.ZcodeChatStream(w, r, bodyZC, strings.TrimPrefix(bareModel, zcodeModelPrefix)) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的 ZCode 账号（面板-添加账号-外部平台-ZCode 填 API key / JWT）", "ZCode", h.lastZcodeErr)
-		return bridgeOutcome{matched: true, code: "no_zcode_account", detail: detail, lastErr: h.lastZcodeErr}
+		return h.ZcodeChatStream(w, r, bodyZC, strings.TrimPrefix(bareModel, zcodeModelPrefix))
 	}
 
 	// Cursor 通道（cursor: 前缀模型）：对话已接线（RunSSE/BidiAppend +
@@ -230,11 +220,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if m != bareModel {
 			bodyCU = rewriteModel(body, m)
 		}
-		if h.CursorChatStream(w, r, bodyCU, m) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的 Cursor 账号（面板-添加账号-外部平台-Cursor 浏览器登录）", "Cursor", h.lastCursorErr)
-		return bridgeOutcome{matched: true, code: "no_cursor_account", detail: detail, lastErr: h.lastCursorErr}
+		return h.CursorChatStream(w, r, bodyCU, m)
 	}
 
 	// Codex 订阅池直连（codex: 前缀）：本机 ~/.codex* 凭据 + Responses API。
@@ -244,44 +230,29 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 		if cm != bareModel {
 			bodyCM = rewriteModel(body, cm)
 		}
-		if h.codexChatStream(w, r, bodyCM, cm) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("本机未发现可用 Codex 登录（codex login 后重试）", "Codex", h.lastCodexErr)
-		return bridgeOutcome{matched: true, code: "no_codex_account", detail: detail, lastErr: h.lastCodexErr}
+		return h.codexChatStream(w, r, bodyCM, cm)
 	}
 
 	// 免费 key 池（free:<provider>/<model>）：groq/zp/l7/or 四上游。
+	// 这条桥接不参与 last*Err 迁移（它没有平台级失败原因字段，且每条路径
+	// 都已自行写响应），故仍返回 bool，由这里补成 outcome。
 	if isFreeModel(bareModel) {
 		if h.keyPoolChatStream(w, r, body, bareModel) {
-			return bridgeOutcome{matched: true, served: true}
+			return bridgeServed()
 		}
-		return bridgeOutcome{matched: true, code: "free_pool_unavailable", detail: "免费池不可用", lastErr: ""}
+		return bridgeOutcome{matched: true, code: "free_pool_unavailable", detail: "免费池不可用"}
 	}
 
 	// Loomy 模型网关直连（loomy: 前缀）：讯飞模型上游 OpenAI 兼容，
 	// 登录 session 即 Bearer。凭据走外部池 loomy-cli + session 文件。
 	if isLoomyModel(bareModel) {
-		if h.LoomyChatStream(w, r, body, bareModel) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		detail := bridgeDetail("没有可用的 Loomy 账号（面板-添加账号-Loomy 登录后重试）", "Loomy", h.lastLoomyErr)
-		return bridgeOutcome{matched: true, code: "no_loomy_account", detail: detail, lastErr: h.lastLoomyErr}
+		return h.LoomyChatStream(w, r, body, bareModel)
 	}
 
 	// Z.AI / 智谱 GLM API Key 通道（zai: 前缀）：Anthropic 兼容端点转发，
 	// OpenAI 双向翻译；凭据 config schedule.zai（x-api-key，免验证码）。
 	if strings.HasPrefix(bareModel, zaiModelPrefix) {
-		if h.ZaiChatStream(w, r, body, bareModel) {
-			return bridgeOutcome{matched: true, served: true}
-		}
-		// 有具体失败原因时以它为主（可能是某模型上游抖动/额度用完的按模型短冷却，
-		// 并非真的没有 Key）；只有确无凭据线索时才回落「未配置」提示。
-		detail := "没有可用的 Z.AI / 智谱 通道（配置 schedule.zai 或面板添加账号后重试）"
-		if h.lastZaiErr != "" {
-			detail = "Z.AI 通道暂不可用：" + h.lastZaiErr
-		}
-		return bridgeOutcome{matched: true, code: "no_zai_key", detail: detail, lastErr: h.lastZaiErr}
+		return h.ZaiChatStream(w, r, body, bareModel)
 	}
 
 	// 没有任何桥接认这个前缀 → 交给调用方（腾讯池路径）。
@@ -290,7 +261,7 @@ func (h *Handler) tryBridge(w http.ResponseWriter, r *http.Request, body []byte,
 
 // bridgeDetail 把「这条桥接认了这个前缀、但没服务成」写成一句符合事实的话。
 //
-// 每条桥接进入时都会清自己的 last*Err，所以这个字段能分辨两件事：
+// 每条桥接进入时 lastErr 都是**请求级**空串起步，所以这个字段能分辨两件事：
 //   - 空 = 一次上游都没碰过，池里确实没有可用账号 → 这时才说「没有可用账号」
 //   - 非空 = 账号全试过了且全失败 → 「没有可用账号」是句假话。实测就是这么误事的：
 //     copilot 账号在池里、另一个模型同一分钟回 200，界面却写着「没有可用的

@@ -22,12 +22,15 @@ import (
 	"github.com/chipchipss/buddyhub/internal/extstore"
 )
 
-// traeChatStream 转发到 Trae。返回 false = 无可用账号。
-func (h *Handler) traeChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
-	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
-	h.lastTraeErr = ""
+// traeChatStream 转发到 Trae。
+//
+// 返回的 outcome：served=已写响应；matched 且未 served = 什么都没写，
+// 调用方按 code/detail/lastErr 报错，**不回落腾讯池**。
+// lastErr 是**本请求**的失败原因（请求级局部量，不跨请求共享）。
+func (h *Handler) traeChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bridgeOutcome {
 	if h.cfg.ExtAccounts == nil {
-		return false
+		return bridgeMiss("no_trae_account",
+			"没有可用的 Trae 账号（面板-添加账号-外部平台-Trae 浏览器授权后重试）", "Trae", "")
 	}
 	var accounts []*extstore.ExtAccount
 	for _, a := range h.cfg.ExtAccounts() {
@@ -36,14 +39,15 @@ func (h *Handler) traeChatStream(w http.ResponseWriter, r *http.Request, body []
 		}
 	}
 	if len(accounts) == 0 {
-		return false
+		return bridgeMiss("no_trae_account",
+			"没有可用的 Trae 账号（面板-添加账号-外部平台-Trae 浏览器授权后重试）", "Trae", "")
 	}
 
 	// 出站体：白名单重建 + 四处 SOLO 变形
 	outBody, err := trae.PrepareBody(body, bareModel)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "请求体解析失败："+err.Error())
-		return true
+		return bridgeServed()
 	}
 
 	lastErr := ""
@@ -97,10 +101,10 @@ func (h *Handler) traeChatStream(w http.ResponseWriter, r *http.Request, body []
 
 		log.Printf("trae-bridge: acct=%s model=%s 建流成功", a.ID, bareModel)
 		h.translateTrae(w, resp, body, bareModel)
-		return true
+		return bridgeServed()
 	}
-	h.lastTraeErr = lastErr
-	return false
+	return bridgeMiss("no_trae_account",
+		"没有可用的 Trae 账号（面板-添加账号-外部平台-Trae 浏览器授权后重试）", "Trae", lastErr)
 }
 
 // refreshTraeCred 单飞续期 + 回写账号表。

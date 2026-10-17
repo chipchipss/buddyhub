@@ -35,7 +35,7 @@ jobs:
         with:
           go-version-file: go.mod
       # ubuntu runner 自带 node → panel 包的 JS 运行时冒烟测试（TestAppJSTopLevelSmoke）会真实执行
-      - run: go test ./...
+      - run: go test -race ./...
 
       # Linux 裸机启动冒烟。存在的理由：上面的交叉矩阵只证明「编得出来」，而本仓库的
       # Linux 专属分支（0600 凭据权限、WB2A_* 环境变量覆盖、时区警告、优雅停机）在

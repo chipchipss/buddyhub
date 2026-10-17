@@ -178,25 +178,6 @@ type Handler struct {
 	wafIP wafIPGate
 	// extManager 外部账号管理器（main 注入；Qoder 桥接刷新回写用）。nil = 桥接禁用。
 	extManager ExtManager
-	// lastQoderErr / lastCodexErr 桥接失败原因（观测用，非并发安全——
-	// 仅同账号串行失败时被写入，读取方在返回错误前立即读，竞态无害）。
-	lastQoderErr    string
-	lastCodexErr    string
-	lastLoomyErr    string
-	lastZaiErr      string
-	lastCopilotErr  string
-	lastClineErr    string
-	lastAutoClawErr string
-	lastQClawErr    string
-	lastTraeErr     string
-	lastAccioErr    string
-	lastTraeWorkErr string
-	lastRaccoonErr  string
-	lastIMAErr      string
-	lastMarvisErr   string
-	lastCodeArtsErr string
-	lastZcodeErr    string
-	lastCursorErr   string
 
 	// clineFlights / autoclawFlights 续期单飞表。
 	// 两家的 refresh_token 都是一次性轮换语义：并发续期会互相作废并把人踢下线，

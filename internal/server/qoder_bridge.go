@@ -27,12 +27,16 @@ import (
 )
 
 // QoderChatStream 直接向客户端透传 Qoder 的 OpenAI 兼容 SSE。
-// 返回 false = 未找到可用账号（调用方报错，不回落腾讯池）。
-func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
-	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
-	h.lastQoderErr = ""
+//
+// 返回的 outcome：served=已写响应（成功 / 桥接内部的 400）；matched 且未 served
+// = 什么都没写，调用方按 code/detail/lastErr 报错，**不回落腾讯池**。
+//
+// lastErr 是**本请求**的失败原因（请求级局部量，不是 Handler 字段）：
+// 并发请求各拿各的，A 的 503 文案里不会出现 B 的上游错误。
+func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bridgeOutcome {
 	if h.cfg.ExtAccounts == nil {
-		return false
+		return bridgeMiss("no_qoder_account",
+			"没有可用的 Qoder 账号（面板-外部积分账号中添加 qoder 凭据后重试）", "Qoder", "")
 	}
 	mgr := h.extManager
 	cli := qoder.New()
@@ -43,7 +47,8 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 		}
 	}
 	if len(accounts) == 0 {
-		return false
+		return bridgeMiss("no_qoder_account",
+			"没有可用的 Qoder 账号（面板-外部积分账号中添加 qoder 凭据后重试）", "Qoder", "")
 	}
 
 	lastErr := ""
@@ -118,7 +123,7 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 				writeOpenAIError(w, envErr.Status, envErr.Code, envErr.Message)
 				log.Printf("qoder-bridge: acct=%s 首信封终局错误 code=%s: %s", a.ID, envErr.Code, envErr.Message)
 			}
-			return true
+			return bridgeServed()
 		}
 		if ferr != nil {
 			lastErr = ferr.Error()
@@ -142,7 +147,7 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 			if err != nil {
 				writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 				h.noteChat(a.Provider, a.ID, errOf("聚合失败: "+err.Error()))
-				return true
+				return bridgeServed()
 			}
 			// 阶段 4 POST 记账：非流式一次性拿全量 usage。
 			if u, ok := qoder.ParseChatUsage(agg); ok {
@@ -151,10 +156,10 @@ func (h *Handler) qoderChatStream(w http.ResponseWriter, r *http.Request, body [
 			writeJSON(w, http.StatusOK, agg)
 		}
 		h.noteChat(a.Provider, a.ID, nil)
-		return true
+		return bridgeServed()
 	}
-	h.lastQoderErr = lastErr
-	return false // 全部 Qoder 账号不可用
+	return bridgeMiss("no_qoder_account",
+		"没有可用的 Qoder 账号（面板-外部积分账号中添加 qoder 凭据后重试）", "Qoder", lastErr)
 }
 
 // qoderResilientStream *http.Request 签名保留兼容（主路径委托 Ctx 版）。
@@ -823,7 +828,7 @@ func (h *Handler) extBalance(provider string) (float64, bool) {
 
 // errOf 把失败原因串转成 error。
 //
-// 桥接内部一直用字符串（最终要拼进 `h.lastXxxErr` 文案给用户看），而上报接口
+// 桥接内部一直用字符串（最终要拼进 503 的失败原因文案给用户看），而上报接口
 // 要 error——两者的形状差只在这一个转换点收口，不用改每个桥接的变量类型。
 func errOf(s string) error {
 	if s == "" {

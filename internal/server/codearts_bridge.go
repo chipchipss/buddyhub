@@ -25,14 +25,16 @@ import (
 	"github.com/chipchipss/buddyhub/internal/upstream"
 )
 
-// codeartsChatStream 转发到 CodeArts。返回 false = 无可用账号。
-func (h *Handler) codeartsChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
-	// 每次进入先清掉上一次的失败原因：它是**上一次请求**的事实，
-	// 挂在字段里跨请求复用就会把「这个模型不存在」讲成「上一个账号的权限问题」。
-	h.lastCodeArtsErr = ""
-
+// codeartsChatStream 转发到 CodeArts。
+//
+// 返回的 outcome：served=已写响应；matched 且未 served = 什么都没写，
+// 调用方按 code/detail/lastErr 报错，**不回落腾讯池**。
+// lastErr 是**本请求**的失败原因（请求级局部量）：每次都从空串起步，
+// 上一次请求的失败原因不会把「这个模型不存在」讲成「上一个账号的权限问题」。
+func (h *Handler) codeartsChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bridgeOutcome {
 	if h.cfg.ExtAccounts == nil {
-		return false
+		return bridgeMiss("no_codearts_account",
+			"没有可用的 CodeArts 账号（面板-添加账号-外部平台-CodeArts 填 AK/SK 后重试）", "CodeArts", "")
 	}
 	var accounts []*extstore.ExtAccount
 	for _, a := range h.cfg.ExtAccounts() {
@@ -41,7 +43,8 @@ func (h *Handler) codeartsChatStream(w http.ResponseWriter, r *http.Request, bod
 		}
 	}
 	if len(accounts) == 0 {
-		return false
+		return bridgeMiss("no_codearts_account",
+			"没有可用的 CodeArts 账号（面板-添加账号-外部平台-CodeArts 填 AK/SK 后重试）", "CodeArts", "")
 	}
 
 	cli := codearts.New()
@@ -77,14 +80,13 @@ func (h *Handler) codeartsChatStream(w http.ResponseWriter, r *http.Request, bod
 			// 却是"这个模型没注册"。实测就是这么把可用户误诊成坏账号的。
 			if codearts.ModelUnregistered(resp.StatusCode, raw) {
 				reason := modelMissingReason(bareModel)
-				h.lastCodeArtsErr = reason
 				log.Printf("codearts-bridge: model=%s 上游未注册（HTTP %d），不换号: %s",
 					bareModel, resp.StatusCode, shorten(string(raw), 160))
 				// 直接回 404 并标记「已服务」：走 dispatch 的 503 会把它说成
 				// "没有可用账号"，那是另一件事。**不**给账号记失败——健康账号
 				// 不该因为用户点了不存在的模型被退避。
 				writeOpenAIError(w, http.StatusNotFound, "model_not_found", reason)
-				return true
+				return bridgeServedWithReason(reason)
 			}
 
 			lastErr = "上游 HTTP " + itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
@@ -95,10 +97,10 @@ func (h *Handler) codeartsChatStream(w http.ResponseWriter, r *http.Request, bod
 
 		log.Printf("codearts-bridge: acct=%s model=%s 建流成功", a.ID, bareModel)
 		h.forwardCodeArts(w, resp, body, bareModel, stream)
-		return true
+		return bridgeServed()
 	}
-	h.lastCodeArtsErr = lastErr
-	return false
+	return bridgeMiss("no_codearts_account",
+		"没有可用的 CodeArts 账号（面板-添加账号-外部平台-CodeArts 填 AK/SK 后重试）", "CodeArts", lastErr)
 }
 
 // modelMissingReason 未注册模型的用户可读原因，带上实测可用的模型名。

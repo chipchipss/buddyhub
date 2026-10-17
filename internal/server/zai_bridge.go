@@ -23,13 +23,34 @@ import (
 	"github.com/chipchipss/buddyhub/internal/upstream"
 )
 
-// ZaiChatStream Z.AI 通道：翻译 → 池化转发 → 反译。返回 false = 无可用账号。
-func (h *Handler) ZaiChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
-	// 先清：那是**上一次请求**的事实，不该挂进本次的失败提示里。
-	h.lastZaiErr = ""
+// ZaiChatStream Z.AI 通道：翻译 → 池化转发 → 反译。
+//
+// 返回的 outcome：served=已写响应；matched 且未 served = 什么都没写，
+// 调用方按 code/detail/lastErr 报错，**不回落腾讯池**。
+// lastErr 是**本请求**的失败原因（请求级局部量，不跨请求共享）。
+//
+// ── 为什么这条必须自己带 lastErr 回来 ─────────────────────────────
+// 它的未 served 路径有两条（未配置账号 / 无可用账号），dispatch 侧要拿
+// 本次的失败原因拼 503 文案（有具体原因时说「通道暂不可用：<原因>」，
+// 没有时才说「配置 schedule.zai 后重试」）。迁移前那两处读的是 Handler
+// 上的共享字段，正是本次竞争修复的对象；现在原因随 outcome 回来，
+// 每个并发请求读到的都是自己的那一条。
+func (h *Handler) ZaiChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bridgeOutcome {
+	const noZaiKeyMsg = "没有可用的 Z.AI / 智谱 通道（配置 schedule.zai 或面板添加账号后重试）"
+	// zaiFail 未 served 的 outcome 组装：文案口径保持迁移前 dispatch 的特例——
+	// 有具体原因时说「Z.AI 通道暂不可用：<原因>」，没有任何凭据线索时才说
+	// 「没有可用的 Z.AI / 智谱 通道」。**不**走 bridgeMiss：那条统一口径
+	// （「池内账号均已尝试并失败」）对 zai 是错的话术——Z.AI 凭据来自 config
+	// 的 schedule.zai 而非账号池，「均已尝试并失败」描述的事在这里不会发生。
+	zaiFail := func(reason string) bridgeOutcome {
+		detail := noZaiKeyMsg
+		if reason != "" {
+			detail = "Z.AI 通道暂不可用：" + reason
+		}
+		return bridgeOutcome{matched: true, code: "no_zai_key", detail: detail, lastErr: reason}
+	}
 	if h.cfg.Zai == nil {
-		h.lastZaiErr = "未配置 Z.AI 账号（面板「自动化 → Z.AI」添加，或 config 的 schedule.zai.zai_keys）"
-		return false
+		return zaiFail("未配置 Z.AI 账号（面板「自动化 → Z.AI」添加，或 config 的 schedule.zai.zai_keys）")
 	}
 
 	// bareModel 仍带路由前缀「zai:」（它是网关侧协议，上游只认裸模型名）。其余桥接
@@ -42,14 +63,14 @@ func (h *Handler) ZaiChatStream(w http.ResponseWriter, r *http.Request, body []b
 	anthBody, model, err := upstream.ZaiTranslateIn(body)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return true
+		return bridgeServed()
 	}
 
 	res, err := h.cfg.Zai.Do(r.Context(), anthBody)
 	if err != nil {
-		h.lastZaiErr = err.Error()
+		// 无可用账号：把本次的原因带回调用方（见函数头注释）。
 		log.Printf("zai-bridge: 无可用账号：%v", err)
-		return false
+		return zaiFail(err.Error())
 	}
 	rc := res.Resp.Body
 	ctype := res.Resp.Header.Get("Content-Type")
@@ -68,31 +89,36 @@ func (h *Handler) ZaiChatStream(w http.ResponseWriter, r *http.Request, body []b
 			// 上游 JSON：包成单帧 SSE（客户端要流式而上游非流式）
 			h.proxyZaiJSONAsSSE(w, rc, model)
 		}
-		return true
+		return bridgeServed()
 	}
 
 	if isSSE {
 		writeJSON(w, http.StatusOK, zaiAggregateSSE(rc, model))
-		return true
+		return bridgeServed()
 	}
 	defer rc.Close()
 	raw, rerr := io.ReadAll(rc)
 	if rerr != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream_read", rerr.Error())
-		return true
+		return bridgeServed()
 	}
 	out, terr := upstream.ZaiTranslateOutJSON(raw, model)
 	if terr != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", terr.Error())
-		return true
+		return bridgeServed()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
-	return true
+	return bridgeServed()
 }
 
 // zaiStatusJSON 供面板/状态接口读取的 Z.AI 通道概览。
+//
+// 注意：这里**不再**回 `last_error`（上次 zai: 对话的失败原因）。那个值原先
+// 挂在 Handler 字段上跨请求共享，是 R-1 数据竞争修复删掉的那批字段之一；
+// 请求级的原因现在只随当次请求的响应透出（见 ZaiChatStream 的 outcome）。
+// 账号级失败原因另有真相源：zai pool 的账号快照（internal/zai 的 LastErr）。
 func (h *Handler) zaiStatusJSON() map[string]any {
 	if h.cfg.Zai == nil {
 		return map[string]any{"configured": false}
@@ -108,9 +134,6 @@ func (h *Handler) zaiStatusJSON() map[string]any {
 			"pool_size":  h.cfg.ZaiCaptcha.PoolSize(),
 			"last_error": h.cfg.ZaiCaptcha.LastError(),
 		}
-	}
-	if h.lastZaiErr != "" {
-		out["last_error"] = h.lastZaiErr
 	}
 	return out
 }

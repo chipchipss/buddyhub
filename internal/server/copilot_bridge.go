@@ -24,13 +24,17 @@ import (
 )
 
 // CopilotChatStream 直接向客户端透传 GitHub Copilot 的 OpenAI 兼容响应。
-// 返回 false = 未找到可用账号（调用方报错，不回落腾讯池）。
-func (h *Handler) copilotChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bool {
-	// 每次进入先清：那是**上一次请求**的事实。上一位用户撞到的失败原因不该
-	// 挂在这一次「账号不存在」的提示里——本次一条上游都没碰过时必须无原因。
-	h.lastCopilotErr = ""
+//
+// 返回的 outcome：served=已写响应；matched 且未 served = 什么都没写，
+// 调用方按 code/detail/lastErr 报错，**不回落腾讯池**。
+//
+// lastErr 是**本请求**的失败原因（请求级局部量）：每次进入都从空串起步，
+// 上一位用户撞到的失败原因不会挂进这一次「账号不存在」的提示里——
+// 本次一条上游都没碰过时必须无原因。
+func (h *Handler) copilotChatStream(w http.ResponseWriter, r *http.Request, body []byte, bareModel string) bridgeOutcome {
 	if h.cfg.ExtAccounts == nil {
-		return false
+		return bridgeMiss("no_copilot_account",
+			"没有可用的 GitHub Copilot 账号（面板-自动化-外部平台中添加后重试）", "GitHub Copilot", "")
 	}
 	mgr := h.extManager
 	var accounts []*extstore.ExtAccount
@@ -40,7 +44,8 @@ func (h *Handler) copilotChatStream(w http.ResponseWriter, r *http.Request, body
 		}
 	}
 	if len(accounts) == 0 {
-		return false
+		return bridgeMiss("no_copilot_account",
+			"没有可用的 GitHub Copilot 账号（面板-自动化-外部平台中添加后重试）", "GitHub Copilot", "")
 	}
 
 	lastErr := ""
@@ -104,10 +109,9 @@ func (h *Handler) copilotChatStream(w http.ResponseWriter, r *http.Request, body
 			// 记失败，直接把「哪个模型能用」讲清楚。
 			if copilot.ModelUnsupported(resp.StatusCode, raw) {
 				reason := copilotModelMissingReason(bareModel, len(h.copilotCatalog()))
-				h.lastCopilotErr = reason
 				log.Printf("copilot-bridge: model=%s 上游不支持（HTTP %d），不换号: %s", bareModel, resp.StatusCode, shorten(string(raw), 200))
 				writeOpenAIError(w, http.StatusNotFound, "model_not_found", reason)
-				return true
+				return bridgeServedWithReason(reason)
 			}
 			lastErr = "上游 HTTP " + strconv.Itoa(resp.StatusCode) + "：" + shorten(string(raw), 200)
 			h.noteChat(a.Provider, a.ID, errOf(lastErr))
@@ -117,10 +121,10 @@ func (h *Handler) copilotChatStream(w http.ResponseWriter, r *http.Request, body
 
 		log.Printf("copilot-bridge: acct=%s model=%s 建流成功", a.ID, bareModel)
 		h.passThroughCopilot(w, resp, h.clientWantsStream(body))
-		return true
+		return bridgeServed()
 	}
-	h.lastCopilotErr = lastErr
-	return false // 全部 Copilot 账号不可用
+	return bridgeMiss("no_copilot_account",
+		"没有可用的 GitHub Copilot 账号（面板-自动化-外部平台中添加后重试）", "GitHub Copilot", lastErr)
 }
 
 // passThroughCopilot 原样透传上游响应（上游即 OpenAI 格式，无需翻译）。

@@ -535,11 +535,14 @@ func TestCopilotModelUnsupportedNamesModelAndSparesAccount(t *testing.T) {
 	}
 }
 
-// 桥接进入即清 last*Err：本次一条上游都没碰过时，503 里不许出现上一次的原因。
+// 本请求一条上游都没碰过时，503 里不许出现任何陈旧原因。
+//
+// 迁移前这条断言的是「进入桥接即清 Handler 字段」；现在失败原因本就是
+// 请求级局部量（每次调用新建 bridgeOutcome），没有跨请求的残留可清——
+// 断言照旧有效，且比迁移前更强（并发请求之间也互不可见）。
 func TestCopilotStaleReasonClearedPerRequest(t *testing.T) {
 	up := &copilotUpstream{respond: func(string, int) (int, string, string) { return 200, "application/json", "{}" }}
 	h, _, _ := newCopilotHandler(t, up) // 无账号
-	h.lastCopilotErr = "上一次请求留下的原因"
 
 	w := postCopilot(t, h, "copilot:gpt-4o", `{"model":"copilot:gpt-4o","messages":[]}`)
 	if w.Code != http.StatusServiceUnavailable {
